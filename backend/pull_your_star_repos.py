@@ -7,16 +7,27 @@ from dotenv import load_dotenv
 # Load environment variables from the root directory
 load_dotenv(Path(__file__).parent.parent / '.env')
 
+def get_env_var(var_name, fallback_var_name=None):
+    """
+    Get environment variable with fallback name support.
+    This allows support for both local dev (GITHUB_*) and CI (GH_*) environment variables.
+    """
+    value = os.getenv(var_name)
+    if not value and fallback_var_name:
+        value = os.getenv(fallback_var_name)
+    return value
+
 def get_starred_repos():
     """
     Fetch basic information about starred repositories.
     Uses environment variables for configuration.
     """
-    github_username = os.getenv('GITHUB_USERNAME')
-    token = os.getenv('GITHUB_TOKEN')
+    # Try both GITHUB_USERNAME and GH_USERNAME
+    github_username = get_env_var('GITHUB_USERNAME', 'GH_USERNAME')
+    token = get_env_var('GITHUB_TOKEN', 'GH_PAT')
     
     if not github_username:
-        raise ValueError("GITHUB_USERNAME not found in environment variables")
+        raise ValueError("GitHub username not found in environment variables (GITHUB_USERNAME or GH_USERNAME)")
     
     base_url = f"https://api.github.com/users/{github_username}/starred"
     headers = {
@@ -24,7 +35,7 @@ def get_starred_repos():
     }
     
     if token:
-        headers["Authorization"] = f"Bearer {token}"  # Updated to use Bearer token
+        headers["Authorization"] = f"Bearer {token}"
     
     starred_repos = []
     page = 1
