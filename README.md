@@ -33,15 +33,20 @@ A beautifully crafted dashboard for exploring and analyzing GitHub repositories 
   - Responsive across all devices
   - Dark mode support
 
+- **Automated Updates**
+  - Daily repository data synchronization
+  - GitHub Actions workflow integration
+  - Manual update triggers
+
 ## Quick Start
 
 ```bash
 # Clone the repository
-git clone https://github.com/username/repo-dashboard.git
+git clone https://github.com/lethanhson9901/repo-dashboard.git
 cd repo-dashboard
 
 # Install Python dependencies
-pip install -r requirements.txt
+pip install requests python-dotenv
 
 # Install Node.js dependencies
 npm install
@@ -50,7 +55,7 @@ npm install
 cp .env.example .env
 
 # Fetch repository data
-python scripts/pull_star_repos.py
+python backend/pull_your_star_repos.py
 
 # Start development server
 npm run dev
@@ -82,7 +87,7 @@ npm run dev
 
    Install Python dependencies:
    ```bash
-   pip install -r requirements.txt
+   pip install requests python-dotenv
    ```
 
 2. **Node.js Setup**
@@ -104,13 +109,21 @@ npm run dev
    GITHUB_USERNAME=your_username
    GITHUB_TOKEN=your_token
    OUTPUT_FILE=src/data/repos.json
+   GITHUB_API_VERSION=2022-11-28
+   ITEMS_PER_PAGE=100
    ```
 
 4. **Data Synchronization**
 
    Run the repository fetch script:
    ```bash
-   python scripts/pull_star_repos.py
+   python backend/pull_your_star_repos.py
+   ```
+
+   Or commit with the update trigger:
+   ```bash
+   git commit -m "[update-repos] Updating repository data"
+   git push
    ```
 
 5. **Development**
@@ -126,16 +139,38 @@ npm run dev
    npm run start
    ```
 
+### Automated Updates
+
+The repository includes a GitHub Actions workflow that automatically updates the repository data:
+
+1. **Daily Updates**
+   - Runs automatically at 00:00 UTC
+   - Fetches fresh repository data
+   - Deploys updated dashboard
+
+2. **Manual Updates**
+   ```bash
+   # Trigger update with commit
+   git commit -m "[update-repos] Your commit message"
+   git push
+
+   # Regular commit (no update)
+   git commit -m "Your commit message"
+   git push
+   ```
+
+3. **Manual Trigger**
+   - Go to Actions tab on GitHub
+   - Select "Update and Deploy to GitHub Pages"
+   - Click "Run workflow"
 
 ### Dependencies
 
 **Python Packages**
 | Package | Version | Description |
 |---------|---------|-------------|
-| requests | 2.31.0 | HTTP requests library |
-| python-dotenv | 1.0.0 | Environment variable management |
-| tqdm | 4.66.1 | Progress bars for data fetching |
-| python-dateutil | 2.8.2 | Date parsing utilities |
+| requests | latest | HTTP requests library |
+| python-dotenv | latest | Environment variable management |
 
 ### Configuration Options
 
@@ -144,6 +179,8 @@ npm run dev
 | `GITHUB_USERNAME` | Your GitHub username | - |
 | `GITHUB_TOKEN` | Personal access token | - |
 | `OUTPUT_FILE` | Data output location | `src/data/repos.json` |
+| `GITHUB_API_VERSION` | GitHub API version | `2022-11-28` |
+| `ITEMS_PER_PAGE` | Items per API request | `100` |
 
 ## Contributing
 
@@ -153,8 +190,11 @@ We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) f
 # Create a branch
 git checkout -b feature/amazing-feature
 
-# Commit changes
-git commit -m 'Add amazing feature'
+# Commit changes with update
+git commit -m '[update-repos] Add amazing feature'
+
+# Commit changes without update
+git commit -m 'Update documentation'
 
 # Push to branch
 git push origin feature/amazing-feature
@@ -166,9 +206,9 @@ Released under the MIT License. See [LICENSE](LICENSE) for details.
 
 ## Support
 
-- 📫 [Open an issue](https://github.com/username/repo-dashboard/issues)
+- 📫 [Open an issue](https://github.com/lethanhson9901/repo-dashboard/issues)
 - 🌟 Star the project
-- 🐦 Follow on [Twitter](https://twitter.com/username)
+- 🐦 Follow on [Twitter](https://twitter.com/lethanhson9901)
 
 ---
 
@@ -176,6 +216,6 @@ Released under the MIT License. See [LICENSE](LICENSE) for details.
 
 **[Website](https://your-website.com)** • **[Documentation](docs)** • **[Report Bug](issues)** • **[Request Feature](issues)**
 
-Made with ❤️ by [Your Name](https://github.com/username)
+Made with ❤️ by [Le Thanh Son](https://github.com/lethanhson9901)
 
 </div>
