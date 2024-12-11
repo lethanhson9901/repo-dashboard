@@ -106,8 +106,8 @@ npm run dev
 
    Configure your environment:
    ```env
-   GITHUB_USERNAME=your_username
-   GITHUB_TOKEN=your_token
+   GH_USERNAME=your_username
+   GH_PAT=your_personal_access_token
    OUTPUT_FILE=src/data/repos.json
    GITHUB_API_VERSION=2022-11-28
    ITEMS_PER_PAGE=100
@@ -176,8 +176,8 @@ The repository includes a GitHub Actions workflow that automatically updates the
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `GITHUB_USERNAME` | Your GitHub username | - |
-| `GITHUB_TOKEN` | Personal access token | - |
+| `GH_USERNAME` | Your GitHub username | - |
+| `GH_PAT` | GitHub Personal Access Token | - |
 | `OUTPUT_FILE` | Data output location | `src/data/repos.json` |
 | `GITHUB_API_VERSION` | GitHub API version | `2022-11-28` |
 | `ITEMS_PER_PAGE` | Items per API request | `100` |
