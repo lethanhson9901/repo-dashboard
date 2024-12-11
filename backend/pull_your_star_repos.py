@@ -1,10 +1,11 @@
 import requests
 import json
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
+# Load environment variables from the root directory
+load_dotenv(Path(__file__).parent.parent / '.env')
 
 def get_starred_repos():
     """
@@ -23,15 +24,20 @@ def get_starred_repos():
     }
     
     if token:
-        headers["Authorization"] = f"token {token}"
+        headers["Authorization"] = f"Bearer {token}"  # Updated to use Bearer token
     
     starred_repos = []
     page = 1
+    per_page = int(os.getenv('ITEMS_PER_PAGE', 100))
+    api_version = os.getenv('GITHUB_API_VERSION')
+    
+    if api_version:
+        headers["X-GitHub-Api-Version"] = api_version
     
     while True:
         params = {
             "page": page,
-            "per_page": 100
+            "per_page": per_page
         }
         
         try:
@@ -70,7 +76,12 @@ def get_starred_repos():
 def save_to_file(repos):
     """Save the repositories data to a JSON file"""
     output_file = os.getenv('OUTPUT_FILE', 'starred_repos.json')
-    with open(output_file, "w", encoding="utf-8") as f:
+    
+    # Create the directory structure if it doesn't exist
+    output_path = Path(output_file)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    with open(output_path, "w", encoding="utf-8") as f:
         json.dump(repos, f, indent=2)
 
 def print_summary(repos):
