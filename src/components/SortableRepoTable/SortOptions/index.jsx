@@ -1,5 +1,5 @@
 import React from 'react';
-import { ArrowUp, ArrowDown } from 'lucide-react';
+import { ArrowUp, ArrowDown, RotateCcw } from 'lucide-react';
 
 const SortOptions = ({ sortConfig, onSort }) => {
   const sortButtons = [
@@ -33,6 +33,17 @@ const SortOptions = ({ sortConfig, onSort }) => {
             </div>
           </button>
         ))}
+        <button 
+          onClick={() => onSort(null)}
+          className={`px-2 py-1 rounded transition-colors hover:bg-gray-200 ${
+            !sortConfig.key ? 'bg-blue-100 text-blue-700' : ''
+          }`}
+        >
+          <div className="flex items-center gap-1">
+            Default
+            <RotateCcw className="h-3 w-3" />
+          </div>
+        </button>
       </div>
     </div>
   );
