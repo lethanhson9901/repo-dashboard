@@ -1,7 +1,8 @@
-// src/App.js
 import React, { Suspense, useMemo, useState, useEffect } from 'react';
 import SortableRepoTable from './components/SortableRepoTable';
 import Analytics from './components/Analytics';
+import Reddit from './components/Reddit';
+import { ChevronDown } from 'lucide-react';
 import reposData from './data/repos.json';
 
 // Error Boundary Component
@@ -59,34 +60,54 @@ const validateRepoData = (data) => {
 };
 
 function App() {
-  // Initialize state with localStorage value
   const [currentView, setCurrentView] = useState(() => {
     return localStorage.getItem('preferredView') || 'table'
   });
   const [isLoading, setIsLoading] = useState(false);
+  const [showSocialDropdown, setShowSocialDropdown] = useState(false);
   
-  // Validate and memoize the repository data
   const validatedData = useMemo(() => validateRepoData(reposData), []);
 
-  // Check URL parameters on mount
+  // Handle clicks outside of dropdown to close it
   useEffect(() => {
-    const view = new URLSearchParams(window.location.search).get('view');
-    if (view === 'analytics' || view === 'table') {
+    const handleClickOutside = (event) => {
+      if (!event.target.closest('.social-dropdown')) {
+        setShowSocialDropdown(false);
+      }
+    };
+
+    document.addEventListener('click', handleClickOutside);
+    return () => document.removeEventListener('click', handleClickOutside);
+  }, []);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const view = params.get('view');
+    if (view === 'analytics' || view === 'table' || view?.startsWith('social/')) {
       setCurrentView(view);
     }
   }, []);
 
-  // Handle view changes
   const handleViewChange = async (view) => {
     setIsLoading(true);
     setCurrentView(view);
     localStorage.setItem('preferredView', view);
-    window.history.pushState({}, '', `?view=${view}`);
+    
+    if (view.startsWith('social/')) {
+      window.location.href = `${import.meta.env.BASE_URL}${view}`;
+    } else {
+      window.history.pushState({}, '', `?view=${view}`);
+    }
+    
     await new Promise(resolve => setTimeout(resolve, 100));
     setIsLoading(false);
   };
 
-  // Show error state if no valid data
+  const handleSocialClick = (platform) => {
+    setShowSocialDropdown(false);
+    handleViewChange(`social/${platform}`);
+  };
+
   if (validatedData.length === 0) {
     return (
       <div className="min-h-screen bg-gray-100 flex items-center justify-center px-4">
@@ -125,6 +146,52 @@ function App() {
               >
                 Analytics
               </button>
+              
+              {/* Social Dropdown */}
+              <div className="relative social-dropdown">
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setShowSocialDropdown(!showSocialDropdown);
+                  }}
+                  className={`px-4 py-2 text-sm font-medium rounded-md transition-colors flex items-center space-x-1 ${
+                    currentView.startsWith('social/')
+                      ? 'bg-blue-500 text-white'
+                      : 'text-gray-500 hover:text-gray-700'
+                  }`}
+                >
+                  <span>Social</span>
+                  <ChevronDown className="w-4 h-4" />
+                </button>
+                
+                {showSocialDropdown && (
+                  <div className="absolute right-0 mt-2 w-48 rounded-md shadow-lg bg-white ring-1 ring-black ring-opacity-5 z-10">
+                    <div className="py-1" role="menu" aria-orientation="vertical">
+                      <button
+                        onClick={() => handleSocialClick('reddit')}
+                        className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 w-full text-left"
+                        role="menuitem"
+                      >
+                        Reddit
+                      </button>
+                      <button
+                        onClick={() => handleSocialClick('linkedin')}
+                        className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 w-full text-left"
+                        role="menuitem"
+                      >
+                        LinkedIn
+                      </button>
+                      <button
+                        onClick={() => handleSocialClick('x')}
+                        className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 w-full text-left"
+                        role="menuitem"
+                      >
+                        X (Twitter)
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
             </nav>
           </div>
 
@@ -133,13 +200,27 @@ function App() {
             {isLoading ? (
               <LoadingFallback />
             ) : (
-              currentView === 'table' ? (
-                <SortableRepoTable initialData={validatedData} />
-              ) : (
-                <div className="bg-white rounded-xl shadow-lg p-6">
-                  <Analytics data={validatedData} />
-                </div>
-              )
+              <>
+                {currentView === 'table' && <SortableRepoTable initialData={validatedData} />}
+                {currentView === 'analytics' && (
+                  <div className="bg-white rounded-xl shadow-lg p-6">
+                    <Analytics data={validatedData} />
+                  </div>
+                )}
+                {currentView === 'social/reddit' && <Reddit />}
+                {currentView === 'social/linkedin' && (
+                  <div className="bg-white rounded-xl shadow-lg p-6">
+                    <h2 className="text-2xl font-bold mb-4">LinkedIn Integration</h2>
+                    <p>LinkedIn content goes here</p>
+                  </div>
+                )}
+                {currentView === 'social/x' && (
+                  <div className="bg-white rounded-xl shadow-lg p-6">
+                    <h2 className="text-2xl font-bold mb-4">X (Twitter) Integration</h2>
+                    <p>X content goes here</p>
+                  </div>
+                )}
+              </>
             )}
           </Suspense>
         </div>

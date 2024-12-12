@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { ArrowUp, ArrowDown, RotateCcw } from 'lucide-react';
 
 const SortOptions = ({ sortConfig, onSort }) => {
@@ -8,6 +8,13 @@ const SortOptions = ({ sortConfig, onSort }) => {
     { key: 'name', label: 'Name' },
     { key: 'last_updated', label: 'Last Updated' }
   ];
+
+  // Set default sorting when component mounts
+  useEffect(() => {
+    if (!sortConfig.key) {
+      onSort(null);
+    }
+  }, []); // Empty dependency array ensures this runs only once on mount
 
   return (
     <div className="p-4 border-b bg-gray-50">
