@@ -85,6 +85,7 @@ function App() {
     const view = params.get('view');
     if (view === 'analytics' || view === 'table' || view?.startsWith('social/')) {
       setCurrentView(view);
+      window.history.replaceState({}, '', `${import.meta.env.BASE_URL}?view=${view}`);
     }
   }, []);
 
