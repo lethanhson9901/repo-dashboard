@@ -1,3 +1,5 @@
+// src/components/Reddit/index.jsx
+
 import React, { useState, useEffect, useMemo } from 'react';
 import { Search, ChevronDown, ChevronUp, MessageCircle, ThumbsUp, Calendar, Link as LinkIcon, User } from 'lucide-react';
 
