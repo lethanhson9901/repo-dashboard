@@ -170,7 +170,7 @@ function App() {
                     : 'text-gray-500 hover:text-gray-700'
                 }`}
               >
-                Table View
+                Github Stars
               </button>
               <button
                 onClick={() => handleViewChange('analytics')}
