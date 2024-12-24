@@ -1,8 +1,10 @@
 import React, { Suspense, useMemo, useState, useEffect } from 'react';
+import { BrowserRouter, Routes, Route, useNavigate, useLocation } from 'react-router-dom';
 import SortableRepoTable from './components/SortableRepoTable';
 import Analytics from './components/Analytics';
 import Reddit from './components/Reddit';
-import { ChevronDown } from 'lucide-react';
+import ChatInterface from './components/ChatInterface';
+import { ChevronDown, MessageSquare } from 'lucide-react';
 import reposData from './data/repos.json';
 
 // Error Boundary Component
@@ -59,16 +61,46 @@ const validateRepoData = (data) => {
   }));
 };
 
+// Main content wrapper component
+const MainContent = ({ currentView, validatedData, isLoading }) => {
+  if (isLoading) {
+    return <LoadingFallback />;
+  }
+
+  return (
+    <>
+      {currentView === 'table' && <SortableRepoTable initialData={validatedData} />}
+      {currentView === 'analytics' && (
+        <div className="bg-white rounded-xl shadow-lg p-6">
+          <Analytics data={validatedData} />
+        </div>
+      )}
+      {currentView === 'social/reddit' && <Reddit />}
+      {currentView === 'social/linkedin' && (
+        <div className="bg-white rounded-xl shadow-lg p-6">
+          <h2 className="text-2xl font-bold mb-4">LinkedIn Integration</h2>
+          <p>LinkedIn content goes here</p>
+        </div>
+      )}
+      {currentView === 'social/x' && (
+        <div className="bg-white rounded-xl shadow-lg p-6">
+          <h2 className="text-2xl font-bold mb-4">X (Twitter) Integration</h2>
+          <p>X content goes here</p>
+        </div>
+      )}
+    </>
+  );
+};
+
 function App() {
   const [currentView, setCurrentView] = useState(() => {
     return localStorage.getItem('preferredView') || 'table'
   });
   const [isLoading, setIsLoading] = useState(false);
   const [showSocialDropdown, setShowSocialDropdown] = useState(false);
-  
+
   const validatedData = useMemo(() => validateRepoData(reposData), []);
 
-  // Handle clicks outside of dropdown to close it
   useEffect(() => {
     const handleClickOutside = (event) => {
       if (!event.target.closest('.social-dropdown')) {
@@ -93,13 +125,13 @@ function App() {
     setIsLoading(true);
     setCurrentView(view);
     localStorage.setItem('preferredView', view);
-    
+
     if (view.startsWith('social/')) {
       window.location.href = `${import.meta.env.BASE_URL}${view}`;
     } else {
       window.history.pushState({}, '', `?view=${view}`);
     }
-    
+
     await new Promise(resolve => setTimeout(resolve, 100));
     setIsLoading(false);
   };
@@ -120,8 +152,11 @@ function App() {
     );
   }
 
-  return (
-    <ErrorBoundary>
+  const AppContent = () => {
+    const location = useLocation();
+    const navigate = useNavigate();
+
+    return (
       <div className="min-h-screen bg-gray-100 py-12 px-4 sm:px-6 lg:px-8">
         <div className="max-w-7xl mx-auto">
           {/* Navigation Tabs */}
@@ -147,7 +182,7 @@ function App() {
               >
                 Analytics
               </button>
-              
+
               {/* Social Dropdown */}
               <div className="relative social-dropdown">
                 <button
@@ -164,7 +199,7 @@ function App() {
                   <span>Social</span>
                   <ChevronDown className="w-4 h-4" />
                 </button>
-                
+
                 {showSocialDropdown && (
                   <div className="absolute right-0 mt-2 w-48 rounded-md shadow-lg bg-white ring-1 ring-black ring-opacity-5 z-10">
                     <div className="py-1" role="menu" aria-orientation="vertical">
@@ -193,39 +228,46 @@ function App() {
                   </div>
                 )}
               </div>
+
+              {/* Chat Button */}
+              <button
+                onClick={() => navigate('/chat')}
+                className={`px-4 py-2 text-sm font-medium rounded-md transition-colors flex items-center space-x-1 ${
+                  location.pathname === '/chat'
+                    ? 'bg-blue-500 text-white'
+                    : 'text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                <MessageSquare className="w-4 h-4 mr-1" />
+                <span>Chat</span>
+              </button>
             </nav>
           </div>
 
           {/* Main Content */}
           <Suspense fallback={<LoadingFallback />}>
-            {isLoading ? (
-              <LoadingFallback />
+            {location.pathname === '/chat' ? (
+              <ChatInterface />
             ) : (
-              <>
-                {currentView === 'table' && <SortableRepoTable initialData={validatedData} />}
-                {currentView === 'analytics' && (
-                  <div className="bg-white rounded-xl shadow-lg p-6">
-                    <Analytics data={validatedData} />
-                  </div>
-                )}
-                {currentView === 'social/reddit' && <Reddit />}
-                {currentView === 'social/linkedin' && (
-                  <div className="bg-white rounded-xl shadow-lg p-6">
-                    <h2 className="text-2xl font-bold mb-4">LinkedIn Integration</h2>
-                    <p>LinkedIn content goes here</p>
-                  </div>
-                )}
-                {currentView === 'social/x' && (
-                  <div className="bg-white rounded-xl shadow-lg p-6">
-                    <h2 className="text-2xl font-bold mb-4">X (Twitter) Integration</h2>
-                    <p>X content goes here</p>
-                  </div>
-                )}
-              </>
+              <MainContent
+                currentView={currentView}
+                validatedData={validatedData}
+                isLoading={isLoading}
+              />
             )}
           </Suspense>
         </div>
       </div>
+    );
+  };
+
+  return (
+    <ErrorBoundary>
+      <BrowserRouter basename="/repo-dashboard">
+        <Routes>
+          <Route path="/*" element={<AppContent />} />
+        </Routes>
+      </BrowserRouter>
     </ErrorBoundary>
   );
 }
