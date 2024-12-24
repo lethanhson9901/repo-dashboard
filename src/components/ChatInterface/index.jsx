@@ -85,7 +85,8 @@ const ChatInterface = () => {
     try {
       const response = await fetch('https://llm.tsonstack.dev/chat', {
         method: 'POST',
-        credentials: 'include',  // Add this line
+        // Remove this line:
+        // credentials: 'include',
         headers: {
           'Content-Type': 'application/json',
           'X-API-Key': apiKey
