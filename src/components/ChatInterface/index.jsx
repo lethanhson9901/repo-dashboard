@@ -83,9 +83,9 @@ const ChatInterface = () => {
     setIsLoading(true);
 
     try {
-      const response = await fetch('https://ec2-13-229-209-181.ap-southeast-1.compute.amazonaws.com/chat', {
+      const response = await fetch('https://llm.tsonstack.dev/chat', {
         method: 'POST',
-        // credentials: 'include',  // Add this line
+        credentials: 'include',  // Add this line
         headers: {
           'Content-Type': 'application/json',
           'X-API-Key': apiKey
