@@ -126,10 +126,17 @@ function App() {
     setCurrentView(view);
     localStorage.setItem('preferredView', view);
 
+    const baseUrl = import.meta.env.BASE_URL || '/repo-dashboard';
+
     if (view.startsWith('social/')) {
-      window.location.href = `${import.meta.env.BASE_URL}${view}`;
+      window.location.href = `${baseUrl}${view}`;
     } else {
-      window.history.pushState({}, '', `?view=${view}`);
+      // Check if we're on the chat route
+      if (window.location.pathname.includes('/chat')) {
+        window.location.href = `${baseUrl}?view=${view}`;
+      } else {
+        window.history.pushState({}, '', `?view=${view}`);
+      }
     }
 
     await new Promise(resolve => setTimeout(resolve, 100));
@@ -155,6 +162,10 @@ function App() {
   const AppContent = () => {
     const location = useLocation();
     const navigate = useNavigate();
+
+    const handleChatClick = () => {
+      navigate('/chat');
+    };
 
     return (
       <div className="min-h-screen bg-gray-100 py-12 px-4 sm:px-6 lg:px-8">
@@ -231,7 +242,7 @@ function App() {
 
               {/* Chat Button */}
               <button
-                onClick={() => navigate('/chat')}
+                onClick={handleChatClick}
                 className={`px-4 py-2 text-sm font-medium rounded-md transition-colors flex items-center space-x-1 ${
                   location.pathname === '/chat'
                     ? 'bg-blue-500 text-white'
