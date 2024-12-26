@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 import datetime
 
+
 def extract_code_to_markdown(src_dir, output_file):
     """
     Extract all code files from the specified directory and its subdirectories,
