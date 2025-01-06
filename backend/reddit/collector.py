@@ -37,7 +37,7 @@ class RedditContentCollector:
         )
         
         self.comment_depth = comment_depth
-        self.output_dir = Path(output_dir or "src/data/reddit")
+        self.output_dir = Path(output_dir or "./src/data/reddit")
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.data: CollectorData = self._load_existing_data()
 
