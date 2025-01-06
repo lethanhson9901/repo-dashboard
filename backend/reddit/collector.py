@@ -12,6 +12,7 @@ from models import *
 
 logger = logging.getLogger(__name__)
 
+
 class RedditContentCollector:
     """Collect and process Reddit user content."""
     
