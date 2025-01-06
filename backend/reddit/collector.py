@@ -165,6 +165,7 @@ class RedditContentCollector:
             })
 
             output_path = self.output_dir / "reddit_content.json"
+            print("data is written to: ", output_path)
             with output_path.open("w", encoding="utf-8") as f:
                 json.dump(self.data, f, ensure_ascii=False, indent=2)
 
