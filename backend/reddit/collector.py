@@ -155,25 +155,6 @@ class RedditContentCollector:
 
         return stats
 
-    # def generate_web_data(self) -> None:
-    #     """Generate and save JSON files."""
-    #     try:
-    #         self.data["metadata"].update({
-    #             "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-    #             "total_saved": len(self.data["saved"]),
-    #             "total_upvoted": len(self.data["upvoted"]),
-    #             "subreddits": self.get_subreddit_stats()
-    #         })
-
-    #         output_path = self.output_dir / "reddit_content.json"
-    #         print("data is written to: ", output_path)
-    #         with output_path.open("w", encoding="utf-8") as f:
-    #             json.dump(self.data, f, ensure_ascii=False, indent=2)
-
-    #     except Exception as e:
-    #         logger.error(f"Error generating web data: {e}")
-    #         raise
-    
     def generate_web_data(self) -> None:
         """Generate and save JSON files."""
         try:
@@ -183,15 +164,14 @@ class RedditContentCollector:
                 "total_upvoted": len(self.data["upvoted"]),
                 "subreddits": self.get_subreddit_stats()
             })
-            # Define the explicit relative path
-            output_path = Path("./src/data/reddit/reddit_content.json")
-            
-            # Create directories if they don't exist
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            
-            print("data is written to:", output_path)
+
+            output_path = self.output_dir / "reddit_content.json"
+            print("data is written to: ", output_path)
             with output_path.open("w", encoding="utf-8") as f:
                 json.dump(self.data, f, ensure_ascii=False, indent=2)
+
         except Exception as e:
             logger.error(f"Error generating web data: {e}")
             raise
+    
+
