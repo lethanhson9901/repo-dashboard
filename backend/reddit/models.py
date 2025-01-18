@@ -1,5 +1,5 @@
 # models.py
-
+from datetime import datetime
 from typing import TypedDict, List, Dict, Union
 from enum import Enum
 
@@ -48,3 +48,30 @@ class CollectorData(TypedDict):
     saved: List[RedditContent]
     upvoted: List[RedditContent]
     metadata: Metadata
+    
+
+class TimeFilter(str, Enum):
+    """Enum for time filtering options."""
+    DAY = "day"
+    WEEK = "week"
+    MONTH = "month"
+    YEAR = "year"
+
+class NewsContent(TypedDict):
+    """Type definition for news content with enhanced details."""
+    id: str
+    title: str
+    subreddit: str
+    url: str
+    author: str
+    created_utc: str
+    score: int
+    num_comments: int
+    upvote_ratio: float
+    text: str                    # Full post content
+    is_original_content: bool
+    link_flair_text: Union[str, None]
+    permalink: str               # Full Reddit permalink
+    domain: str                 # Source domain for links
+    is_self: bool              # Whether it's a self post
+    comments: List[CommentData] # Full comment thread
