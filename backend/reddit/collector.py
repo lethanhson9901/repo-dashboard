@@ -175,3 +175,139 @@ class RedditContentCollector:
             raise
     
 
+    def get_community_news(
+        self,
+        time_filter: TimeFilter = TimeFilter.DAY,
+        min_score: int = 10,
+        limit: int = 500,
+        comment_depth: int = 3  # Added parameter for comment depth
+    ) -> List[NewsContent]:
+        """
+        Fetch detailed news from joined communities sorted by score.
+        
+        Args:
+            time_filter (TimeFilter): Time filter for posts (day/week/month)
+            min_score (int): Minimum score threshold for posts
+            limit (int): Maximum number of posts to fetch
+            comment_depth (int): How deep to go in comment threads
+            
+        Returns:
+            List[NewsContent]: List of detailed news posts
+        """
+        news_items: List[NewsContent] = []
+        
+        try:
+            time_mapping = {
+                TimeFilter.DAY: "day",
+                TimeFilter.WEEK: "week",
+                TimeFilter.MONTH: "month"
+            }
+            
+            # Get subscribed subreddits
+            subscribed = list(self.reddit.user.subreddits(limit=None))
+            logger.info(f"Found {len(subscribed)} subscribed subreddits")
+            
+            for subreddit in subscribed:
+                try:
+                    logger.info(f"Fetching from r/{subreddit}")
+                    top_posts = subreddit.top(
+                        time_filter=time_mapping[time_filter],
+                        limit=limit
+                    )
+                    
+                    for post in top_posts:
+                        if post.score >= min_score:
+                            # Process comments
+                            comments: List[CommentData] = []
+                            post.comments.replace_more(limit=0)  # Remove MoreComments objects
+                            
+                            def process_comment(comment, depth=0) -> CommentData:
+                                if depth >= comment_depth or not hasattr(comment, 'body'):
+                                    return None
+                                    
+                                replies = []
+                                if hasattr(comment, 'replies'):
+                                    for reply in comment.replies:
+                                        reply_data = process_comment(reply, depth + 1)
+                                        if reply_data:
+                                            replies.append(reply_data)
+                                
+                                return {
+                                    "id": comment.id,
+                                    "author": str(comment.author) if comment.author else "[deleted]",
+                                    "text": comment.body,
+                                    "score": comment.score,
+                                    "created_utc": datetime.fromtimestamp(comment.created_utc).strftime("%Y-%m-%d %H:%M:%S"),
+                                    "is_submitter": comment.is_submitter,
+                                    # "subreddit": str(comment.subreddit),
+                                    # "permalink": f"https://reddit.com{comment.permalink}",
+                                    "replies": replies
+                                }
+                            
+                            # Process top-level comments
+                            for comment in post.comments:
+                                comment_data = process_comment(comment)
+                                if comment_data:
+                                    comments.append(comment_data)
+                            
+                            # Create news item with enhanced details
+                            news_item: NewsContent = {
+                                "id": post.id,
+                                "title": post.title,
+                                "subreddit": str(post.subreddit),
+                                "url": post.url,
+                                "author": str(post.author) if post.author else "[deleted]",
+                                "created_utc": datetime.fromtimestamp(post.created_utc).strftime("%Y-%m-%d %H:%M:%S"),
+                                "score": post.score,
+                                "num_comments": post.num_comments,
+                                "upvote_ratio": post.upvote_ratio,
+                                "text": post.selftext if post.is_self else "[External Link]",
+                                "is_original_content": post.is_original_content,
+                                "link_flair_text": post.link_flair_text,
+                                "permalink": f"https://reddit.com{post.permalink}",
+                                "domain": post.domain,
+                                "is_self": post.is_self,
+                                "comments": comments
+                            }
+                            news_items.append(news_item)
+                            
+                except Exception as e:
+                    logger.error(f"Error fetching from subreddit {subreddit}: {e}")
+                    continue
+            
+            # Sort all collected news items by score in descending order
+            news_items.sort(key=lambda x: x["score"], reverse=True)
+            
+        except Exception as e:
+            logger.error(f"Error fetching community news: {e}")
+            
+        return news_items
+
+    def save_community_news(self, news_items: List[NewsContent], time_filter: TimeFilter) -> None:
+        """
+        Save fetched news items to a JSON file.
+        
+        Args:
+            news_items (List[NewsContent]): List of news items to save
+            time_filter (TimeFilter): Time filter used to fetch the news
+        """
+        try:
+            output_file = self.output_dir / f"community_news_{time_filter}.json"
+            
+            data = {
+                "metadata": {
+                    "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "time_filter": time_filter,
+                    "total_items": len(news_items)
+                },
+                "items": news_items
+            }
+            
+            with output_file.open("w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+                
+            logger.info(f"Saved {len(news_items)} news items to {output_file}")
+            
+        except Exception as e:
+            logger.error(f"Error saving community news: {e}")
+            raise
