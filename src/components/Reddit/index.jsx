@@ -1,29 +1,49 @@
-// src/components/Reddit/index.jsx
-
 import React, { useState, useEffect, useMemo } from 'react';
-import { Search, ChevronDown, ChevronUp, MessageCircle, ThumbsUp, Calendar, Link as LinkIcon, User } from 'lucide-react';
+import { Search, ChevronDown, ChevronUp, MessageCircle, ThumbsUp, Calendar, ExternalLink, User } from 'lucide-react';
+
+const POSTS_PER_PAGE = 20;
 
 const Reddit = () => {
   const [posts, setPosts] = useState([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [expandedPost, setExpandedPost] = useState(null);
-  const [showType, setShowType] = useState('saved'); // 'saved' or 'upvoted'
-  const [sortBy, setSortBy] = useState('date'); // 'date', 'score', 'comments'
+  const [showType, setShowType] = useState('saved');
+  const [sortBy, setSortBy] = useState('date');
   const [metadata, setMetadata] = useState(null);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    // In a real app, you might want to handle loading and error states
     const fetchData = async () => {
+      setIsLoading(true);
       try {
-        const data = await import('../../data/reddit/reddit_content.json');
-        setPosts(data[showType] || []);
-        setMetadata(data.metadata);
+        let data;
+        if (showType === 'news') {
+          data = await import('../../data/reddit/community_news_TimeFilter.DAY.json');
+          setPosts(data.items || []);
+          setMetadata({
+            ...data.metadata,
+            total_news: data.metadata?.total_items || 0
+          });
+        } else {
+          data = await import('../../data/reddit/reddit_content.json');
+          setPosts(data[showType] || []);
+          setMetadata(data.metadata);
+        }
       } catch (error) {
         console.error('Error loading Reddit data:', error);
+        setPosts([]);
+      } finally {
+        setIsLoading(false);
       }
     };
     fetchData();
   }, [showType]);
+
+  // Reset pagination when changing filters
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [showType, searchTerm, sortBy]);
 
   const formatDate = (dateString) => {
     const date = new Date(dateString);
@@ -31,28 +51,22 @@ const Reddit = () => {
   };
 
   const formatScore = (score) => {
-    if (score >= 1000) {
-      return `${(score / 1000).toFixed(1)}k`;
-    }
-    return score.toString();
+    return score >= 1000 ? `${(score / 1000).toFixed(1)}k` : score.toString();
   };
 
-  // Search and sort functionality
   const filteredPosts = useMemo(() => {
     let filtered = [...posts];
 
-    // Apply search filter
     if (searchTerm) {
       const term = searchTerm.toLowerCase();
       filtered = filtered.filter(post => 
-        post.title.toLowerCase().includes(term) ||
+        post.title?.toLowerCase().includes(term) ||
         post.text?.toLowerCase().includes(term) ||
-        post.author.toLowerCase().includes(term) ||
-        post.subreddit.toLowerCase().includes(term)
+        post.author?.toLowerCase().includes(term) ||
+        post.subreddit?.toLowerCase().includes(term)
       );
     }
 
-    // Apply sorting
     filtered.sort((a, b) => {
       switch (sortBy) {
         case 'date':
@@ -60,7 +74,12 @@ const Reddit = () => {
         case 'score':
           return b.score - a.score;
         case 'comments':
-          return (b.comments?.length || 0) - (a.comments?.length || 0);
+          return (
+            (b.num_comments || b.comments?.length || 0) - 
+            (a.num_comments || a.comments?.length || 0)
+          );
+        case 'subreddit':
+          return a.subreddit.toLowerCase().localeCompare(b.subreddit.toLowerCase());
         default:
           return 0;
       }
@@ -68,6 +87,94 @@ const Reddit = () => {
 
     return filtered;
   }, [posts, searchTerm, sortBy]);
+
+  // Pagination
+  const pageCount = Math.ceil(filteredPosts.length / POSTS_PER_PAGE);
+  const paginatedPosts = filteredPosts.slice(
+    (currentPage - 1) * POSTS_PER_PAGE,
+    currentPage * POSTS_PER_PAGE
+  );
+
+  const renderPaginationButton = (pageNum, label) => (
+    <button
+      key={pageNum}
+      onClick={() => setCurrentPage(pageNum)}
+      className={`px-3 py-1 rounded-md ${
+        currentPage === pageNum 
+          ? 'bg-orange-100 text-orange-700' 
+          : 'text-gray-600 hover:bg-gray-100'
+      }`}
+      disabled={currentPage === pageNum}
+    >
+      {label || pageNum}
+    </button>
+  );
+
+  const renderPaginationControls = () => {
+    const pages = [];
+    const maxPages = 5;
+    let startPage = Math.max(1, currentPage - 2);
+    let endPage = Math.min(pageCount, startPage + maxPages - 1);
+
+    if (endPage - startPage + 1 < maxPages) {
+      startPage = Math.max(1, endPage - maxPages + 1);
+    }
+
+    // Previous button
+    pages.push(
+      <button
+        key="prev"
+        onClick={() => setCurrentPage(prev => prev - 1)}
+        disabled={currentPage === 1}
+        className={`px-3 py-1 rounded-md ${
+          currentPage === 1 
+            ? 'text-gray-400 cursor-not-allowed' 
+            : 'text-gray-600 hover:bg-gray-100'
+        }`}
+      >
+        Previous
+      </button>
+    );
+
+    // First page
+    if (startPage > 1) {
+      pages.push(renderPaginationButton(1));
+      if (startPage > 2) pages.push(<span key="dots1">...</span>);
+    }
+
+    // Page numbers
+    for (let i = startPage; i <= endPage; i++) {
+      pages.push(renderPaginationButton(i));
+    }
+
+    // Last page
+    if (endPage < pageCount) {
+      if (endPage < pageCount - 1) pages.push(<span key="dots2">...</span>);
+      pages.push(renderPaginationButton(pageCount));
+    }
+
+    // Next button
+    pages.push(
+      <button
+        key="next"
+        onClick={() => setCurrentPage(prev => prev + 1)}
+        disabled={currentPage === pageCount}
+        className={`px-3 py-1 rounded-md ${
+          currentPage === pageCount 
+            ? 'text-gray-400 cursor-not-allowed' 
+            : 'text-gray-600 hover:bg-gray-100'
+        }`}
+      >
+        Next
+      </button>
+    );
+
+    return (
+      <div className="flex items-center justify-center space-x-2 mt-6">
+        {pages}
+      </div>
+    );
+  };
 
   const renderComments = (comments) => {
     if (!comments || comments.length === 0) return null;
@@ -86,9 +193,7 @@ const Reddit = () => {
               <span>{formatScore(comment.score)} points</span>
             </div>
             <p className="mt-1 text-gray-700">{comment.text}</p>
-            {comment.replies && comment.replies.length > 0 && (
-              renderComments(comment.replies)
-            )}
+            {comment.replies && comment.replies.length > 0 && renderComments(comment.replies)}
           </div>
         ))}
       </div>
@@ -135,8 +240,9 @@ const Reddit = () => {
               onChange={(e) => setShowType(e.target.value)}
               className="px-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent"
             >
+              <option value="news">News ({showType === 'news' ? metadata?.total_items || 0 : metadata?.total_news || 0})</option>
               <option value="saved">Saved ({metadata?.total_saved || 0})</option>
-              <option value="upvoted">Upvoted ({metadata?.total_upvoted || 0})</option>
+              <option value="upvoted">Upvoted ({metadata?.total_upvoted || 0})</option>             
             </select>
           </div>
 
@@ -169,85 +275,115 @@ const Reddit = () => {
               <MessageCircle className="w-4 h-4 inline-block mr-2" />
               Comments
             </button>
+            <button
+              onClick={() => setSortBy('subreddit')}
+              className={`px-4 py-2 rounded-md ${
+                sortBy === 'subreddit' ? 'bg-orange-100 text-orange-700' : 'text-gray-600 hover:bg-gray-100'
+              }`}
+            >
+              <MessageCircle className="w-4 h-4 inline-block mr-2" />
+              Subreddit
+            </button>
           </div>
         </div>
 
+        {/* Loading State */}
+        {isLoading && (
+          <div className="text-center py-8">
+            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-orange-500 mx-auto"></div>
+            <p className="mt-4 text-gray-500">Loading posts...</p>
+          </div>
+        )}
+
         {/* Posts */}
-        <div className="space-y-4">
-          {filteredPosts.map((post) => (
-            <div 
-              key={post.id}
-              className="border border-gray-200 rounded-lg p-4 hover:border-gray-300 transition-colors"
-            >
-              <div className="flex justify-between items-start mb-2">
-                <div className="flex items-center space-x-2">
-                  <span className="text-sm text-gray-500">r/{post.subreddit}</span>
-                  <span className="text-xs text-gray-400">• by {post.author}</span>
-                </div>
-                <span className="text-xs text-gray-400">{formatDate(post.created_utc)}</span>
-              </div>
-
-              <h2 className="text-lg font-semibold text-gray-900 mb-2">
-                <a 
-                  href={post.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="hover:text-blue-600 flex items-center"
+        {!isLoading && (
+          <div>
+            <div className="space-y-4">
+              {paginatedPosts.map((post) => (
+                <div 
+                  key={post.id}
+                  className="border border-gray-200 rounded-lg p-4 hover:border-gray-300 transition-colors"
                 >
-                  {post.title}
-                  <LinkIcon className="w-4 h-4 ml-2 inline-block text-gray-400" />
-                </a>
-              </h2>
+                  <div className="flex justify-between items-start mb-2">
+                    <div className="flex items-center space-x-2">
+                      <span className="text-sm text-gray-500">r/{post.subreddit}</span>
+                      <span className="text-xs text-gray-400">• by {post.author}</span>
+                    </div>
+                    <span className="text-xs text-gray-400">{formatDate(post.created_utc)}</span>
+                  </div>
 
-              {post.text && (
-                <p className={`text-gray-600 mb-3 ${
-                  expandedPost === post.id ? '' : 'line-clamp-3'
-                }`}>
-                  {post.text}
-                </p>
-              )}
+                  <h2 className="text-lg font-semibold text-gray-900 mb-2">
+                    <a 
+                      href={post.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="hover:text-blue-600 flex items-center"
+                    >
+                      {post.title}
+                      <ExternalLink className="w-4 h-4 ml-2 inline-block text-gray-400" />
+                    </a>
+                  </h2>
 
-              <div className="flex items-center justify-between">
-                <div className="flex items-center space-x-4 text-sm text-gray-500">
-                  <span className="flex items-center space-x-1">
-                    <ThumbsUp className="w-4 h-4" />
-                    <span>{formatScore(post.score)}</span>
-                  </span>
-                  <span className="flex items-center space-x-1">
-                    <MessageCircle className="w-4 h-4" />
-                    <span>{post.comments?.length || 0}</span>
-                  </span>
-                </div>
+                  {post.text && post.text !== '[External Link]' && (
+                    <p className={`text-gray-600 mb-3 ${
+                      expandedPost === post.id ? '' : 'line-clamp-3'
+                    }`}>
+                      {post.text}
+                    </p>
+                  )}
 
-                {(post.text?.length > 100 || post.comments?.length > 0) && (
-                  <button
-                    onClick={() => setExpandedPost(expandedPost === post.id ? null : post.id)}
-                    className="text-sm text-orange-500 hover:text-orange-600 flex items-center space-x-1"
-                  >
-                    <span>{expandedPost === post.id ? 'Show less' : 'Show more'}</span>
-                    {expandedPost === post.id ? (
-                      <ChevronUp className="w-4 h-4" />
-                    ) : (
-                      <ChevronDown className="w-4 h-4" />
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center space-x-4 text-sm text-gray-500">
+                      <span className="flex items-center space-x-1">
+                        <ThumbsUp className="w-4 h-4" />
+                        <span>{formatScore(post.score)}</span>
+                      </span>
+                      <span className="flex items-center space-x-1">
+                        <MessageCircle className="w-4 h-4" />
+                        <span>{post.num_comments || post.comments?.length || 0}</span>
+                      </span>
+                      {post.upvote_ratio && (
+                        <span className="text-xs">
+                          {Math.round(post.upvote_ratio * 100)}% upvoted
+                        </span>
+                      )}
+                    </div>
+
+                    {((post.text && post.text !== '[External Link]') || post.comments?.length > 0) && (
+                      <button
+                        onClick={() => setExpandedPost(expandedPost === post.id ? null : post.id)}
+                        className="text-sm text-orange-500 hover:text-orange-600 flex items-center space-x-1"
+                      >
+                        <span>{expandedPost === post.id ? 'Show less' : 'Show more'}</span>
+                        {expandedPost === post.id ? (
+                          <ChevronUp className="w-4 h-4" />
+                        ) : (
+                          <ChevronDown className="w-4 h-4" />
+                        )}
+                      </button>
                     )}
-                  </button>
-                )}
-              </div>
+                  </div>
 
-              {/* Expanded content */}
-              {expandedPost === post.id && post.comments && (
-                <div className="mt-4 pt-4 border-t border-gray-200">
-                  <h3 className="text-lg font-semibold mb-4">Comments</h3>
-                  {renderComments(post.comments)}
+                  {/* Expanded content */}
+                  {expandedPost === post.id && post.comments && (
+                    <div className="mt-4 pt-4 border-t border-gray-200">
+                      <h3 className="text-lg font-semibold mb-4">Comments</h3>
+                      {renderComments(post.comments)}
+                    </div>
+                  )}
                 </div>
-              )}
+              ))}
             </div>
-          ))}
-        </div>
 
-        {filteredPosts.length === 0 && (
-          <div className="text-center py-8 text-gray-500">
-            No posts found matching your search.
+            {/* No Results Message */}
+            {filteredPosts.length === 0 && (
+              <div className="text-center py-8 text-gray-500">
+                No posts found matching your search.
+              </div>
+            )}
+
+            {/* Pagination Controls */}
+            {filteredPosts.length > POSTS_PER_PAGE && renderPaginationControls()}
           </div>
         )}
       </div>
