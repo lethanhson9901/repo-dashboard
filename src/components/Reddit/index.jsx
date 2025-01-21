@@ -9,6 +9,7 @@ const Reddit = () => {
   const [expandedPost, setExpandedPost] = useState(null);
   const [showType, setShowType] = useState('saved');
   const [sortBy, setSortBy] = useState('date');
+  const [selectedSubreddit, setSelectedSubreddit] = useState('');
   const [metadata, setMetadata] = useState(null);
   const [currentPage, setCurrentPage] = useState(1);
   const [isLoading, setIsLoading] = useState(true);
@@ -43,6 +44,7 @@ const Reddit = () => {
   // Reset pagination when changing filters
   useEffect(() => {
     setCurrentPage(1);
+    setSelectedSubreddit(''); // Reset subreddit filter when changing show type
   }, [showType, searchTerm, sortBy]);
 
   const formatDate = (dateString) => {
@@ -54,9 +56,29 @@ const Reddit = () => {
     return score >= 1000 ? `${(score / 1000).toFixed(1)}k` : score.toString();
   };
 
+  // Get unique subreddits and their post counts
+  const subredditStats = useMemo(() => {
+    const stats = {};
+    posts.forEach(post => {
+      if (!stats[post.subreddit]) {
+        stats[post.subreddit] = 0;
+      }
+      stats[post.subreddit]++;
+    });
+    return Object.entries(stats)
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count);
+  }, [posts]);
+
   const filteredPosts = useMemo(() => {
     let filtered = [...posts];
 
+    // Apply subreddit filter
+    if (selectedSubreddit) {
+      filtered = filtered.filter(post => post.subreddit === selectedSubreddit);
+    }
+
+    // Apply search filter
     if (searchTerm) {
       const term = searchTerm.toLowerCase();
       filtered = filtered.filter(post => 
@@ -67,6 +89,7 @@ const Reddit = () => {
       );
     }
 
+    // Apply sorting
     filtered.sort((a, b) => {
       switch (sortBy) {
         case 'date':
@@ -86,7 +109,7 @@ const Reddit = () => {
     });
 
     return filtered;
-  }, [posts, searchTerm, sortBy]);
+  }, [posts, searchTerm, sortBy, selectedSubreddit]);
 
   // Pagination
   const pageCount = Math.ceil(filteredPosts.length / POSTS_PER_PAGE);
@@ -223,7 +246,7 @@ const Reddit = () => {
 
         {/* Controls */}
         <div className="mb-6 space-y-4">
-          {/* Search and type selector */}
+          {/* Search, type selector, and subreddit filter */}
           <div className="flex space-x-4">
             <div className="flex-1 relative">
               <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-5 h-5" />
@@ -243,6 +266,18 @@ const Reddit = () => {
               <option value="news">News ({showType === 'news' ? metadata?.total_items || 0 : metadata?.total_news || 0})</option>
               <option value="saved">Saved ({metadata?.total_saved || 0})</option>
               <option value="upvoted">Upvoted ({metadata?.total_upvoted || 0})</option>             
+            </select>
+            <select
+              value={selectedSubreddit}
+              onChange={(e) => setSelectedSubreddit(e.target.value)}
+              className="px-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent min-w-[200px]"
+            >
+              <option value="">All Subreddits ({posts.length})</option>
+              {subredditStats.map(({ name, count }) => (
+                <option key={name} value={name}>
+                  r/{name} ({count})
+                </option>
+              ))}
             </select>
           </div>
 
@@ -275,7 +310,7 @@ const Reddit = () => {
               <MessageCircle className="w-4 h-4 inline-block mr-2" />
               Comments
             </button>
-            <button
+            {/* <button
               onClick={() => setSortBy('subreddit')}
               className={`px-4 py-2 rounded-md ${
                 sortBy === 'subreddit' ? 'bg-orange-100 text-orange-700' : 'text-gray-600 hover:bg-gray-100'
@@ -283,7 +318,7 @@ const Reddit = () => {
             >
               <MessageCircle className="w-4 h-4 inline-block mr-2" />
               Subreddit
-            </button>
+            </button> */}
           </div>
         </div>
 
