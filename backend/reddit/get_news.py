@@ -1,5 +1,6 @@
 import os
 import logging
+import time
 from typing import Dict
 from pathlib import Path
 from dotenv import load_dotenv
@@ -60,20 +61,27 @@ def get_env_variables() -> Dict[str, str]:
 
 def main() -> None:
     """Main entry point for fetching Reddit community news."""
+    start_time = time.time()
+    
     try:
         # Set up logging first
         setup_logging()
-        logger.info("Starting Reddit news collection for last 24 hours...")
+        logger.info("=" * 80)
+        logger.info("🚀 BẮT ĐẦU THU THẬP TIN TỨC REDDIT - 24 GIỜ QUA")
+        logger.info("=" * 80)
         
         # Get environment variables
+        logger.info("📋 Đang kiểm tra biến môi trường...")
         env_vars = get_env_variables()
+        logger.info("✅ Biến môi trường đã được cấu hình thành công")
         
         # Initialize collector with proper path handling
         output_dir = Path('src/data/reddit')
-
         output_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"📁 Thư mục output: {output_dir.absolute()}")
         
         # Initialize collector
+        logger.info("🔧 Đang khởi tạo RedditContentCollector...")
         collector = RedditContentCollector(
             client_id=env_vars["REDDIT_CLIENT_ID"],
             client_secret=env_vars["REDDIT_CLIENT_SECRET"],
@@ -83,21 +91,59 @@ def main() -> None:
             output_dir=output_dir,
             comment_depth=3
         )
+        logger.info("✅ RedditContentCollector đã được khởi tạo thành công")
 
         # Fetch only daily news
-        logger.info("Fetching community news for the last 24 hours...")
+        logger.info("🔍 BẮT ĐẦU THU THẬP TIN TỨC CỘNG ĐỒNG - 24 GIỜ QUA")
+        logger.info("📊 Thông số thu thập:")
+        logger.info(f"   - Time filter: {TimeFilter.DAY}")
+        logger.info(f"   - Min score: 5")
+        logger.info(f"   - Limit: 1000 posts")
+        logger.info(f"   - Comment depth: 3")
+        
+        fetch_start_time = time.time()
         news_items = collector.get_community_news(
             time_filter=TimeFilter.DAY,
             min_score=5,     # Minimum score threshold
             limit=1000,      # Maximum number of posts to fetch
             comment_depth=3
         )
+        fetch_end_time = time.time()
+        
+        fetch_duration = fetch_end_time - fetch_start_time
+        logger.info(f"⏱️  Thời gian thu thập: {fetch_duration:.2f} giây")
+        logger.info(f"📈 Số lượng tin tức thu thập được: {len(news_items)} items")
+        
+        # Save the data
+        logger.info("💾 Đang lưu dữ liệu...")
+        save_start_time = time.time()
         collector.save_community_news(news_items, TimeFilter.DAY)
-        logger.info(f"Found {len(news_items)} news items for the last 24 hours")
-        logger.info("Daily news collection completed successfully")
+        save_end_time = time.time()
+        save_duration = save_end_time - save_start_time
+        logger.info(f"⏱️  Thời gian lưu: {save_duration:.2f} giây")
+        
+        # Summary
+        total_duration = time.time() - start_time
+        logger.info("=" * 80)
+        logger.info("✅ HOÀN THÀNH THU THẬP TIN TỨC REDDIT")
+        logger.info("=" * 80)
+        logger.info(f"📊 TỔNG KẾT:")
+        logger.info(f"   - Tổng thời gian: {total_duration:.2f} giây")
+        logger.info(f"   - Thời gian thu thập: {fetch_duration:.2f} giây")
+        logger.info(f"   - Thời gian lưu: {save_duration:.2f} giây")
+        logger.info(f"   - Số tin tức thu thập: {len(news_items)} items")
+        logger.info(f"   - Tốc độ thu thập: {len(news_items)/fetch_duration:.2f} items/giây")
+        logger.info("=" * 80)
 
     except Exception as e:
-        logger.error(f"An error occurred while collecting news: {e}")
+        total_duration = time.time() - start_time
+        logger.error("=" * 80)
+        logger.error("❌ LỖI TRONG QUÁ TRÌNH THU THẬP TIN TỨC")
+        logger.error("=" * 80)
+        logger.error(f"⏱️  Thời gian chạy trước khi lỗi: {total_duration:.2f} giây")
+        logger.error(f"🔍 Chi tiết lỗi: {e}")
+        logger.error(f"📋 Loại lỗi: {type(e).__name__}")
+        logger.error("=" * 80)
         raise
 
 if __name__ == "__main__":
