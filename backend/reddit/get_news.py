@@ -97,14 +97,14 @@ def main() -> None:
         logger.info("🔍 BẮT ĐẦU THU THẬP TIN TỨC CỘNG ĐỒNG - 24 GIỜ QUA")
         logger.info("📊 Thông số thu thập:")
         logger.info(f"   - Time filter: {TimeFilter.DAY}")
-        logger.info(f"   - Min score: 5")
+        logger.info(f"   - Min score: 3")
         logger.info(f"   - Limit: 1000 posts")
         logger.info(f"   - Comment depth: 3")
         
         fetch_start_time = time.time()
         news_items = collector.get_community_news(
             time_filter=TimeFilter.DAY,
-            min_score=5,     # Minimum score threshold
+            min_score=3,     # Minimum score threshold
             limit=1000,      # Maximum number of posts to fetch
             comment_depth=3
         )
