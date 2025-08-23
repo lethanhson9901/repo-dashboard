@@ -216,7 +216,6 @@ Released under the MIT License. See [LICENSE](LICENSE) for details.
 
 **[Website](https://your-website.com)** • **[Documentation](docs)** • **[Report Bug](issues)** • **[Request Feature](issues)**
 
-
 Made with ❤️ by [Le Thanh Son](https://github.com/lethanhson9901)
 
 </div>
