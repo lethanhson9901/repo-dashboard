@@ -2,7 +2,7 @@ import { useState, useMemo } from 'react';
 
 export const useRepoData = (initialData) => {
   const [searchTerm, setSearchTerm] = useState('');
-  const [sortConfig, setSortConfig] = useState({ key: 'stars', direction: 'desc' });
+  const [sortConfig, setSortConfig] = useState({ key: null, direction: 'asc' });
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage, setItemsPerPage] = useState(50);
 
@@ -11,20 +11,40 @@ export const useRepoData = (initialData) => {
     
     if (searchTerm) {
       filtered = filtered.filter(repo => {
+        const searchTermLower = searchTerm.toLowerCase();
+        
+        // Search in multiple fields with different strategies
         const searchFields = [
+          // Full name (owner/repo-name)
           repo.name,
+          // Repository name only (after /)
+          repo.name?.split('/')[1] || '',
+          // Owner name only (before /)
+          repo.name?.split('/')[0] || '',
+          // Description
           repo.description,
+          // Language
           repo.language,
+          // Topics array
           ...(repo.topics || []),
-          repo.owner?.username
+          // Owner username
+          repo.owner?.username,
+          // URL
+          repo.url
         ].filter(Boolean);
 
+        // Check if any field contains the search term
         return searchFields.some(field => 
-          field.toLowerCase().includes(searchTerm.toLowerCase())
+          field.toLowerCase().includes(searchTermLower)
         );
       });
     }
 
+    // If no sort key is specified (default), return data in original order
+    if (!sortConfig.key) {
+      return filtered;
+    }
+    
     return filtered.sort((a, b) => {
       const { key, direction } = sortConfig;
       
@@ -37,6 +57,15 @@ export const useRepoData = (initialData) => {
       if (key === 'owner') {
         const valueA = a.owner?.username ?? '';
         const valueB = b.owner?.username ?? '';
+        return direction === 'asc'
+          ? valueA.localeCompare(valueB)
+          : valueB.localeCompare(valueA);
+      }
+      
+      if (key === 'name') {
+        // Extract repository name from "owner/repo-name" format for sorting
+        const valueA = a.name?.split('/')[1] || a.name || '';
+        const valueB = b.name?.split('/')[1] || b.name || '';
         return direction === 'asc'
           ? valueA.localeCompare(valueB)
           : valueB.localeCompare(valueA);
