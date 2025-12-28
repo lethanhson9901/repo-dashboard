@@ -52,7 +52,7 @@ const ChatInterface = () => {
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [selectedStyle, setSelectedStyle] = useState('normal');
-  const [apiKey, setApiKey] = useState(() => localStorage.getItem('chatApiKey') || '');
+  const [apiKey, setApiKey] = useState('');
   const [showSettings, setShowSettings] = useState(false);
   const messagesEndRef = useRef(null);
 
@@ -66,7 +66,6 @@ const ChatInterface = () => {
 
   const handleApiKeyChange = (newKey) => {
     setApiKey(newKey);
-    localStorage.setItem('chatApiKey', newKey);
   };
 
   const sendMessage = async () => {

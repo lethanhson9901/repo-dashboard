@@ -25,9 +25,8 @@ ENV_PATH = BASE_PATH / ".env"
 
 class CustomHTTPAdapter(HTTPAdapter):
     def init_poolmanager(self, *args, **kwargs):
-        context = ssl.create_default_context()
-        context.set_ciphers('DEFAULT@SECLEVEL=1')  # Less strict SSL configuration
-        kwargs['ssl_context'] = context
+        # Use secure default SSL configuration
+        kwargs['ssl_context'] = ssl.create_default_context()
         return super().init_poolmanager(*args, **kwargs)
 
 def create_session():

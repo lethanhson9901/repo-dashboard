@@ -33,7 +33,6 @@ class RedditContentCollector:
 
         logger.info("🔧 Đang khởi tạo Reddit client...")
         logger.info(f"   👤 Username: {username}")
-        logger.info(f"   🆔 Client ID: {client_id[:8]}...")
         logger.info(f"   🤖 User Agent: {user_agent}")
         
         try:
