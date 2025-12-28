@@ -53,6 +53,7 @@ class CollectorData(TypedDict):
 class TimeFilter(str, Enum):
     """Enum for time filtering options."""
     DAY = "day"
+    THREE_DAYS = "3days"
     WEEK = "week"
     MONTH = "month"
     YEAR = "year"
