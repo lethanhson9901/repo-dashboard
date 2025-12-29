@@ -48,7 +48,20 @@ class CollectorData(TypedDict):
     saved: List[RedditContent]
     upvoted: List[RedditContent]
     metadata: Metadata
-    
+
+
+class CollectorState(TypedDict):
+    """Type definition for incremental collector state."""
+    version: int
+    next_subreddit_index: int
+    subreddit_count: int
+    paused: bool
+    pause_reason: str
+    rate_remaining: Union[int, None]
+    rate_used: Union[int, None]
+    rate_reset_timestamp: Union[float, None]
+    last_run_at: str
+    last_completed_at: str
 
 class TimeFilter(str, Enum):
     """Enum for time filtering options."""
