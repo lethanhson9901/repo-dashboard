@@ -5,12 +5,14 @@ import logging
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Union, List
+from typing import Dict, List, Union
 import praw
 from praw.models import Comment, Submission
 from praw.reddit import Reddit
 from prawcore.exceptions import TooManyRequests, ResponseException, RequestException
 from models import *
+from news_merge import merge_news_items
+from state import load_state, save_state
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +101,32 @@ class RedditContentCollector:
             logger.info("   - Rate limit handling: Enabled with exponential backoff")
         except Exception as e:
             logger.debug(f"Could not retrieve API stats: {e}")
+
+    def _get_rate_limits(self) -> Dict[str, Union[int, float, None]]:
+        """Get rate limit information from PRAW if available."""
+        limits = getattr(self.reddit.auth, "limits", {}) or {}
+        remaining = limits.get("remaining")
+        used = limits.get("used")
+        reset_timestamp = limits.get("reset_timestamp")
+        if reset_timestamp is None:
+            reset_seconds = limits.get("reset")
+            if reset_seconds is not None:
+                reset_timestamp = time.time() + float(reset_seconds)
+        return {
+            "remaining": remaining,
+            "used": used,
+            "reset_timestamp": reset_timestamp,
+        }
+
+    def _should_pause(self, threshold: int) -> Dict[str, Union[int, float, None]]:
+        """Return limits dict when remaining is at or below threshold."""
+        limits = self._get_rate_limits()
+        remaining = limits.get("remaining")
+        if remaining is None:
+            return {}
+        if remaining <= threshold:
+            return limits
+        return {}
 
     def _load_existing_data(self) -> CollectorData:
         """Load existing data from JSON file."""
@@ -238,7 +266,9 @@ class RedditContentCollector:
         time_filter: TimeFilter = TimeFilter.DAY,
         min_score: int = 10,
         limit: int = 500,
-        comment_depth: int = 3  # Added parameter for comment depth
+        comment_depth: int = 3,
+        state_path: Union[str, Path, None] = None,
+        rate_limit_threshold: int = 5
     ) -> List[NewsContent]:
         """
         Fetch detailed news from joined communities sorted by score.
@@ -248,13 +278,12 @@ class RedditContentCollector:
             min_score (int): Minimum score threshold for posts
             limit (int): Maximum number of posts to fetch
             comment_depth (int): How deep to go in comment threads
+            state_path (Union[str, Path, None]): Path to save incremental state
+            rate_limit_threshold (int): Remaining-requests threshold to pause
             
         Returns:
             List[NewsContent]: List of detailed news posts
         """
-        import time
-        from prawcore.exceptions import TooManyRequests, ResponseException, RequestException
-        
         news_items: List[NewsContent] = []
         total_posts_processed = 0
         total_posts_filtered = 0
@@ -267,24 +296,50 @@ class RedditContentCollector:
                 TimeFilter.WEEK: "week",
                 TimeFilter.MONTH: "month"
             }
+            praw_time_filter = time_mapping.get(
+                time_filter,
+                time_filter.value if hasattr(time_filter, "value") else str(time_filter)
+            )
             
             # Get subscribed subreddits
             logger.info("🔍 Đang lấy danh sách subreddit đã đăng ký...")
             subscribed = list(self.reddit.user.subreddits(limit=None))
             logger.info(f"📋 Tìm thấy {len(subscribed)} subreddit đã đăng ký")
+
+            state_file = Path(state_path) if state_path else (self.output_dir / "collector_state.json")
+            state = load_state(state_file, len(subscribed))
+            state["last_run_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            if not subscribed:
+                state["next_subreddit_index"] = 0
+                state["last_completed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                save_state(state_file, state)
+                return []
+
+            reset_timestamp = state.get("rate_reset_timestamp")
+            if state.get("paused") and reset_timestamp and time.time() < reset_timestamp:
+                logger.warning("⏸️  Đang tạm dừng do rate limit, sẽ thử lại ở lần chạy sau.")
+                save_state(state_file, state)
+                return []
+
+            state["paused"] = False
+            state["pause_reason"] = ""
             
-            for idx, subreddit in enumerate(subscribed, 1):
+            paused = False
+            start_index = state["next_subreddit_index"]
+            for idx in range(start_index, len(subscribed)):
+                subreddit = subscribed[idx]
                 subreddit_start_time = time.time()
                 subreddit_posts = 0
                 subreddit_filtered = 0
                 
                 try:
-                    logger.info(f"🔄 [{idx}/{len(subscribed)}] Đang thu thập từ r/{subreddit}")
+                    logger.info(f"🔄 [{idx + 1}/{len(subscribed)}] Đang thu thập từ r/{subreddit}")
                     
                     # Fetch posts with rate limit handling
                     try:
                         top_posts = subreddit.top(
-                            time_filter=time_mapping[time_filter],
+                            time_filter=praw_time_filter,
                             limit=limit
                         )
                         posts_list = list(top_posts)  # Convert generator to list
@@ -292,11 +347,37 @@ class RedditContentCollector:
                         
                     except TooManyRequests as e:
                         rate_limit_hits += 1
-                        self._handle_rate_limit(e, f"Fetching posts from r/{subreddit}", 60)
-                        continue
+                        limits = self._get_rate_limits()
+                        state.update({
+                            "paused": True,
+                            "pause_reason": "too_many_requests",
+                            "rate_remaining": limits.get("remaining"),
+                            "rate_used": limits.get("used"),
+                            "rate_reset_timestamp": limits.get("reset_timestamp"),
+                            "next_subreddit_index": idx
+                        })
+                        save_state(state_file, state)
+                        paused = True
+                        break
                     except (ResponseException, RequestException) as e:
                         logger.error(f"   ❌ Lỗi API cho r/{subreddit}: {e}")
+                        state["next_subreddit_index"] = idx + 1
+                        save_state(state_file, state)
                         continue
+
+                    limits = self._should_pause(rate_limit_threshold)
+                    if limits:
+                        state.update({
+                            "paused": True,
+                            "pause_reason": "low_remaining_after_list",
+                            "rate_remaining": limits.get("remaining"),
+                            "rate_used": limits.get("used"),
+                            "rate_reset_timestamp": limits.get("reset_timestamp"),
+                            "next_subreddit_index": idx
+                        })
+                        save_state(state_file, state)
+                        paused = True
+                        break
                     
                     for post_idx, post in enumerate(posts_list, 1):
                         total_posts_processed += 1
@@ -343,8 +424,18 @@ class RedditContentCollector:
                                 
                             except TooManyRequests as e:
                                 rate_limit_hits += 1
-                                self._handle_rate_limit(e, f"Processing comments for post {post.id}", 30)
-                                continue
+                                limits = self._get_rate_limits()
+                                state.update({
+                                    "paused": True,
+                                    "pause_reason": "too_many_requests_comments",
+                                    "rate_remaining": limits.get("remaining"),
+                                    "rate_used": limits.get("used"),
+                                    "rate_reset_timestamp": limits.get("reset_timestamp"),
+                                    "next_subreddit_index": idx
+                                })
+                                save_state(state_file, state)
+                                paused = True
+                                break
                             except Exception as e:
                                 logger.error(f"      ❌ Lỗi xử lý comments của post {post.id}: {e}")
                                 continue
@@ -369,20 +460,59 @@ class RedditContentCollector:
                                 "comments": comments
                             }
                             news_items.append(news_item)
+
+                            limits = self._should_pause(rate_limit_threshold)
+                            if limits:
+                                state.update({
+                                    "paused": True,
+                                    "pause_reason": "low_remaining_after_post",
+                                    "rate_remaining": limits.get("remaining"),
+                                    "rate_used": limits.get("used"),
+                                    "rate_reset_timestamp": limits.get("reset_timestamp"),
+                                    "next_subreddit_index": idx
+                                })
+                                save_state(state_file, state)
+                                paused = True
+                                break
                         else:
                             logger.debug(f"      ⏭️  [{post_idx}/{len(posts_list)}] Bỏ qua post (score {post.score} < {min_score})")
+
+                        if paused:
+                            break
                     
                     subreddit_duration = time.time() - subreddit_start_time
                     logger.info(f"   ✅ Hoàn thành r/{subreddit}: {subreddit_filtered}/{subreddit_posts} posts (thời gian: {subreddit_duration:.2f}s)")
+
+                    if paused:
+                        break
+
+                    state["next_subreddit_index"] = idx + 1
+                    save_state(state_file, state)
                             
                 except TooManyRequests as e:
                     rate_limit_hits += 1
-                    self._handle_rate_limit(e, f"General subreddit processing for r/{subreddit}", 60)
-                    continue
+                    limits = self._get_rate_limits()
+                    state.update({
+                        "paused": True,
+                        "pause_reason": "too_many_requests_general",
+                        "rate_remaining": limits.get("remaining"),
+                        "rate_used": limits.get("used"),
+                        "rate_reset_timestamp": limits.get("reset_timestamp"),
+                        "next_subreddit_index": idx
+                    })
+                    save_state(state_file, state)
+                    paused = True
+                    break
                 except Exception as e:
                     logger.error(f"   ❌ Lỗi thu thập từ subreddit {subreddit}: {e}")
                     logger.error(f"   📋 Loại lỗi: {type(e).__name__}")
                     continue
+
+            if not paused:
+                state["next_subreddit_index"] = 0
+                state["paused"] = False
+                state["last_completed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                save_state(state_file, state)
             
             # Sort all collected news items by score in descending order
             news_items.sort(key=lambda x: x["score"], reverse=True)
@@ -419,22 +549,32 @@ class RedditContentCollector:
             output_file = self.output_dir / f"community_news_{time_filter}.json"
             
             logger.info(f"💾 Đang lưu {len(news_items)} tin tức vào {output_file}")
-            
-            # Calculate file size estimate
-            total_comments = sum(len(item.get("comments", [])) for item in news_items)
+
+            existing_items: List[NewsContent] = []
+            if output_file.exists():
+                try:
+                    with output_file.open("r", encoding="utf-8") as f:
+                        existing_data = json.load(f)
+                        existing_items = existing_data.get("items", [])
+                except Exception:
+                    existing_items = []
+
+            merged_items = merge_news_items(existing_items, news_items)
+            merged_items.sort(key=lambda x: x["score"], reverse=True)
+            total_comments = sum(len(item.get("comments", [])) for item in merged_items)
             logger.info(f"   📊 Thống kê dữ liệu:")
-            logger.info(f"      - Tin tức: {len(news_items)} items")
+            logger.info(f"      - Tin tức: {len(merged_items)} items")
             logger.info(f"      - Comments: {total_comments} comments")
-            
+
             data = {
                 "metadata": {
                     "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "time_filter": time_filter,
-                    "total_items": len(news_items),
+                    "total_items": len(merged_items),
                     "total_comments": total_comments,
                     "file_size_bytes": 0  # Will be updated after saving
                 },
-                "items": news_items
+                "items": merged_items
             }
             
             # Save with progress logging

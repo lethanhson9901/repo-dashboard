@@ -102,11 +102,14 @@ def main() -> None:
         logger.info(f"   - Comment depth: 3")
         
         fetch_start_time = time.time()
+        state_path = output_dir / "collector_state.json"
         news_items = collector.get_community_news(
             time_filter=TimeFilter.DAY,
             min_score=3,     # Minimum score threshold
             limit=1000,      # Maximum number of posts to fetch
-            comment_depth=3
+            comment_depth=3,
+            state_path=state_path,
+            rate_limit_threshold=5
         )
         fetch_end_time = time.time()
         
