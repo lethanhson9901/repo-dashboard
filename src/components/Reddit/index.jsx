@@ -11,6 +11,7 @@ const Reddit = () => {
   const [sortBy, setSortBy] = useState('date');
   const [selectedSubreddit, setSelectedSubreddit] = useState('');
   const [metadata, setMetadata] = useState(null);
+  const [subredditIndex, setSubredditIndex] = useState([]);
   const [currentPage, setCurrentPage] = useState(1);
   const [isLoading, setIsLoading] = useState(true);
 
@@ -20,12 +21,12 @@ const Reddit = () => {
       try {
         let data;
         if (showType === 'news') {
-          data = await import('../../data/reddit/community_news_TimeFilter.DAY.json');
-          setPosts(data.items || []);
-          setMetadata({
-            ...data.metadata,
-            total_news: data.metadata?.total_items || 0
-          });
+          data = await import('../../data/reddit/community_news/index.json');
+          setSubredditIndex(data.items || []);
+          setMetadata(data.metadata || null);
+          const firstSubreddit = data.items?.[0]?.subreddit || '';
+          setSelectedSubreddit(firstSubreddit);
+          setPosts([]);
         } else {
           data = await import('../../data/reddit/reddit_content.json');
           setPosts(data[showType] || []);
@@ -41,11 +42,43 @@ const Reddit = () => {
     fetchData();
   }, [showType]);
 
+  useEffect(() => {
+    const fetchSubredditNews = async () => {
+      if (showType !== 'news') return;
+      if (!selectedSubreddit) {
+        setPosts([]);
+        return;
+      }
+      setIsLoading(true);
+      try {
+        const entry = subredditIndex.find((item) => item.subreddit === selectedSubreddit);
+        if (!entry?.file) {
+          setPosts([]);
+          return;
+        }
+        const modules = import.meta.glob('../../data/reddit/community_news/*.json');
+        const loader = modules[`../../data/reddit/community_news/${entry.file}`];
+        if (!loader) {
+          setPosts([]);
+          return;
+        }
+        const data = await loader();
+        setPosts(data.items || []);
+        setMetadata(data.metadata || null);
+      } catch (error) {
+        console.error('Error loading Reddit subreddit data:', error);
+        setPosts([]);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+    fetchSubredditNews();
+  }, [showType, selectedSubreddit, subredditIndex]);
+
   // Reset pagination when changing filters
   useEffect(() => {
     setCurrentPage(1);
-    setSelectedSubreddit(''); // Reset subreddit filter when changing show type
-  }, [showType, searchTerm, sortBy]);
+  }, [showType, searchTerm, sortBy, selectedSubreddit]);
 
   const formatDate = (dateString) => {
     const date = new Date(dateString);
@@ -56,27 +89,8 @@ const Reddit = () => {
     return score >= 1000 ? `${(score / 1000).toFixed(1)}k` : score.toString();
   };
 
-  // Get unique subreddits and their post counts
-  const subredditStats = useMemo(() => {
-    const stats = {};
-    posts.forEach(post => {
-      if (!stats[post.subreddit]) {
-        stats[post.subreddit] = 0;
-      }
-      stats[post.subreddit]++;
-    });
-    return Object.entries(stats)
-      .map(([name, count]) => ({ name, count }))
-      .sort((a, b) => b.count - a.count);
-  }, [posts]);
-
   const filteredPosts = useMemo(() => {
     let filtered = [...posts];
-
-    // Apply subreddit filter
-    if (selectedSubreddit) {
-      filtered = filtered.filter(post => post.subreddit === selectedSubreddit);
-    }
 
     // Apply search filter
     if (searchTerm) {
@@ -263,22 +277,23 @@ const Reddit = () => {
               onChange={(e) => setShowType(e.target.value)}
               className="px-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent"
             >
-              <option value="news">News ({showType === 'news' ? metadata?.total_items || 0 : metadata?.total_news || 0})</option>
+              <option value="news">News ({showType === 'news' ? metadata?.total_subreddits || 0 : metadata?.total_news || 0})</option>
               <option value="saved">Saved ({metadata?.total_saved || 0})</option>
               <option value="upvoted">Upvoted ({metadata?.total_upvoted || 0})</option>             
             </select>
-            <select
-              value={selectedSubreddit}
-              onChange={(e) => setSelectedSubreddit(e.target.value)}
-              className="px-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent min-w-[200px]"
-            >
-              <option value="">All Subreddits ({posts.length})</option>
-              {subredditStats.map(({ name, count }) => (
-                <option key={name} value={name}>
-                  r/{name} ({count})
-                </option>
-              ))}
-            </select>
+            {showType === 'news' && (
+              <select
+                value={selectedSubreddit}
+                onChange={(e) => setSelectedSubreddit(e.target.value)}
+                className="px-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent min-w-[200px]"
+              >
+                {subredditIndex.map(({ subreddit, total_items }) => (
+                  <option key={subreddit} value={subreddit}>
+                    r/{subreddit} ({total_items})
+                  </option>
+                ))}
+              </select>
+            )}
           </div>
 
           {/* Sort controls */}
@@ -333,6 +348,11 @@ const Reddit = () => {
         {/* Posts */}
         {!isLoading && (
           <div>
+            {showType === 'news' && !selectedSubreddit && (
+              <div className="text-center py-8 text-gray-500">
+                Hãy chọn subreddit để xem tin.
+              </div>
+            )}
             <div className="space-y-4">
               {paginatedPosts.map((post) => (
                 <div 
