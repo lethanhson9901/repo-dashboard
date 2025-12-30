@@ -42,6 +42,10 @@ def get_time_filter_label(time_filter: TimeFilter) -> str:
         return "24 GIỜ QUA"
     return str(time_filter)
 
+def get_news_post_limit() -> int:
+    """Return the max posts to fetch per subreddit."""
+    return 50
+
 def get_env_variables() -> Dict[str, str]:
     """
     Get environment variables from either GitHub Actions secrets or .env file.
@@ -112,7 +116,7 @@ def main() -> None:
         logger.info("📊 Thông số thu thập:")
         logger.info(f"   - Time filter: {time_filter}")
         logger.info(f"   - Min score: 3")
-        logger.info(f"   - Limit: 1000 posts")
+        logger.info(f"   - Limit: {get_news_post_limit()} posts")
         logger.info(f"   - Comment depth: 3")
         
         fetch_start_time = time.time()
@@ -120,7 +124,7 @@ def main() -> None:
         news_items = collector.get_community_news(
             time_filter=time_filter,
             min_score=3,     # Minimum score threshold
-            limit=1000,      # Maximum number of posts to fetch
+            limit=get_news_post_limit(),  # Maximum number of posts to fetch
             comment_depth=3,
             state_path=state_path,
             rate_limit_threshold=5
@@ -134,7 +138,7 @@ def main() -> None:
         # Save the data
         logger.info("💾 Đang lưu dữ liệu...")
         save_start_time = time.time()
-        collector.save_community_news(news_items, time_filter)
+        collector.save_community_news_by_subreddit(news_items, time_filter)
         save_end_time = time.time()
         save_duration = save_end_time - save_start_time
         logger.info(f"⏱️  Thời gian lưu: {save_duration:.2f} giây")

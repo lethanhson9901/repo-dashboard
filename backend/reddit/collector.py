@@ -13,6 +13,11 @@ from prawcore.exceptions import TooManyRequests, ResponseException, RequestExcep
 from models import *
 from news_merge import merge_news_items
 from state import load_state, save_state
+from subreddit_news import (
+    group_by_subreddit,
+    sanitize_subreddit_name,
+    trim_top_posts,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -602,3 +607,68 @@ class RedditContentCollector:
             logger.error(f"❌ Lỗi khi lưu tin tức cộng đồng: {e}")
             logger.error(f"📋 Loại lỗi: {type(e).__name__}")
             raise
+
+    def save_community_news_by_subreddit(self, news_items: List[NewsContent], time_filter: TimeFilter) -> None:
+        """
+        Save fetched news items into per-subreddit JSON files.
+
+        Args:
+            news_items (List[NewsContent]): List of news items to save
+            time_filter (TimeFilter): Time filter used to fetch the news
+        """
+        output_dir = self.output_dir / "community_news"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        grouped = group_by_subreddit(news_items)
+        index_entries = []
+
+        for subreddit, items in grouped.items():
+            file_name = f"{sanitize_subreddit_name(subreddit)}.json"
+            output_file = output_dir / file_name
+            existing_items: List[NewsContent] = []
+            if output_file.exists():
+                try:
+                    with output_file.open("r", encoding="utf-8") as f:
+                        existing_items = json.load(f).get("items", [])
+                except Exception:
+                    existing_items = []
+
+            merged_items = merge_news_items(existing_items, items)
+            trimmed_items = trim_top_posts(merged_items, limit=50)
+            total_comments = sum(len(item.get("comments", [])) for item in trimmed_items)
+            data = {
+                "metadata": {
+                    "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "time_filter": time_filter,
+                    "subreddit": subreddit,
+                    "total_items": len(trimmed_items),
+                    "total_comments": total_comments,
+                    "file_size_bytes": 0
+                },
+                "items": trimmed_items
+            }
+
+            with output_file.open("w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+
+            file_size = output_file.stat().st_size
+            data["metadata"]["file_size_bytes"] = file_size
+            with output_file.open("w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+
+            index_entries.append({
+                "subreddit": subreddit,
+                "file": file_name,
+                "total_items": len(trimmed_items),
+                "last_updated": data["metadata"]["last_updated"]
+            })
+
+        index = {
+            "metadata": {
+                "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "time_filter": time_filter,
+                "total_subreddits": len(index_entries)
+            },
+            "items": sorted(index_entries, key=lambda entry: entry["subreddit"].lower())
+        }
+        with (output_dir / "index.json").open("w", encoding="utf-8") as f:
+            json.dump(index, f, ensure_ascii=False, indent=2)
