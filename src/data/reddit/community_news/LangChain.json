@@ -1,0 +1,1426 @@
+{
+  "metadata": {
+    "last_updated": "2025-12-30 19:27:28",
+    "time_filter": "week",
+    "subreddit": "LangChain",
+    "total_items": 21,
+    "total_comments": 60,
+    "file_size_bytes": 114750
+  },
+  "items": [
+    {
+      "id": "1pxndjy",
+      "title": "Advanced RAG: Token Optimization and Cost Reduction in Production. We Cut Query Costs by 60%",
+      "subreddit": "LangChain",
+      "url": "https://www.reddit.com/r/LangChain/comments/1pxndjy/advanced_rag_token_optimization_and_cost/",
+      "author": "Electrical-Signal858",
+      "created_utc": "2025-12-28 09:33:31",
+      "score": 46,
+      "num_comments": 12,
+      "upvote_ratio": 0.91,
+      "text": "Following up on my previous RAG post: we've optimized production RAG systems further and discovered cost optimizations that nobody talks about. This is specifically about reducing token spend without sacrificing quality.\n\n# The Problem We Solved\n\nOur RAG system was working well (retrieval was solid, generation was accurate), but the token spend kept climbing:\n\n* Hybrid retrieval (BM25 + vector): \\~2,000 tokens/query\n* Retrieved documents: \\~3,000 tokens\n* LLM processing: \\~500 tokens\n* **Total: \\~5,500 tokens/query** × 100k queries/day = expensive\n\nAt $0.03 per 1K input tokens, that's **$16.50/day just for input tokens**. **$495/month**.\n\nWe asked: \"Can we get similar quality with fewer tokens?\"\n\nSpoiler: Yes. We reduced it to **2,200 tokens/query average** (60% reduction) while maintaining 92% accuracy (same as before).\n\n# The Optimizations\n\n# 1. Smart Document Chunking Reduces Retrieved Token Count\n\n**Before:** Fixed 1,000-token chunks\n\n* Simple but wasteful\n* Lots of redundant context\n* Padding with irrelevant info\n\n**After:** Semantic chunks with metadata filtering\n\n    from langchain.text_splitter import RecursiveCharacterTextSplitter\n    from sentence_transformers import SentenceTransformer\n    import numpy as np\n    \n    class SemanticChunker:\n        def __init__(self, min_chunk_size=200, max_chunk_size=800):\n            self.min_chunk_size = min_chunk_size\n            self.max_chunk_size = max_chunk_size\n            self.model = SentenceTransformer('all-MiniLM-L6-v2')\n        \n        def chunk_semantically(self, text, title=\"\"):\n            \"\"\"Break text into semantic chunks\"\"\"\n            sentences = text.split('. ')\n            \n            embeddings = self.model.encode(sentences)\n            chunks = []\n            current_chunk = []\n            current_embedding = None\n            \n            for i, sentence in enumerate(sentences):\n                current_chunk.append(sentence)\n                \n                if len(' '.join(current_chunk)) >= self.min_chunk_size:\n                    # Check semantic coherence\n                    chunk_embedding = self.model.encode(' '.join(current_chunk))\n                    \n                    if current_embedding is not None:\n                        # Cosine similarity with previous chunk\n                        similarity = np.dot(chunk_embedding, current_embedding) / (\n                            np.linalg.norm(chunk_embedding) * np.linalg.norm(current_embedding)\n                        )\n                        \n                        # If semantic break detected or max size reached\n                        if similarity < 0.6 or len(' '.join(current_chunk)) >= self.max_chunk_size:\n                            chunks.append({\n                                'content': ' '.join(current_chunk),\n                                'title': title,\n                                'tokens': len(' '.join(current_chunk).split())\n                            })\n                            current_chunk = []\n                            current_embedding = None\n                            continue\n                    \n                    current_embedding = chunk_embedding\n            \n            if current_chunk:\n                chunks.append({\n                    'content': ' '.join(current_chunk),\n                    'title': title,\n                    'tokens': len(' '.join(current_chunk).split())\n                })\n            \n            return chunks\n    \n\n**Result:** Average chunk size went from 1,000 tokens → 400 tokens (but more relevant). Retrieved fewer chunks but with less padding.\n\n# 2. Retrieval Pre-filtering Reduces What Gets Retrieved\n\n**Before:** \"Get top-5 by relevance, send all to LLM\"\n\n**After:** Multi-stage retrieval pre-filtering\n\n    def filtered_retrieval(query: str, documents: List[str], top_k=5):\n        \"\"\"Retrieve with automatic filtering\"\"\"\n        \n        # Stage 1: Broad retrieval (get more candidates)\n        candidates = vector_store.search(query, top_k=20)\n        \n        # Stage 2: Filter by relevance threshold\n        scored = [(doc, score) for doc, score in candidates]\n        high_confidence = [\n            (doc, score) for doc, score in scored \n            if score > 0.7  # Only confident matches\n        ]\n        \n        if not high_confidence:\n            high_confidence = scored[:5]  # Fallback to top-5\n        \n        # Stage 3: Deduplicate similar content\n        unique = []\n        seen_hashes = set()\n        \n        for doc, score in high_confidence:\n            doc_hash = hash(doc[:200])  # Hash of first 200 chars\n            \n            if doc_hash not in seen_hashes:\n                unique.append((doc, score))\n                seen_hashes.add(doc_hash)\n        \n        # Stage 4: Sort by relevance and return top-k\n        final = sorted(unique, key=lambda x: x[1], reverse=True)[:top_k]\n        \n        return [doc for doc, _ in final]\n    \n\n**Result:** Retrieved fewer documents, but only high-confidence ones. Reduced retrieved token count by 40%.\n\n# 3. Query Simplification Before Retrieval\n\n**Before:** Send raw user query to retriever\n\n    User: \"What are the refund policies for digital products if the customer received \n           a defective item and wants to know about international shipping costs?\"\n    (Complex, confusing retriever)\n    \n\n**After:** Pre-process query to find key concepts\n\n    from langchain.chains import LLMChain\n    from langchain.prompts import PromptTemplate\n    \n    def simplify_query(query: str, llm) -> str:\n        \"\"\"Simplify query for better retrieval\"\"\"\n        \n        prompt = PromptTemplate(\n            input_variables=[\"query\"],\n            template=\"\"\"Extract the main topic from this query. \n            Remove adjectives, clarifications, and side questions.\n            \n            User query: {query}\n            \n            Simplified: \"\"\"\n        )\n        \n        chain = LLMChain(llm=llm, prompt=prompt)\n        \n        # Use cheaper model for this (gpt-3.5-turbo)\n        simplified = chain.run(query=query).strip()\n        \n        return simplified\n    \n    # Usage:\n    simplified = simplify_query(\n        \"What are the refund policies for digital products if the customer received \"\n        \"a defective item and wants to know about international shipping costs?\",\n        llm\n    )\n    # Result: \"refund policy digital products\"\n    \n\n**Result:** Better retrieval queries → fewer iterations → fewer tokens.\n\n# 4. Response Compression Before Sending to LLM\n\n**Before:** Send all retrieved documents as-is\n\n    Retrieved documents (all 3,000 tokens):\n    [Document 1: 1000 tokens]\n    [Document 2: 1000 tokens]\n    [Document 3: 1000 tokens]\n    \n\n**After:** Compress while preserving information\n\n    def compress_context(documents: List[str], query: str, llm) -> str:\n        \"\"\"Compress documents while preserving relevant info\"\"\"\n        \n        compression_prompt = PromptTemplate(\n            input_variables=[\"documents\", \"query\"],\n            template=\"\"\"Summarize the following documents in as few words as possible \n            while preserving information relevant to the question.\n            \n            Question: {query}\n            \n            Documents:\n            {documents}\n            \n            Compressed summary:\"\"\"\n        )\n        \n        chain = LLMChain(llm=llm, prompt=compression_prompt)\n        \n        documents_text = \"\\n---\\n\".join(documents)\n        \n        compressed = chain.run(\n            documents=documents_text,\n            query=query\n        )\n        \n        return compressed\n    \n    # Usage:\n    context = compress_context(retrieved_docs, user_query, llm)\n    # 3000 tokens → 800 tokens (still has all relevant info)\n    \n\n**Result:** 60-70% context reduction with minimal quality loss.\n\n# 5. Caching at the Context Level (Not Just Response Level)\n\n**Before:** Cache full responses only\n\n    cache_key = hash(f\"{query}_{user_id}\")\n    cached_response = cache.get(cache_key)  # Only hits if identical query\n    \n\n**After:** Cache compressed context\n\n    def cached_context_retrieval(query: str, user_context: str) -> str:\n        \"\"\"Retrieve and cache at context level\"\"\"\n        \n        # Hash just the query (not user context)\n        context_key = f\"context:{hash(query)}\"\n        \n        # Check if we've retrieved this query before\n        cached_context = cache.get(context_key)\n        \n        if cached_context:\n            return cached_context  # Reuse compressed context\n        \n        # If not cached, retrieve and compress\n        documents = retriever.get_relevant_documents(query)\n        compressed = compress_context(documents, query, llm)\n        \n        # Cache the compressed context\n        cache.set(context_key, compressed, ttl=86400)  # 24 hours\n        \n        return compressed\n    \n    # Usage:\n    context = cached_context_retrieval(query, user_context)\n    \n    # For identical queries from different users:\n    # User A: Retrieves, compresses (3000 tokens), caches\n    # User B: Uses cached context (0 tokens)\n    \n\n**Result:** Context-level caching hits on 35% of queries (many users asking similar things).\n\n# 6. Token Counting Before Sending to LLM\n\n**Before:** Blindly send context to LLM, hope it fits\n\n    response = llm.generate(system_prompt + context + user_query)\n    # Sometimes exceeds context window, sometimes wastes tokens\n    \n\n**After:** Count tokens, optimize if needed\n\n    import tiktoken\n    \n    def smart_context_sending(context: str, query: str, llm, max_tokens=6000):\n        \"\"\"Send context to LLM, optimizing token usage\"\"\"\n        \n        enc = tiktoken.encoding_for_model(\"gpt-4\")\n        \n        # Count tokens in different parts\n        system_tokens = len(enc.encode(SYSTEM_PROMPT))\n        query_tokens = len(enc.encode(query))\n        context_tokens = len(enc.encode(context))\n        \n        total_input = system_tokens + query_tokens + context_tokens\n        \n        # If over budget, compress context further\n        if total_input > max_tokens:\n            compression_ratio = (total_input - max_tokens) / context_tokens\n            \n            # Aggressive compression if needed\n            compressed = aggressive_compress(context, compression_ratio)\n            context_tokens = len(enc.encode(compressed))\n            context = compressed\n        \n        # Now send to LLM\n        response = llm.generate(\n            system_prompt=SYSTEM_PROMPT,\n            context=context,\n            query=query\n        )\n        \n        return response\n    \n\n**Result:** Stayed under token limits, never wasted tokens on too-large contexts.\n\n# The Results\n\n|Optimization|Before|After|Savings|\n|:-|:-|:-|:-|\n|Chunk size|1,000 tokens|400 tokens|Smaller chunks|\n|Retrieved docs|5 docs|3 docs|40% fewer|\n|Context compression|None|60% reduction|2x tokens|\n|Query simplification|None|Applied|Better retrieval|\n|Context caching|0% hit rate|35% hit rate|35% queries free|\n|Token counting|None|Applied|No waste|\n|**Total per query**|**5,500 tokens**|**2,200 tokens**|**60% reduction**|\n\n**Cost Impact:**\n\n* Before: 100k queries × 5,500 tokens × $0.03/1K = **$16.50/day** ($495/month)\n* After: 100k queries × 2,200 tokens × $0.03/1K = **$6.60/day** ($198/month)\n* **Savings: $297/month (60% reduction)**\n\n**Accuracy Impact:**\n\n* Before: 92% accuracy\n* After: 92% accuracy (unchanged)\n\n# Important Caveat\n\nThese optimizations come with tradeoffs:\n\n1. **Query simplification** adds latency (extra LLM call, even if cheap)\n2. **Context compression** could lose edge-case information\n3. **Caching** reduces freshness (stale context for 24 hours)\n4. **Aggressive filtering** might miss relevant documents\n\nWe accepted these tradeoffs. Your situation might differ.\n\n# Implementation Difficulty\n\n* **Easy:** Token counting (1 hour)\n* **Easy:** Retrieval filtering (2 hours)\n* **Medium:** Query simplification (3 hours)\n* **Medium:** Context compression (4 hours)\n* **Medium:** Semantic chunking (4 hours)\n* **Hard:** Context-level caching (5 hours)\n\n**Total:** \\~19 hours of engineering work to save $297/month.\n\nPayback period: \\~1 month.\n\n# Code: Complete Pipeline\n\n    class OptimizedRAGPipeline:\n        def __init__(self, llm, retriever, cache):\n            self.llm = llm\n            self.retriever = retriever\n            self.cache = cache\n            self.encoder = tiktoken.encoding_for_model(\"gpt-4\")\n        \n        def process_query(self, user_query: str) -> str:\n            \"\"\"Complete optimized pipeline\"\"\"\n            \n            # Step 1: Simplify query\n            simplified_query = self.simplify_query(user_query)\n            \n            # Step 2: Retrieve with caching\n            context = self.cached_context_retrieval(simplified_query)\n            \n            # Step 3: Smart token handling\n            response = self.smart_context_sending(\n                context=context,\n                query=user_query\n            )\n            \n            return response\n        \n        def simplify_query(self, query: str) -> str:\n            \"\"\"Extract main topic from query\"\"\"\n            # Implementation from above\n            pass\n        \n        def cached_context_retrieval(self, query: str) -> str:\n            \"\"\"Retrieve and cache at context level\"\"\"\n            # Implementation from above\n            pass\n        \n        def smart_context_sending(self, context: str, query: str) -> str:\n            \"\"\"Send context with token optimization\"\"\"\n            # Implementation from above\n            pass\n    \n\n# Questions for the Community\n\n1. **Are you doing context-level caching?** We found 35% hit rate. What's your experience?\n2. **How much quality loss do you see from compression?** We measured \\~1-2% accuracy drop.\n3. **Query simplification latency trade:** Is it worth the extra LLM call?\n4. **Semantic chunking:** Are you doing it? How much better are results?\n5. **Token optimization:** What's the best bang-for-buck optimization you've found?\n\n# Edit: Responses\n\n**On query simplification latency:** \\~200-300ms added. With caching, only happens once per unique query. Worth it for most systems.\n\n**On context compression quality:** We tested with GPT-3.5-turbo for compression (cheaper). Slightly more loss than GPT-4, but acceptable trade. Saves another $150/month.\n\n**On whether these are general:** Yes, we tested on 3 different domains (legal, technical docs, customer support). Results were similar.\n\n**On LangChain compatibility:** All of this integrates cleanly with LangChain's abstractions. No fighting the framework.\n\nWould love to hear if others have found different optimizations. Token cost is becoming the bottleneck.",
+      "is_original_content": false,
+      "link_flair_text": "Discussion",
+      "permalink": "https://reddit.com/r/LangChain/comments/1pxndjy/advanced_rag_token_optimization_and_cost/",
+      "domain": "self.LangChain",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "nwcccn3",
+          "author": "KegOfAppleJuice",
+          "text": "Even though it's written up by AI, nice overview of things one can do for token optimisation",
+          "score": 6,
+          "created_utc": "2025-12-28 10:13:41",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "nwg4nze",
+          "author": "OnyxProyectoUno",
+          "text": "The semantic chunking approach is solid but you're still doing fixed-size boundaries. The real gains come from content-aware splitting that preserves logical units.\n\nYour compression step is interesting but risky. Compressing 3000 tokens to 800 means you're losing 70% of the information and trusting an LLM to keep what matters. That works until it doesn't. The accuracy might look the same in aggregate but you're probably missing edge cases where the compressed context drops critical details.\n\nThe context-level caching is clever. Most people only cache final responses which misses the opportunity to reuse expensive retrieval work. 35% hit rate is good, though 24-hour TTL might be too aggressive depending on how often your docs change.\n\nOne thing that jumps out is you're optimizing downstream when the real waste might be upstream. If your chunks are poorly formed to begin with, you're just optimizing garbage. Bad chunks mean more retrieval attempts, more irrelevant context, more compression losses. Have you looked at what your semantic chunker is actually producing? Sometimes the chunking strategy matters more than all the downstream optimization combined.\n\nThe token counting is table stakes at this point. Surprised more people aren't doing that by default.\n\nWhat's your chunk quality like after the semantic splitting? Are you seeing clean breaks at logical boundaries or is it still cutting mid-thought sometimes?",
+          "score": 3,
+          "created_utc": "2025-12-28 23:10:06",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "nwdi6kh",
+          "author": "MathematicianSome289",
+          "text": "This is great just don’t need the code",
+          "score": 1,
+          "created_utc": "2025-12-28 15:24:44",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "nwek7jz",
+          "author": "saintskytower",
+          "text": "Moderator Comment\n\nA reminder to everyone participating:\n\n• Personal attacks, profanity, and calls to mass-report users or content violate Rule 2 (“Be nice”) and will be removed.\n• If you believe a post is spam or low quality, use the report function. Do not harass other users or moderators publicly.\n• Moderation decisions are made by the moderation team based on the posted rules, not by hostile comments.\n\nThe post itself remains open for technical discussion. Keep replies focused on the substance of the content and within subreddit rules.",
+          "score": 1,
+          "created_utc": "2025-12-28 18:33:06",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "nwfzxty",
+          "author": "cmndr_spanky",
+          "text": "Your solution isn’t good",
+          "score": 1,
+          "created_utc": "2025-12-28 22:44:51",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "nwhlcvc",
+              "author": "BothContribution7282",
+              "text": "Why isn't the above solution good",
+              "score": 1,
+              "created_utc": "2025-12-29 04:07:11",
+              "is_submitter": false,
+              "replies": [
+                {
+                  "id": "nwhw75d",
+                  "author": "cmndr_spanky",
+                  "text": "“Semantic chunking” in the implementation is effectively no different than picking a small min sized chunk and relying on the VDB default way of using a similarity score to bring back the right articles… in fact the implementation is worse because you might bring back an 800 token sized chunk during usage when you only needed 200 tokens out of that chunk.\n\nIt’s almost 100% the above post is AI generated and the person who generated it didn’t even read it, nor are they commenting here. I wouldn’t trust any of it.",
+                  "score": 1,
+                  "created_utc": "2025-12-29 05:17:56",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "1pykyuj",
+      "title": "Are agent evals the new unit tests?",
+      "subreddit": "LangChain",
+      "url": "https://www.reddit.com/r/LangChain/comments/1pykyuj/are_agent_evals_the_new_unit_tests/",
+      "author": "Hot-Guide-4464",
+      "created_utc": "2025-12-29 12:23:16",
+      "score": 18,
+      "num_comments": 9,
+      "upvote_ratio": 0.77,
+      "text": "I’ve been thinking about this a lot as agent workflows get more complex. Because in software, we’d never ship anything without unit tests. But right now most people just “try a few prompts” and call it good. That clearly doesn’t scale once you have agents doing workflow automation or anything that has a real failure cost.\n\nSo I’m wondering if we’re moving to a future where CI-style evals become a standard part of building and deploying agents? Or am I overthinking it and we’re still too early for something this structured? I’d appreciate any insights on how folks in this community are running evals without drowning in infra.",
+      "is_original_content": false,
+      "link_flair_text": "Discussion",
+      "permalink": "https://reddit.com/r/LangChain/comments/1pykyuj/are_agent_evals_the_new_unit_tests/",
+      "domain": "self.LangChain",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "nwjsa3j",
+          "author": "Kortopi-98",
+          "text": "I think evals have to become the new unit tests because once an agent interacts with real data or systems, \"vibes-based QA\" becomes a liability. So we’ve been moving towards lightweight CI-like evals for our internal agents. Nothing super formal, just a set of representative tasks and expected behaviors. Just so you know, setting up the infra for this sucks unless you build your own harness. We switched to Moyai because they make this a lot less painful. Their eval workflow is basically: define agent, run them across diverse tasks, get diffs or outliers, done.",
+          "score": 9,
+          "created_utc": "2025-12-29 14:28:04",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "nwjyb12",
+              "author": "Hot-Guide-4464",
+              "text": "Are you testing reasoning chains, final outputs or both?",
+              "score": 2,
+              "created_utc": "2025-12-29 15:00:42",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "nwk4dqi",
+                  "author": "Kortopi-98",
+                  "text": "Both. You can check the final result (e.g. reasoning steps, metrics pulled) but also the intermediate reasoning if you want consistency across steps. We treat it almost like snapshot tests for LLMs.",
+                  "score": 2,
+                  "created_utc": "2025-12-29 15:31:25",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "nwjhors",
+          "author": "imnotafanofit",
+          "text": "We started doing mini regression suite for agents. They're fast and lightweight but the biggest challenge is infra though. Spinning up evals can get expensive if you run them often.",
+          "score": 6,
+          "created_utc": "2025-12-29 13:25:27",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "nwjnm9b",
+              "author": "Hot-Guide-4464",
+              "text": "Yep, infra costs are kind of an underrated part of this conversation. How are you managing overhead?",
+              "score": 3,
+              "created_utc": "2025-12-29 14:01:16",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "nwj9wzh",
+          "author": "charlyAtWork2",
+          "text": "Most of the time is only ETL.\n\nA boring step by step transformation with LLM in the middle.",
+          "score": 4,
+          "created_utc": "2025-12-29 12:31:37",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "nwld9em",
+          "author": "MathematicianSome289",
+          "text": "See em as more integration tests than unit tests. Evals test how the pieces work together. Units test the individual pieces.",
+          "score": 3,
+          "created_utc": "2025-12-29 19:01:59",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "nwlo4uu",
+          "author": "hidai25",
+          "text": "I’m mostly with you, but I don’t think it maps 1:1 to unit tests. For agents it feels more like integration/regression tests, because the “output string” is the least stable thing in the system. What *is* stable is behavior: did it call the right tools, avoid the wrong ones, return valid structure, and stay within time/$ budgets.\n\nThe only way I’ve seen this not turn into eval-infra hell is keeping a small “this can’t break” suite in CI, running the bigger flaky stuff nightly, and turning every real failure into a test case. That’s when it starts compounding like real testing.\n\nFull disclosure: I’m building an OSS harness around exactly this idea (EvalView). If it’s useful, it’s here: [https://github.com/hidai25/eval-view]()",
+          "score": 2,
+          "created_utc": "2025-12-29 19:54:01",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "nwm58wp",
+          "author": "piyaviraj",
+          "text": "We use evals as agent dev testing tool as a part of what we call agent development life cycle. Since it is part of the dev testing, every changes like prompt changes, tool changes, memory schema changes, etc are covered during the dev testing for the agents and their orchestration. This will ensure changes will not break the logic(reasoning) assumptions and as well as integration assumptions. However, we do not configure eval evaluation in a regular build CI or local build because for large project the token economics will be hard to justify at scale.",
+          "score": 1,
+          "created_utc": "2025-12-29 21:17:56",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1pu471m",
+      "title": "Teaching AI Agents Like Students (Blog + Open source tool)",
+      "subreddit": "LangChain",
+      "url": "https://www.reddit.com/r/LangChain/comments/1pu471m/teaching_ai_agents_like_students_blog_open_source/",
+      "author": "Unable-Living-3506",
+      "created_utc": "2025-12-23 20:27:37",
+      "score": 18,
+      "num_comments": 2,
+      "upvote_ratio": 1.0,
+      "text": "**TL;DR:**  \nVertical AI agents often struggle because domain knowledge is tacit and hard to encode via static system prompts or raw document retrieval.\n\nWhat if we instead treat agents like students: human experts teach them through iterative, interactive chats, while the agent distills rules, definitions, and heuristics into a continuously improving knowledge base.\n\nI built an open-source tool [Socratic ](https://github.com/kevins981/Socratic)to test this idea and show concrete accuracy improvements.\n\nFull blog post: [https://kevins981.github.io/blogs/teachagent\\_part1.html](https://kevins981.github.io/blogs/teachagent_part1.html)\n\nGithub repo: [https://github.com/kevins981/Socratic](https://github.com/kevins981/Socratic)\n\n3-min demo: [https://youtu.be/XbFG7U0fpSU?si=6yuMu5a2TW1oToEQ](https://youtu.be/XbFG7U0fpSU?si=6yuMu5a2TW1oToEQ)\n\nAny feedback is appreciated!\n\nThanks!",
+      "is_original_content": false,
+      "link_flair_text": "Resources",
+      "permalink": "https://reddit.com/r/LangChain/comments/1pu471m/teaching_ai_agents_like_students_blog_open_source/",
+      "domain": "self.LangChain",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "nvmkkfi",
+          "author": "Khade_G",
+          "text": "Interesting idea… “teach the agent like a student” feels like a more realistic way to capture tacit knowledge than hoping a static prompt + RAG nails it.\n\nA few things I’d be curious about (and what I’d look for to evaluate it):\n- What exactly gets written to the KB? (rules/heuristics, examples, counterexamples, definitions?) and how you avoid it becoming a grab-bag of paraphrased chats.\n- Conflict + drift handling: if two experts teach slightly different policies, how do you reconcile? Do you version rules, keep provenance, or let the agent learn a “house style” per org?\n- Generalization vs memorization: do your “accuracy improvements” hold on new scenarios, or mainly on similar phrasing to the teaching sessions?\n- Evaluation clarity: what benchmarks/tasks did you use, what’s the baseline (prompt-only, RAG, fine-tune), and what’s the biggest failure case still?\n- Safety/permission model: when experts teach via chat, are you logging sensitive info? Any redaction/anonymization options before distillation?\n- Tooling ergonomics: how much effort per “lesson” to see meaningful gains? (If it takes 2 hours of expert time to improve 2%, that’s a tough sell.)\n\nIf you want actionable feedback from practitioners, I’d suggest adding one tight example in the README/blog like:\n1) the raw problem + agent failure,\n2) 2–3 teaching turns,\n3) the distilled KB artifact,\n4) the post-teach behavior change,\n5) one counterexample where the rule shouldn’t fire.\n\nAlso: have you tried a “challenge set” workflow where users submit tricky edge cases, and the system proposes a candidate rule + asks the expert to approve/edit? That tends to scale better than open-ended teaching.\n\nQuick question: does Socratic distill into something structured (YAML/JSON rules, decision tree, rubric), or is it still largely natural language notes with retrieval?",
+          "score": 3,
+          "created_utc": "2025-12-23 23:06:24",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "nwhdrc1",
+          "author": "PurpleWho",
+          "text": "This is neat.\n\nIf I understand correctly, you've built a knowledge base builder.\n\nThen you improved an airline agent’s success rate by 17% by automating the agent failure analysis using your knowledge base builder to improve the agent's instruction prompt.\n\nI think it's an interesting tool and an interesting use case.\n\nIn [your second blog post](https://kevins981.github.io/blogs/teachagent_part2.html), you say, \"I split all tasks into train and test sets (20 and 30 tasks each).\"\n\nHow did you come up with the initial set of 30 tasks?\n\nDid you just ask an LLM for an initial range of likely mock tasks?\n\nI find that coming up with the tasks in the first place, for the analysis is the tricky bit and would love to understand how you approached this here.",
+          "score": 2,
+          "created_utc": "2025-12-29 03:21:26",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1pv10o3",
+      "title": "My agents work in dev but break in prod. Is \"Git for Agents\" the answer, or just better logging?",
+      "subreddit": "LangChain",
+      "url": "https://www.reddit.com/r/LangChain/comments/1pv10o3/my_agents_work_in_dev_but_break_in_prod_is_git/",
+      "author": "bumswagger",
+      "created_utc": "2025-12-25 00:17:23",
+      "score": 17,
+      "num_comments": 23,
+      "upvote_ratio": 0.85,
+      "text": "I’ve been building agents for a while (mostly LangGraph), and I keep running into the same issue: I tweak a prompt to fix one edge case, and it breaks three others. I’m building something to specifically \"version control\" agent reasoning to roll back to the exact state/prompt/model config that worked yesterday. Is this overkill? Do you guys just use Git for prompts + LangSmith for traces, or do you wish you had a \"snapshot\" of the agent's brain before you deployed?",
+      "is_original_content": false,
+      "link_flair_text": null,
+      "permalink": "https://reddit.com/r/LangChain/comments/1pv10o3/my_agents_work_in_dev_but_break_in_prod_is_git/",
+      "domain": "self.LangChain",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "nvsza0a",
+          "author": "adiberk",
+          "text": "I mean this isn’t novel. It’s called evals and prompt versioning.\n\nSome services like langsmith offer these things out of the box. I built my own for my company. But yeah - very valuable",
+          "score": 6,
+          "created_utc": "2025-12-25 01:06:05",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "nvtm4br",
+              "author": "AdditionalWeb107",
+              "text": "what do you do for online signals of a bad/good user experience? Sampling logs? And for prompt versioning do you use a feature flag tool?",
+              "score": 1,
+              "created_utc": "2025-12-25 04:01:19",
+              "is_submitter": false,
+              "replies": [
+                {
+                  "id": "nvv7367",
+                  "author": "adiberk",
+                  "text": "Have you done any research on evals and tracing? Bc that’s basically how you can catch bad experiences.\n\nPrompt versioning can be something as simple as a custom table that stores name and version and instruction. Or using something like langsmith.\n\nAgain I built a complex custom solution bc we didn’t want to rely on anyone for anything.  Yet there are completely premade solutions out there.\n\nAnd no I wouldn’t think “feature flag” is the right term. That has a completely different purpose",
+                  "score": 1,
+                  "created_utc": "2025-12-25 13:17:09",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "nvtelwx",
+          "author": "Khade_G",
+          "text": "Not overkill… I think this is a real problem, and Git + LangSmith only partially solves it.\n\nWhy Git + traces fall short\n- Git versions prompts, not the runtime (model version, tool schemas, retriever state, routing logic).\n- Traces explain failures, but don’t reliably let you reproduce a working state.\n\nWhen snapshots make sense\nIf you use RAG, tools, LangGraph state, or deploy often, you need more than prompt diffs. “Worked yesterday, broke today” usually means something outside the prompt changed.\n\nMinimum useful “agent snapshot”\n- prompt bundle\n- model + decoding params\n- graph/routing config\n- tool schemas + versions\n- retriever/index version\n\nThink of it like a deploy artifact for agents. Not overkill but just DevOps discipline applied to LLM systems.",
+          "score": 3,
+          "created_utc": "2025-12-25 03:02:28",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "nvtl9t7",
+              "author": "bumswagger",
+              "text": "Copy that!",
+              "score": 1,
+              "created_utc": "2025-12-25 03:54:34",
+              "is_submitter": true,
+              "replies": []
+            },
+            {
+              "id": "nvtm9q7",
+              "author": "AdditionalWeb107",
+              "text": "This is neat - would we replay state via well instrumented logs?",
+              "score": 1,
+              "created_utc": "2025-12-25 04:02:32",
+              "is_submitter": false,
+              "replies": [
+                {
+                  "id": "nvwb9ce",
+                  "author": "Khade_G",
+                  "text": "Logs definitely help, but logs alone don’t guarantee reproducibility.\n\nA good mental model is logs tell you what happened, but snapshots preserve why it happened.\n\nFor true replay you need:\n- the same inputs\n- the same prompt + graph\n- the same model + params\n- the same tools and retriever version\n\nWithout freezing those, replay will drift even with perfect logs.\n\nA good way to think of it is logs = debugger, whereas snapshot = deploy artifact\n\nYou replay by rehydrating the snapshot, then feeding in the logged inputs.",
+                  "score": 1,
+                  "created_utc": "2025-12-25 17:39:42",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "nvtii8q",
+          "author": "wheres-my-swingline",
+          "text": "Langfuse?",
+          "score": 2,
+          "created_utc": "2025-12-25 03:32:58",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "nvtl6xt",
+              "author": "bumswagger",
+              "text": "A bit different, Langfuse tracks how your LLM app is performing and at what cost while I'm trying to track what ai agents did and why over time.",
+              "score": 1,
+              "created_utc": "2025-12-25 03:53:57",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "nvv16co",
+                  "author": "wheres-my-swingline",
+                  "text": "You can do that with langfuse",
+                  "score": 1,
+                  "created_utc": "2025-12-25 12:25:36",
+                  "is_submitter": false,
+                  "replies": []
+                },
+                {
+                  "id": "nw0d6xs",
+                  "author": "Party_Aide_1344",
+                  "text": "Lotte from Langfuse here. \n\nThis sounds a lot like prompt management. Prompts are versioned, and can be linked to traces. So you can measure the performance of each prompt version, and rolling back is also easy. \n\nOne workflow that’s worked well for teams I’ve seen:\n\n1. build a dataset that's representative of your application (happy paths, a diverse set of sad paths, ...). You can do this in Langfuse\n\n2. every time you change your prompt, you run your new prompt on your dataset. If you use prompt management in Langfuse, your prompt is automatically versioned. You can run your new prompt on a dataset in Langfuse too, Langfuse calls it an \"experiment run\".\n\n3. if your dataset is diverse enough, you should be able to spot regressions at this stage, so you can fix them before deploying to production. You can iterate on these steps until you are happy with the experiment run results\n\n4. you deploy this prompt version to production. In Langfuse, this is done by assigning the *production* label to that prompt version. All new production traces will be linked to this prompt. If you notice the new prompt is breaking some behavior, you can (1) add the specific trace to the dataset, so you detect this in your experiment runs next time and (2) edit your prompt, or roll back to a previous version by reassigning the *production* label\n\nYou can find more on how to implement prompt management and experiments here:\n\n\\- [https://langfuse.com/docs/prompt-management/overview](https://langfuse.com/docs/prompt-management/overview)\n\n\\- [https://langfuse.com/docs/evaluation/overview](https://langfuse.com/docs/evaluation/overview)\n\nIf it's not exactly what you are looking for, happy to take a look together!",
+                  "score": 1,
+                  "created_utc": "2025-12-26 11:30:04",
+                  "is_submitter": false,
+                  "replies": []
+                },
+                {
+                  "id": "nvuh3o8",
+                  "author": "Masotsheni",
+                  "text": "Gotcha, tracking the reasoning behind agent actions seems crucial. If you can correlate performance with specific prompts and configurations, that could really help with debugging and improving reliability. Have you thought about how to integrate that tracking with your version control process?",
+                  "score": 0,
+                  "created_utc": "2025-12-25 08:51:20",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "nvsze2h",
+          "author": "AdditionalWeb107",
+          "text": "I am not sure i would re-invent change control for agents - there are a lot tools out there. But the one thing is true that the rate of changes being pushed out is a lot. If you are looking for production-grade infrastructure to deliver agents to prod, you might want to look at [https://github.com/katanemo/plano](https://github.com/katanemo/plano)",
+          "score": 1,
+          "created_utc": "2025-12-25 01:06:57",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "nvunlhs",
+          "author": "adlx",
+          "text": "In our case, code and config is in git, policies (authorization) are in database. Users memory are also in database. Prompts are in several places, code, config, database (user memories) and also part in document store.\nSo basically everything is under control, except user memories.\n\nBut what is never under control is what the user will come with, they are usually extremely creative and will always come with questions that will through us in edge cases or beyond 😂",
+          "score": 1,
+          "created_utc": "2025-12-25 10:03:05",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "nvv00f9",
+          "author": "BeerBatteredHemroids",
+          "text": "If it works in dev but breaks in prod you're doing something wrong and more logging is not going to fix that. Do you not have a UAT environment before you commit to prod?",
+          "score": 1,
+          "created_utc": "2025-12-25 12:14:28",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "nvwr781",
+          "author": "LooseLossage",
+          "text": "Prompts might be too complex. A God prompt that tries to do everything is an anti-pattern for exactly this reason. Split into multiple simple prompts, collect all the failures and make a test suite and run evals. Langfuse is another framework for observability and evaluation. Promptfoo is s simple framework for pure evals.",
+          "score": 1,
+          "created_utc": "2025-12-25 19:11:49",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "nw5ev23",
+          "author": "PurpleWho",
+          "text": "As [Lotte from Langfuse mentioned below](https://www.reddit.com/r/LangChain/comments/1pv10o3/comment/nw0d6xs/?utm_source=share&utm_medium=web3x&utm_name=web3xcss&utm_term=1&utm_content=share_button), building a dataset for your prompt so that you can run evals against it when you make changes to it is the best way to go here.\n\nBuilding a dataset is hard though.\n\nIf your problem is that everything works in dev and then breaks in production, the idea is to be able to identify the exact issue/input that broke the prompt in production and then add that specific scenario to your dataset. Over time, you build up 50-200 edge cases like this in your data set, and then every time you make a change to the prompt, you can evaluate it against your entire dataset, and you know that it covers all your established edge cases.\n\nLike I said, this is a lot of work. Setting up the tracing, the evals, getting everything to run on CI/CD, it's a commitment...and it doesn't always make sense for a small project or something early stage. \n\nI use a VS Code extension called Mind Rig that puts an AI sandbox into my editor. It lets me save all my scenarios in a CSV and then lets me run my prompt against all my scenarios at once and see the results side-by-side. \n\nThere is no setup beyond installing a VS Code extension, and it's great for getting the ball rolling. Once things start getting more serious and I have a dataset with more than 20-30 scenarios, you can just export the CSV to a more formal eval tool.\n\nIf you want to try it, just search for Mind Rig. It's free and open source and works with your Vercel gateway keys.\n\nIf you want to jump straight to writing more comprehensive evals, then here are some resources I found super helpful when I started:  \n\\- [Anthropic has a free course on writing evals](https://github.com/anthropics/courses/blob/master/prompt_evaluations/README.md) that's a great place to start   \n\\- Sridatta Thatipamala and Wil Chung wrote a book called '[Go from Zero to Eval](https://forestfriends.tech/)'. Paid, but has a bunch of super helpful examples in there.  \n\\- And, of course, Hamel Husain's blog. It's all gold, but [this FAQ](https://hamel.dev/blog/posts/evals-faq/) is probably a good place to start. [](https://www.linkedin.com/posts/hamelhusain_creating-a-llm-as-a-judge-that-drives-business-activity-7257413314845003778-ffV_)\n\n[](https://www.linkedin.com/posts/hamelhusain_creating-a-llm-as-a-judge-that-drives-business-activity-7257413314845003778-ffV_)\n\n,",
+          "score": 1,
+          "created_utc": "2025-12-27 06:08:07",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1pu7v2b",
+      "title": "Data Agent",
+      "subreddit": "LangChain",
+      "url": "https://www.reddit.com/r/LangChain/comments/1pu7v2b/data_agent/",
+      "author": "fumes007",
+      "created_utc": "2025-12-23 23:04:54",
+      "score": 14,
+      "num_comments": 5,
+      "upvote_ratio": 1.0,
+      "text": "Built an open-source **natural language → SQL data agent** using **LangChain + LangGraph**. Under the hood, it builds on LangChain’s community SQLDatabase utility rather than re-inventing database access:\n\nUses SQLDatabase for schema inspection, execution, and result handling\n\nExtends it with support for Azure AD auth for the Azure native databases + Cosmos DB.\n\nSupported databases:\n\n* PostgreSQL\n* Azure SQL / Synapse\n* Cosmos DB\n* Databricks SQL\n* BigQuery\n\nAllows either per-agent datasource configs or a shared, pre-initialized SQLDatabase if you want tighter control over connections and pooling\n\nYou ask a question in plain English, and it:\n\n* Uses an **intent detection agent** to route the question to the right datasource\n* Generates SQL using schema context + optional few-shot examples\n* **Validates SQL safely** with `sqlglot` (blocked functions, enforced LIMITs, dialect-aware)\n* Executes the query and turns results back into a natural-language response\n* Supports **multi-turn comvos**\n\nIt’s designed as a **multi-agent system**:\n\n* One agent for intent routing\n* Multiple specialized data agents, each tied to a domain and database\n\nEverything is **YAML-driven** (agents, schemas, prompts, validation rules), and it also exposes an **A2A (Agent-to-Agent) server** so other agents can discover and call it programmatically.\n\nRepo:\n[https://github.com/eosho/langchain_data_agent](https://github.com/eosho/langchain_data_agent)\n",
+      "is_original_content": false,
+      "link_flair_text": null,
+      "permalink": "https://reddit.com/r/LangChain/comments/1pu7v2b/data_agent/",
+      "domain": "self.LangChain",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "nvwi59u",
+          "author": "Hopeful-Jicama-1613",
+          "text": "Explain more",
+          "score": 1,
+          "created_utc": "2025-12-25 18:19:46",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "nvwsydi",
+              "author": "fumes007",
+              "text": "Okay, updated description.",
+              "score": 1,
+              "created_utc": "2025-12-25 19:22:18",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "nw02f5g",
+          "author": "importmind",
+          "text": "Will it work in isolated environment with no internet access?",
+          "score": 1,
+          "created_utc": "2025-12-26 09:40:42",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "nw0edpx",
+              "author": "fumes007",
+              "text": "It can work on local postgres/sqlite & docker. However the only LLM supported is only azure openai which requires Internet connection. Contributions are welcomed.",
+              "score": 3,
+              "created_utc": "2025-12-26 11:41:29",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "nw4m9rb",
+          "author": "BeerBatteredHemroids",
+          "text": "Databricks already has this... its called Genie and it has billions of dollars in funding and development behind it.",
+          "score": 1,
+          "created_utc": "2025-12-27 02:43:18",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1pv6gmo",
+      "title": "Large Website data ingestion for RAG",
+      "subreddit": "LangChain",
+      "url": "https://www.reddit.com/r/LangChain/comments/1pv6gmo/large_website_data_ingestion_for_rag/",
+      "author": "Vishwaraj13",
+      "created_utc": "2025-12-25 05:45:53",
+      "score": 12,
+      "num_comments": 6,
+      "upvote_ratio": 1.0,
+      "text": "I am working on a project where i need to add WHO.int (World Health Organization) website as a data source for my RAG pipeline. Now this website has ton of data available. It has lots of articles, blogs, fact sheets and even PDFs attached which has data that also needs to be extracted as a data source. Need suggestions on what would be best way to tackle this problem ?",
+      "is_original_content": false,
+      "link_flair_text": "Question | Help",
+      "permalink": "https://reddit.com/r/LangChain/comments/1pv6gmo/large_website_data_ingestion_for_rag/",
+      "domain": "self.LangChain",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "nvwb850",
+          "author": "BeerBatteredHemroids",
+          "text": "This thread has basically become a place for newbs to come beg for information on how to do basic shit. Not sure why Im even a member of this anymore.",
+          "score": 4,
+          "created_utc": "2025-12-25 17:39:30",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "nvwhvvc",
+              "author": "Hopeful-Jicama-1613",
+              "text": "It’s ok , we should be kind towards each other.\nIgnore these posts.",
+              "score": 2,
+              "created_utc": "2025-12-25 18:18:16",
+              "is_submitter": false,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "nvu4rqk",
+          "author": "OnyxProyectoUno",
+          "text": "The tricky part with large websites like WHO.int is the mixed content types and nested structures. You'll want to start with a crawler that can handle both the HTML content and follow PDF links, something like Scrapy or even a headless browser setup if there's dynamic content. The PDFs are going to be your biggest pain point since medical documents often have complex tables, multi-column layouts, and embedded images that basic parsers butcher.\n\nFor the actual processing pipeline, you'll need different strategies for articles versus PDFs versus fact sheets since they have completely different information densities and structures. I built vectorflow.dev to debug exactly this kind of multi-format pipeline mess before documents hit the vector store. The real question is whether you're planning to crawl everything upfront or do incremental updates, because WHO.int updates frequently and you'll need to handle content versioning. What's your planned update cadence?",
+          "score": 3,
+          "created_utc": "2025-12-25 06:42:36",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "nvu62k6",
+              "author": "Vishwaraj13",
+              "text": "I just need one time static dump for a PoC. So it will be one time ingestion.",
+              "score": 1,
+              "created_utc": "2025-12-25 06:55:12",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "nvvqn9m",
+                  "author": "vatsalnshah",
+                  "text": "To provide the PoC, I would start with the set of files and pages that will enable the working demo. Once that is approved and shows positive results, I will work on scraping all other pages, PDFs, and more.",
+                  "score": 1,
+                  "created_utc": "2025-12-25 15:35:20",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "nw2o8zl",
+          "author": "Born_Owl7750",
+          "text": "Checkout Tavily for content search. Also checkout google search API. Directly use the API to search for information. Lock by domain.\n\nYou might have to write custom scraping code for downloading PDFs or for content not available on the tavily or google search API. Once downloaded, you will need some OCR tools to get content from it.",
+          "score": 1,
+          "created_utc": "2025-12-26 19:53:04",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1puc8ak",
+      "title": "I'm planning to develop an agent application, and I've seen frameworks like LangChain, LangGraph, and Agno. How do I choose?",
+      "subreddit": "LangChain",
+      "url": "https://www.reddit.com/r/LangChain/comments/1puc8ak/im_planning_to_develop_an_agent_application_and/",
+      "author": "Zestyclose_Thing1037",
+      "created_utc": "2025-12-24 02:33:59",
+      "score": 12,
+      "num_comments": 37,
+      "upvote_ratio": 0.8,
+      "text": "",
+      "is_original_content": false,
+      "link_flair_text": "Discussion",
+      "permalink": "https://reddit.com/r/LangChain/comments/1puc8ak/im_planning_to_develop_an_agent_application_and/",
+      "domain": "self.LangChain",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "nvntdkk",
+          "author": "Luneriazz",
+          "text": "there 2 type ai agent:\n- workflow agent\n- crew/agent-agent/agent-supervisor",
+          "score": 4,
+          "created_utc": "2025-12-24 03:43:28",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "nvo3lgw",
+          "author": "cmndr_spanky",
+          "text": "I prefer Pydantic AI agent framework over langchain, just feels more intuitive to me. \n\nhttps://ai.pydantic.dev/",
+          "score": 5,
+          "created_utc": "2025-12-24 04:54:25",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "nvnjdrt",
+          "author": "Own_Sir4535",
+          "text": "As I understand it, the langchain is for creating agents, and the langraph is for orchestrating those agents. Basically, it's the pimp of the AI ​​world.",
+          "score": 5,
+          "created_utc": "2025-12-24 02:39:41",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "nvnmpws",
+              "author": "tabdon",
+              "text": "That's not quite how I'd phrase it. \n\nLangChain provides the core components and standard agent patterns. LangGraph is a graph-based orchestration layer that makes complex (e.g. branching, looping) agent workflows easier to define and control.\n\nYou could use a LangChain agent in a LangGraph agent, but you don't need to. I build most of my agents in pure LangGraph (when using Python). Once you get the hang of it you can just stick with LangGraph because it's more powerful.",
+              "score": 6,
+              "created_utc": "2025-12-24 03:00:30",
+              "is_submitter": false,
+              "replies": [
+                {
+                  "id": "nvp8dcb",
+                  "author": "RoyalTitan333",
+                  "text": "Can you share some best resources for mastering LangGraph framework? I've been looking into it for a while.",
+                  "score": 1,
+                  "created_utc": "2025-12-24 11:08:10",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "nvnmv9w",
+          "author": "BeerBatteredHemroids",
+          "text": "Been running pydantic AI for our agents and langgraph to orchestrate workflows using those agents",
+          "score": 4,
+          "created_utc": "2025-12-24 03:01:27",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "nvnp9fy",
+              "author": "Brief_Customer_8447",
+              "text": "I am doing the same it the easiest way.",
+              "score": 2,
+              "created_utc": "2025-12-24 03:16:50",
+              "is_submitter": false,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "nvtzpxw",
+          "author": "jerrysyw",
+          "text": "It really depends on what problem you’re trying to solve.\n\n\n\nMy short take:\n\nIf you’re exploring ideas or prototyping quickly → LangChain is fine.\n\nIf you care about reliability, control, and production behavior → LangGraph is the better choice.\n\nIf you want something opinionated and lightweight → Agno can work, but you’ll hit limits sooner.\n\n\n\nI personally recommend LangGraph. Not only for building agents, but because it lets you formalize existing workflows (business rules, approvals, fallbacks) as explicit graphs.\n\nThat makes behavior more inspectable, testable, and closer to how real systems already operate.\n\n\n\nIn practice, agents that work in production often look more like stateful workflows with AI nodes, and LangGraph fits that mental model well.",
+          "score": 2,
+          "created_utc": "2025-12-25 05:55:11",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "nvnmjk5",
+          "author": "Hot_Substance_9432",
+          "text": "LangChain and LangGraph are used for complex stateful workflows and if you need one which is not so bloated Agno will suffice",
+          "score": 2,
+          "created_utc": "2025-12-24 02:59:24",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "nvp77ip",
+              "author": "Zestyclose_Thing1037",
+              "text": "I'm trying Agno, thanks.",
+              "score": 0,
+              "created_utc": "2025-12-24 10:57:02",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "nvp7p7o",
+                  "author": "Hot_Substance_9432",
+                  "text": "As others mentioned even Pydantic AI is very good",
+                  "score": 1,
+                  "created_utc": "2025-12-24 11:01:46",
+                  "is_submitter": false,
+                  "replies": []
+                },
+                {
+                  "id": "nvp9ani",
+                  "author": "Hot_Substance_9432",
+                  "text": "You can also look at [https://github.com/Praison-Labs/Praison](https://github.com/Praison-Labs/Praison)  as they are using Yaml and you can configure it",
+                  "score": 0,
+                  "created_utc": "2025-12-24 11:16:58",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "nvnx4ye",
+          "author": "ChanceKale7861",
+          "text": "What problem are you solving? Python agents don’t scale.",
+          "score": 2,
+          "created_utc": "2025-12-24 04:08:26",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "nvny4c4",
+              "author": "maigpy",
+              "text": "tell me more?alternatives?",
+              "score": 2,
+              "created_utc": "2025-12-24 04:15:12",
+              "is_submitter": false,
+              "replies": [
+                {
+                  "id": "nvp7nfd",
+                  "author": "Hot_Substance_9432",
+                  "text": "This may help :) [https://www.linkedin.com/posts/brijpandeyji\\_the-real-challenge-in-ai-today-isnt-just-activity-7367774156207185921-RN\\_7/](https://www.linkedin.com/posts/brijpandeyji_the-real-challenge-in-ai-today-isnt-just-activity-7367774156207185921-RN_7/)",
+                  "score": 1,
+                  "created_utc": "2025-12-24 11:01:18",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            },
+            {
+              "id": "nvoxa1v",
+              "author": "Potential_Nobody8669",
+              "text": "When you say python wont scale, at what scale ?",
+              "score": 1,
+              "created_utc": "2025-12-24 09:19:03",
+              "is_submitter": false,
+              "replies": [
+                {
+                  "id": "nvqoszx",
+                  "author": "cmndr_spanky",
+                  "text": "He’s incorrect.",
+                  "score": 1,
+                  "created_utc": "2025-12-24 16:47:13",
+                  "is_submitter": false,
+                  "replies": []
+                },
+                {
+                  "id": "nvzb75n",
+                  "author": "ChanceKale7861",
+                  "text": "10,000+ concurrent",
+                  "score": 1,
+                  "created_utc": "2025-12-26 05:18:18",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            },
+            {
+              "id": "nvqorsn",
+              "author": "cmndr_spanky",
+              "text": "Sure they do, as long as you architect it to work at scale.",
+              "score": 1,
+              "created_utc": "2025-12-24 16:47:02",
+              "is_submitter": false,
+              "replies": [
+                {
+                  "id": "nvzbfo3",
+                  "author": "ChanceKale7861",
+                  "text": "What scale are you thinking? I’m thinking platform level, agents as OS, full business and ops processes, and multiple clients operating with their solutions on the platform, and their clients, with each multi agent system running 1,000s of concurrent agents.",
+                  "score": 1,
+                  "created_utc": "2025-12-26 05:20:14",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "nvo1lp1",
+          "author": "adiberk",
+          "text": "Bee young Agno,\nHave best of both worlds. Simplicity of pedantic AI when needed, complexity of workflows and more if you also want",
+          "score": 1,
+          "created_utc": "2025-12-24 04:40:03",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "nvoeskl",
+          "author": "fasti-au",
+          "text": "Pick any and start then when you find a reason to pick another mix and match builtnwhatever you want mate it’s just code so mix and match is easy if you just pass a cintext in and out etc.  text to other system etc",
+          "score": 1,
+          "created_utc": "2025-12-24 06:23:56",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "nvoxn1v",
+          "author": "No-Meaning-995",
+          "text": "For most projects, the OpenAI Agents SDK is sufficient and if there are longer stricter workflows then CrewAI. These two frameworks are the simplest and with them you cover most. LangGraph is more needed if you want to build agent infrastructure.",
+          "score": 1,
+          "created_utc": "2025-12-24 09:22:40",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "nvoxtu4",
+          "author": "Potential_Nobody8669",
+          "text": "If you are building something complex where you want better context engineering then go with langchain. I have built agents that analyse and summarise thousands of logs, when loaded to context it overflows llm context, you can solve using command and write directly to a state using filesystemmiddleware which is a virtual one.\n\nIf you think you have this complex case go with langchain, or if yiu still prefer langchain it is easier and have better support for checkpointing for lots of databases, so you don't need to write callbacks .",
+          "score": 1,
+          "created_utc": "2025-12-24 09:24:37",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "nvzfggd",
+          "author": "Potential_Nobody8669",
+          "text": "Now i am curious for what use case the  agents are being built to run at this scale .  And what inference provider and managing the latency as well",
+          "score": 1,
+          "created_utc": "2025-12-26 05:54:27",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "nw09fja",
+          "author": "earlycore_dev",
+          "text": "I’ve been use pydantic so far and it does a proper job, you can pair it with logfire as well. It’s really easy to understand and plug in",
+          "score": 1,
+          "created_utc": "2025-12-26 10:52:32",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "nw7v4k8",
+          "author": "cadillacco",
+          "text": "just build what u need manually it isnt hard",
+          "score": 1,
+          "created_utc": "2025-12-27 17:11:25",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1pvwyvz",
+      "title": "I built Plano(A3B). Offers <200 ms latency with frontier model performance for multi-agent systems",
+      "subreddit": "LangChain",
+      "url": "https://i.redd.it/ucrxhaecmh9g1.png",
+      "author": "AdditionalWeb107",
+      "created_utc": "2025-12-26 05:52:17",
+      "score": 10,
+      "num_comments": 0,
+      "upvote_ratio": 0.92,
+      "text": "[External Link]",
+      "is_original_content": false,
+      "link_flair_text": "Announcement",
+      "permalink": "https://reddit.com/r/LangChain/comments/1pvwyvz/i_built_planoa3b_offers_200_ms_latency_with/",
+      "domain": "i.redd.it",
+      "is_self": false,
+      "comments": []
+    },
+    {
+      "id": "1puphjs",
+      "title": "Free PDF-to-Markdown demo that finally extracts clean tables from 10-Ks (Docling)",
+      "subreddit": "LangChain",
+      "url": "https://www.reddit.com/r/LangChain/comments/1puphjs/free_pdftomarkdown_demo_that_finally_extracts/",
+      "author": "AmineAce",
+      "created_utc": "2025-12-24 15:08:51",
+      "score": 9,
+      "num_comments": 5,
+      "upvote_ratio": 0.91,
+      "text": "Building RAG apps and hating how free tools mangle tables in financial PDFs?\n\nI built a free demo using IBM's Docling – it handles merged cells and footnotes way better than most open-source options.\n\nTry your own PDF: [https://huggingface.co/spaces/AmineAce/pdf-tables-rag-demo](https://huggingface.co/spaces/AmineAce/pdf-tables-rag-demo)\n\nExample on Apple 10-K (shareholders' equity table):\n\nhttps://preview.redd.it/s2bygren369g1.png?width=945&format=png&auto=webp&s=e2b59a62e15c57d99831922b1817993f21869acc\n\nSimple test PDF also clean (headers, lists, table pipes).\n\nNote: Large docs (80+ pages) take 5-10 min on free tier – worth it for the accuracy.\n\nWould you pay $10/mo for a fast API version (1k pages, async queue, higher limits)?\n\nFeedback welcome – planning waitlist if there's interest!",
+      "is_original_content": false,
+      "link_flair_text": null,
+      "permalink": "https://reddit.com/r/LangChain/comments/1puphjs/free_pdftomarkdown_demo_that_finally_extracts/",
+      "domain": "self.LangChain",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "nvqjaro",
+          "author": "OnyxProyectoUno",
+          "text": "The equity table output looks solid. Merged cells and multi-column headers are usually where things get ugly, especially in 10-Ks where you get those nested column spans with units in one row and dates in another. How does it handle tables that span multiple pages? Most tools either lose header row context entirely or create duplicate headers that break downstream parsing. SEC filings are particularly nasty for this with footnote references like that \"(1)\" pointing to specific cells.\n\nWhat's your chunking strategy after the markdown conversion? Clean table extraction can still produce garbage retrieval if chunks split rows from their headers, or if the table loses its relationship to the surrounding text that explains what the numbers mean. I built vectorflow.dev to catch this stuff before it hits the vector store. For the $10/mo API, would you get visibility into intermediate processing steps or just final markdown? Batch processing 80+ page docs blind makes debugging painful when something downstream breaks.",
+          "score": 1,
+          "created_utc": "2025-12-24 16:18:03",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "nvt7mxi",
+              "author": "Goolitone",
+              "text": "thats neat thanks",
+              "score": 1,
+              "created_utc": "2025-12-25 02:09:47",
+              "is_submitter": false,
+              "replies": []
+            },
+            {
+              "id": "nvv5qfz",
+              "author": "AmineAce",
+              "text": "Thanks for the detailed feedback, the equity table you mentioned is exactly the kind of nasty case (nested spans, units/dates split across rows) where most parsers fall apart. Docling handles it surprisingly well by reconstructing the logical structure, repeating headers where needed and preserving cell relationships across merges.\n\nMulti-page tables: From what I've tested, it keeps header context across pages pretty reliably (repeats the header row or column labels when the table continues), and footnote references like \"(1)\" stay attached to the right cells. Haven't seen it lose context yet on SEC filings, but definitely something to validate more.\n\nChunking strategy: Right now the demo just outputs full Markdown, no chunking built in. You're 100% right that even perfect Markdown can break retrieval if chunks split tables or separate explanatory text. For the planned API, I'm thinking:\n\n* Option for semantic/section-aware chunking (keep tables intact, attach surrounding context).\n* Maybe return structured JSON alongside Markdown for easier downstream control.\n* Visibility into intermediate steps (layout detection, table reconstruction) would be huge for debugging.\n\nVectorFlow looks awesome for catching exactly these issues before vector store – bookmarked it! For the $10/mo tier, I'd definitely want to offer more than just final Markdown: configurable chunking, metadata (page numbers, section headers), and preview/debug views if possible.\n\nWould love your thoughts on what intermediate outputs or controls would be most valuable in an API like this.",
+              "score": 1,
+              "created_utc": "2025-12-25 13:06:09",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "nvw5b11",
+                  "author": "OnyxProyectoUno",
+                  "text": "I haven’t ignored your message I just need to take time to give a detailed response",
+                  "score": 2,
+                  "created_utc": "2025-12-25 17:03:56",
+                  "is_submitter": false,
+                  "replies": []
+                },
+                {
+                  "id": "nvvcn0e",
+                  "author": "frannchu23",
+                  "text": "Sounds promising! Keeping header context intact across pages is a big win for usability. Have you considered adding a chunking feature later? That could help with downstream parsing and make the output even more reliable.",
+                  "score": 1,
+                  "created_utc": "2025-12-25 13:59:41",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "1pys6wv",
+      "title": "Implementing Production-Grade Human-in-the-Loop (HITL) with LangGraph for Sensitive Workflows",
+      "subreddit": "LangChain",
+      "url": "https://rampakanayev.com/blog/langgraph-human-in-the-loop",
+      "author": "No-Conversation-8984",
+      "created_utc": "2025-12-29 17:23:45",
+      "score": 8,
+      "num_comments": 0,
+      "upvote_ratio": 1.0,
+      "text": "[External Link]",
+      "is_original_content": false,
+      "link_flair_text": "Tutorial",
+      "permalink": "https://reddit.com/r/LangChain/comments/1pys6wv/implementing_productiongrade_humanintheloop_hitl/",
+      "domain": "rampakanayev.com",
+      "is_self": false,
+      "comments": []
+    },
+    {
+      "id": "1pxgqfs",
+      "title": "What do people here think about drag-and-drop agent builders?",
+      "subreddit": "LangChain",
+      "url": "https://www.reddit.com/r/LangChain/comments/1pxgqfs/what_do_people_here_think_about_draganddrop_agent/",
+      "author": "Ok-Introduction354",
+      "created_utc": "2025-12-28 03:17:46",
+      "score": 8,
+      "num_comments": 8,
+      "upvote_ratio": 0.83,
+      "text": "I'm thinking of frameworks such as n8n and Gumloop, and equivalent prompted agents such as Lindy.ai that generate flow charts from prompts that can then be customized.\n\nRelated: do you know of or use any agent builder platforms that create agents directly in code (rather than drag-and-drop interfaces) from natural language prompts? For example, the agent could write code in Langchain, or some other framework.\n\nThere have been a few players in this broader space. Curious what folks are using and finding helpful, if anything.",
+      "is_original_content": false,
+      "link_flair_text": null,
+      "permalink": "https://reddit.com/r/LangChain/comments/1pxgqfs/what_do_people_here_think_about_draganddrop_agent/",
+      "domain": "self.LangChain",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "nwb2gjm",
+          "author": "ur-krokodile",
+          "text": "Same as drag-n-drop websites.",
+          "score": 8,
+          "created_utc": "2025-12-28 03:47:30",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "nwbqaef",
+          "author": "fasti-au",
+          "text": "They exist.  They work. They inform a product concept.  Sometimes run the world.  \n\nWhat do you think ant webpages. Are they better than blank screens or is a blank screen better?",
+          "score": 2,
+          "created_utc": "2025-12-28 06:43:29",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "nwfp240",
+          "author": "SteviaMcqueen",
+          "text": "Pretty good for some use cases. Too pricey for an agency model. Those agency platforms are capturing your agency’s profits.",
+          "score": 1,
+          "created_utc": "2025-12-28 21:49:44",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "nwgcyul",
+              "author": "Ok-Introduction354",
+              "text": "Could you elaborate on what you mean by \"agency profits\"?",
+              "score": 1,
+              "created_utc": "2025-12-28 23:54:35",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "nwgumss",
+                  "author": "SteviaMcqueen",
+                  "text": "Some of the profits you would make on subscriptions are going to the agent builder platform instead of your agency.  \n\nYour costs can be lower when you skip the agent builder platforms and code your own agents.",
+                  "score": 1,
+                  "created_utc": "2025-12-29 01:30:46",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "nwg59rf",
+          "author": "Khade_G",
+          "text": "I’ve played with a few of these, and IMO they’re useful but pretty bounded.\n\nDrag-and-drop builders (n8n, Gumloop, Lindy-style prompt → flow) are great for:\n- quick experiments / PoCs\n- visualizing simple agent flows\n- onboarding non-devs\n\nThey tend to fall apart once you need real branching logic, reuse, testing, or version control. At that point I usually want to be in code.\n\nWhat’s been more interesting to me lately is prompt → code rather than prompt → diagram. I’ve seen early tools and templates that take a natural-language spec and scaffold LangChain (or similar) agents directly. Still rough, but promising.\n\nRight now my default is:\n- brainstorm flows visually if it helps\n- treat code as the source of truth\n- use NL prompts to generate scaffolding, not final agents\n\nCurious if anyone’s found a solid workflow that reliably goes from prompt → clean, maintainable agent code.",
+          "score": 1,
+          "created_utc": "2025-12-28 23:13:23",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "nwgcu25",
+              "author": "Ok-Introduction354",
+              "text": "Thanks! Makes sense. I'm curious about your use cases: are they mainly personal or more professional?\n\nAs great as n8n might be (they have millions of users), drag-and-drop building interfaces have never quite worked for me because of their inherent rigidity.\n\nI'm more interested in finding better solutions for prompt --> clean maintainable agent code as well. Right now, I do that in Cursor.",
+              "score": 1,
+              "created_utc": "2025-12-28 23:53:53",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "nwmau6r",
+                  "author": "Khade_G",
+                  "text": "My agent use cases have mainly been personal. My professional use cases steer more towards the training data side of ML and the ML model training side as well.\n\nAnd I agree, the drag and drop really constrains you and is challenging to build beyond a hobby-level solution with those. I’ll definitely take a look at cursor",
+                  "score": 1,
+                  "created_utc": "2025-12-29 21:44:55",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "1pvatao",
+      "title": "Introducing Enterprise-Ready Hierarchy-Aware Chunking for RAG Pipelines",
+      "subreddit": "LangChain",
+      "url": "https://www.reddit.com/r/LangChain/comments/1pvatao/introducing_enterpriseready_hierarchyaware/",
+      "author": "Code-Axion",
+      "created_utc": "2025-12-25 10:42:32",
+      "score": 7,
+      "num_comments": 1,
+      "upvote_ratio": 0.73,
+      "text": "Hello everyone,\n\nWe're excited to announce a major upgrade to the **Agentic Hierarchy Aware Chunker.** We're discontinuing subscription-based plans and transitioning to an **Enterprise-first offering** designed for maximum security and control.  \nAfter conversations with users, we learned that businesses strongly prefer absolute **privacy** and **on-premise solutions**. They want to avoid vendor lock-in, eliminate data leakage risks, and maintain full control over their infrastructure.  \nThat's why we're shifting to an enterprise-exclusive model with on-premise deployment and complete source code access—giving you the full flexibility, security, and customization according to your development needs.\n\nTry it yourself in our playground:  \n[https://hierarchychunker.codeaxion.com/](https://hierarchychunker.codeaxion.com/)\n\nSee the Agentic Hierarchy Aware Chunker live:  \n[https://www.youtube.com/watch?v=czO39PaAERI&t=2s](https://www.youtube.com/watch?v=czO39PaAERI&t=2s)\n\n**For Enterprise & Business Plans:**  \nDm us or contact us at [codeaxion77@gmail.com](mailto:codeaxion77@gmail.com)\n\n# What Our Hierarchy Aware Chunker offers\n\n*  Understands document structure (titles, headings, subheadings, sections).\n*  Merges nested subheadings into the right chunk so context flows properly.\n*  Preserves multiple levels of hierarchy (e.g., Title → Subtitle→ Section → Subsections).\n*  Adds metadata to each chunk (so every chunk knows which section it belongs to).\n*  Produces chunks that are context-aware, structured, and retriever-friendly.\n* Ideal for legal docs, research papers, contracts, etc.\n* It’s Fast and uses LLM inference combined with our optimized parsers.\n* Works great for Multi-Level Nesting.\n* No preprocessing needed — just paste your raw content or Markdown and you’re are good to go !\n* Flexible Switching: Seamlessly integrates with any LangChain-compatible Providers (e.g., OpenAI, Anthropic, Google, Ollama).\n\n#  Upcoming Features (In-Development)\n\n* Support Long Document Context Chunking Where Context Spans Across Multiple Pages\n\n&#8203;\n\n         Example Output\n        --- Chunk 2 --- \n        \n        Metadata:\n          Title: Magistrates' Courts (Licensing) Rules (Northern Ireland) 1997\n          Section Header (1): PART I\n          Section Header (1.1): Citation and commencement\n        \n        Page Content:\n        PART I\n        \n        Citation and commencement \n        1. These Rules may be cited as the Magistrates' Courts (Licensing) Rules (Northern\n        Ireland) 1997 and shall come into operation on 20th February 1997.\n        \n        --- Chunk 3 --- \n        \n        Metadata:\n          Title: Magistrates' Courts (Licensing) Rules (Northern Ireland) 1997\n          Section Header (1): PART I\n          Section Header (1.2): Revocation\n        \n        Page Content:\n        Revocation\n        2.-(revokes Magistrates' Courts (Licensing) Rules (Northern Ireland) SR (NI)\n        1990/211; the Magistrates' Courts (Licensing) (Amendment) Rules (Northern Ireland)\n        SR (NI) 1992/542.\n\nYou can notice how the headings are preserved and attached to the chunk → the retriever and LLM always know which section/subsection the chunk belongs to.\n\nNo more chunk overlaps and spending hours tweaking chunk sizes .\n\nHappy to answer questions here. Thanks for the support and we are excited to see what you build with this.",
+      "is_original_content": false,
+      "link_flair_text": "Announcement",
+      "permalink": "https://reddit.com/r/LangChain/comments/1pvatao/introducing_enterpriseready_hierarchyaware/",
+      "domain": "self.LangChain",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "nw0ev41",
+          "author": "FormalAd7367",
+          "text": "just curious - what will happen to people who have paid for subscription?",
+          "score": 1,
+          "created_utc": "2025-12-26 11:45:59",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1puq481",
+      "title": "(TOOL) Built the first LangSmith observability skill for Claude Code - fetch traces directly from terminal",
+      "subreddit": "LangChain",
+      "url": "https://www.reddit.com/r/LangChain/comments/1puq481/tool_built_the_first_langsmith_observability/",
+      "author": "Signal_Question9074",
+      "created_utc": "2025-12-24 15:37:07",
+      "score": 7,
+      "num_comments": 0,
+      "upvote_ratio": 1.0,
+      "text": "Hey r/LangChain! 👋\n\nI've been building production LangChain agents for the past year, and one thing that consistently slowed me down was debugging. LangSmith Studio has excellent traces, but I was constantly switching between my terminal and browser to fetch and analyze them.\n\nSo I built a Claude Code skill that automates this entire workflow.\n\n# What it does:\n\nClaude can now automatically:\n\n* Fetch recent traces from LangSmith (last N minutes)\n* Analyze specific trace by ID\n* Detect and categorize errors\n* Review tool calls and execution flow\n* Check memory operations (LTM)\n* Track token usage and costs\n* Export debug sessions to files\n\n# Example workflow:\n\n    You: \"Debug my agent - what happened in the last 5 minutes?\"\n    \n    Claude: [Automatically runs langsmith-fetch commands]\n    \n    Found 3 traces:\n    - Trace 1: ✅ Success (memento, 2.3s, 1,245 tokens)\n    - Trace 2: ❌ Error (cypher, Neo4j timeout at search_nodes)\n    - Trace 3: ✅ Success (memento, 1.8s, 892 tokens)\n    \n    💡 Issue: Trace 2 failed due to Neo4j timeout. Recommend adding retry logic.\n\n# Technical details:\n\n* Uses the `langsmith-fetch` CLI under the hood\n* Model-invoked (Claude decides when to use it)\n* Works with any LangChain/LangGraph agent\n* 4 core debugging workflows built-in\n* MIT licensed\n\n# Installation:\n\n    pip install langsmith-fetch\n    mkdir -p ~/.claude/skills/langsmith-fetch\n    curl -o ~/.claude/skills/langsmith-fetch/SKILL.md https://raw.githubusercontent.com/OthmanAdi/langsmith-fetch-skill/main/SKILL.md\n\n**Repo:** [https://github.com/OthmanAdi/langsmith-fetch-skill](https://github.com/OthmanAdi/langsmith-fetch-skill)\n\nThis is v0.1.0 - would love feedback from the community! What other debugging workflows would be helpful?\n\nAlso just submitted a PR to awesome-claude-skills. Hoping this fills a gap in the Claude Skills ecosystem (currently no observability/debugging skills exist).\n\nLet me know if you run into issues or have suggestions! 🙏",
+      "is_original_content": false,
+      "link_flair_text": "Resources",
+      "permalink": "https://reddit.com/r/LangChain/comments/1puq481/tool_built_the_first_langsmith_observability/",
+      "domain": "self.LangChain",
+      "is_self": true,
+      "comments": []
+    },
+    {
+      "id": "1pwp8k4",
+      "title": "I built a LangChain tool for searching Federal Acquisition Regulations (FAR)",
+      "subreddit": "LangChain",
+      "url": "https://www.reddit.com/r/LangChain/comments/1pwp8k4/i_built_a_langchain_tool_for_searching_federal/",
+      "author": "blueskylineassets",
+      "created_utc": "2025-12-27 04:57:36",
+      "score": 6,
+      "num_comments": 0,
+      "upvote_ratio": 0.88,
+      "text": "Hey everyone,\n\nI built a LangChain tool that lets AI agents search Federal Acquisition Regulations (FAR) - the rules governing U.S. government contracting.\n\n\n\n**Install:**\n\npip install far-search-tool\n\n\n\n**Usage:**\n\nfrom far\\_search import FARSearchTool\n\nfrom langchain.agents import initialize\\_agent, AgentType\n\nfrom langchain\\_openai import ChatOpenAI\n\ntool = FARSearchTool()\n\nagent = initialize\\_agent(\n\ntools=\\[tool\\],\n\nllm=ChatOpenAI(model=\"gpt-4\"),\n\nagent=AgentType.OPENAI\\_FUNCTIONS\n\n)\n\nresponse = agent.run(\"What are the FAR requirements for small business subcontracting?\")\n\n\n\n**Features:**\n\n\\- Semantic search over 617 FAR clauses\n\n\\- Pre-computed embeddings for fast queries\n\n\\- Works with any LangChain agent\n\n\\- Free tier available, paid tier for production use\n\n\n\n**Links:**\n\n\\- PyPI: [https://pypi.org/project/far-search-tool/](https://pypi.org/project/far-search-tool/)\n\n\\- GitHub: [https://github.com/blueskylineassets/far-search-tool](https://github.com/blueskylineassets/far-search-tool)\n\nUseful for anyone building AI tools for government contractors, procurement specialists, or compliance automation.\n\nHappy to answer any questions!",
+      "is_original_content": false,
+      "link_flair_text": null,
+      "permalink": "https://reddit.com/r/LangChain/comments/1pwp8k4/i_built_a_langchain_tool_for_searching_federal/",
+      "domain": "self.LangChain",
+      "is_self": true,
+      "comments": []
+    },
+    {
+      "id": "1py0skm",
+      "title": "Relay: a proposal for framework-agnostic agent orchestration",
+      "subreddit": "LangChain",
+      "url": "https://www.reddit.com/r/LangChain/comments/1py0skm/relay_a_proposal_for_frameworkagnostic_agent/",
+      "author": "bumswagger",
+      "created_utc": "2025-12-28 19:57:35",
+      "score": 5,
+      "num_comments": 7,
+      "upvote_ratio": 0.78,
+      "text": "You have LangGraph agents, teammate has CrewAI, another team uses custom agents. Getting them to work together sucks.\n\nProposal: agents coordinate through \"relay repos\"\n\n* Shared versioned state store\n* Agents commit outputs, read inputs from previous commits\n* Branch for parallel experimentation\n* Policies define triggers (when agent A commits, run agent B)\n* MCP for agent interface - framework agnostic\n\nIt's like git for agent collaboration instead of code collaboration.\n\nWould this actually help? What's wrong with this model?",
+      "is_original_content": false,
+      "link_flair_text": null,
+      "permalink": "https://reddit.com/r/LangChain/comments/1py0skm/relay_a_proposal_for_frameworkagnostic_agent/",
+      "domain": "self.LangChain",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "nwftvl5",
+          "author": "rkpandey20",
+          "text": "Just wondering if you can use A2A protocol to communicate. ",
+          "score": 3,
+          "created_utc": "2025-12-28 22:13:46",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "nwh9936",
+              "author": "AdditionalWeb107",
+              "text": "You have to implement all the low-level logic yourself in that case.",
+              "score": 1,
+              "created_utc": "2025-12-29 02:54:43",
+              "is_submitter": false,
+              "replies": [
+                {
+                  "id": "nwhlexy",
+                  "author": "rkpandey20",
+                  "text": "You are right. But it is not that much. It is just Agent card besides the agent endpoint.  ",
+                  "score": 1,
+                  "created_utc": "2025-12-29 04:07:32",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "nwg7ztz",
+          "author": "Khade_G",
+          "text": "Interesting idea. I think the “git for agents” framing is directionally right, but the pain usually isn’t state storage… it’s semantics + contracts.\n\nWhat would help:\n- Framework-agnostic interfaces (MCP-style)\n- Versioned artifacts so runs are reproducible\n- Branching for experimentation\n\nPotential pitfalls id see:\n- “Shared state” becomes a junk drawer unless outputs are strongly typed\n- Triggers quickly turn into a hidden workflow engine (Airflow/Temporal vibes)\n- Merge conflicts aren’t like code… agents need domain-specific conflict rules\n- Latency + debugging get ugly if everything is commit/poll/trigger\n\nSo this works only if it’s really a typed artifact registry + eventing + policies, with git-like versioning as UX… not literally “git as the runtime.”\n\nOtherwise it risks being a clever abstraction that mostly re-implements orchestration, but harder to debug.",
+          "score": 2,
+          "created_utc": "2025-12-28 23:28:03",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "nwh96o3",
+          "author": "AdditionalWeb107",
+          "text": "Checkout: [https://github.com/katanemo/plano](https://github.com/katanemo/plano) \\- Plano is delivery infrastructure for agents, and promises to be framework-agnostic and offers support for \"agents as tools\" via MCP. It doesn't have policy-defined orchestration, but has user-trigger orchestration worfklows built in.",
+          "score": 1,
+          "created_utc": "2025-12-29 02:54:20",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "nwikr0w",
+          "author": "Ok-Priority35",
+          "text": " were actively working on this at [slashmcp.com](http://slashmcp.com)",
+          "score": 1,
+          "created_utc": "2025-12-29 08:48:10",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1pvt637",
+      "title": "LangChain Beginner’s Guide | Basic RAG — Playlist & What You’ll Learn",
+      "subreddit": "LangChain",
+      "url": "https://www.youtube.com/playlist?list=PL04fRXMy5cnYTA11ppBwSqTxK0g65RWoI",
+      "author": "Amplifyabhi1",
+      "created_utc": "2025-12-26 02:25:41",
+      "score": 5,
+      "num_comments": 4,
+      "upvote_ratio": 0.86,
+      "text": "[External Link]",
+      "is_original_content": false,
+      "link_flair_text": "Tutorial",
+      "permalink": "https://reddit.com/r/LangChain/comments/1pvt637/langchain_beginners_guide_basic_rag_playlist_what/",
+      "domain": "youtube.com",
+      "is_self": false,
+      "comments": [
+        {
+          "id": "nvyvjbr",
+          "author": "Hot_Substance_9432",
+          "text": "Very cool video thanks for sharing!!",
+          "score": 1,
+          "created_utc": "2025-12-26 03:21:02",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "nvz2scp",
+              "author": "Amplifyabhi1",
+              "text": "Thank you still more yet to come may stay subscribed if looking forward.",
+              "score": 1,
+              "created_utc": "2025-12-26 04:13:08",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "nvz3nlo",
+                  "author": "Hot_Substance_9432",
+                  "text": "Of course, the channel helps a lot",
+                  "score": 1,
+                  "created_utc": "2025-12-26 04:19:47",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "nw5gbp0",
+          "author": "Amplifyabhi1",
+          "text": "New tutorial in this series - [https://youtu.be/R\\_cIN3QMvW0](https://youtu.be/R_cIN3QMvW0)",
+          "score": 1,
+          "created_utc": "2025-12-27 06:20:37",
+          "is_submitter": true,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1pwxoq5",
+      "title": "Best Paid Courses for Generative AI + Agentic AI Learning Path? (Developer Track)",
+      "subreddit": "LangChain",
+      "url": "https://www.reddit.com/r/LangChain/comments/1pwxoq5/best_paid_courses_for_generative_ai_agentic_ai/",
+      "author": "Grand-Moment6104",
+      "created_utc": "2025-12-27 13:20:34",
+      "score": 4,
+      "num_comments": 1,
+      "upvote_ratio": 0.84,
+      "text": "Hey folks,\n\nI'm looking to deepen my skills in **Generative AI and Agentic AI** this year, and I want to invest in quality paid courses rather than relying purely on free resources. I have a solid Python background and some experience with APIs, so I'm not starting from zero.",
+      "is_original_content": false,
+      "link_flair_text": null,
+      "permalink": "https://reddit.com/r/LangChain/comments/1pwxoq5/best_paid_courses_for_generative_ai_agentic_ai/",
+      "domain": "self.LangChain",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "nw7ay3v",
+          "author": "WineOrDeath",
+          "text": "Check Maven.  Lots of quality courses there.",
+          "score": 1,
+          "created_utc": "2025-12-27 15:28:54",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1pywsxg",
+      "title": "[Open Source] LangGraph Threads Export Tool - Backup, migrate, and own your conversation data",
+      "subreddit": "LangChain",
+      "url": "https://www.reddit.com/r/LangChain/comments/1pywsxg/open_source_langgraph_threads_export_tool_backup/",
+      "author": "SignatureHuman8057",
+      "created_utc": "2025-12-29 20:13:30",
+      "score": 3,
+      "num_comments": 0,
+      "upvote_ratio": 1.0,
+      "text": "Hey everyone! 👋\n\nI built a tool to solve a problem I had with LangGraph Cloud and wanted to share it with the community.\n\n### The Problem\n\nI had two LangGraph Cloud deployments - a production one (expensive) and a dev one (cheaper). I wanted to:\n- Migrate all user conversations from prod to dev\n- Keep the same thread IDs so users don't lose their chat history\n- Preserve multi-tenancy (each user only sees their own threads)\n\nThere's no built-in way to do this in LangGraph Cloud, so I built one.\n\n### What This Tool Does\n\n**Export your LangGraph threads to:**\n- 📄 **JSON file** - Simple backup you can store anywhere\n- 🐘 **PostgreSQL database** - Own your data with proper schema and indexes\n- 🔄 **Another deployment** - Migrate between environments\n\n**What gets exported:**\n- Thread IDs (preserved exactly)\n- Metadata (including `owner` for multi-tenancy)\n- Full checkpoint history\n- Conversation values/messages\n\n### Quick Example\n\n```bash\n# Export all threads to JSON\npython migrate_threads.py \\\n  --source-url https://my-deployment.langgraph.app \\\n  --export-json backup.json\n\n# Export to PostgreSQL\npython migrate_threads.py \\\n  --source-url https://my-deployment.langgraph.app \\\n  --export-postgres\n\n# Migrate between deployments\npython migrate_threads.py \\\n  --source-url https://prod.langgraph.app \\\n  --target-url https://dev.langgraph.app \\\n  --full\n```\n\n### Why You Might Need This\n\n- **Cost optimization** - Move from expensive prod to cheaper deployment\n- **Backup before deletion** - Export everything before removing a deployment\n- **Compliance** - Store conversation data in your own database\n- **Analytics** - Query your threads with SQL\n- **Disaster recovery** - Restore from JSON backup\n\n### GitHub\n\n🔗 **[github.com/farouk09/langgraph-threads-migration](https://github.com/farouk09/langgraph-threads-migration)**\n\nMIT licensed, PRs welcome!\n\n---\n\n### Note for deployments with custom auth\n\nIf you use Auth0 or custom authentication, you'll need to temporarily disable it during export (the tool uses the LangSmith API key, not user tokens). Just set `\"auth\": null` in your `langgraph.json`, export, then re-enable.\n\n---\n\nHope this helps someone! Let me know if you have questions or feature requests. 🙂",
+      "is_original_content": false,
+      "link_flair_text": null,
+      "permalink": "https://reddit.com/r/LangChain/comments/1pywsxg/open_source_langgraph_threads_export_tool_backup/",
+      "domain": "self.LangChain",
+      "is_self": true,
+      "comments": []
+    },
+    {
+      "id": "1pxsmh1",
+      "title": "What is a better way to build a product selection system based on product catalogs using RAG? Or is it really necessary to use RAG in the first place?",
+      "subreddit": "LangChain",
+      "url": "https://www.reddit.com/r/LangChain/comments/1pxsmh1/what_is_a_better_way_to_build_a_product_selection/",
+      "author": "liyu711",
+      "created_utc": "2025-12-28 14:28:52",
+      "score": 3,
+      "num_comments": 8,
+      "upvote_ratio": 1.0,
+      "text": "I‘ve got a bunch of product catalogs(in PDF) on my hand, and I want to build a knowledge base on these catalogs so that when I get spec requirements from users, I can quickly find which product meets the requirements.\n\nThe PDF file contains multimodal data, including text, images and tables. Some spec information are encoded in images. For example, the number of pins of certain product is not directly written in text, but is shown in a cross-section image.\n\nDirectly building a knowledge base from these catalogs and asking it to return all the product names that meets the requirements doesn't work well. Asking for a specific spec of a specific product, on the other hand, has a much better performance. \n\nWhat I am thinking about right now is to break down all these catalogs into a more structured formant like JSON or tables and build an Agent to search for the data directly. But this seems a bit different from what RAG does and restructuring the files is a pretty tedious task.\n\nWhat is a better way to handle this type of more well-strucutred data? These data are well-structured semantically, but not so much format wise.",
+      "is_original_content": false,
+      "link_flair_text": null,
+      "permalink": "https://reddit.com/r/LangChain/comments/1pxsmh1/what_is_a_better_way_to_build_a_product_selection/",
+      "domain": "self.LangChain",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "nwdcvkz",
+          "author": "Low-Flow-6572",
+          "text": "Your intuition is 100% correct: Standard RAG is the wrong tool for this.  \nWhat you are describing is a Parametric Search problem (\"Find products where pins > 5 AND voltage < 12V\"), but you are trying to solve it with Semantic Search (Vector RAG).  \nVectors are terrible at math and hard constraints.   \nIf you embed \"5 pins\", it is semantically similar to \"4 pins\" or \"5 volts\". A vector DB cannot reliably execute \"return all items where X is true\".  \n  \nThe \"Better Way\" (Structured RAG):You are right that restructuring is tedious, but it is the only way to build a production-grade selection system.   \nYou don't need a \"Knowledge Base\" (text chunks), you need a Database (rows and columns).Here is the pipeline I’ve seen work for this:\n\nIngestion :Use a multimodal parser (like LlamaParse or Unstructured combined with GPT-4o-mini/Gemini-Flash) toocr the PDFs.Crucial Step: Since you have specs in images (cross-sections), standard OCR will fail.   \nYou need to pass those specific page crops to a VLM (Vision Language Model) with a prompt to extract the data  as JSON.   \nStructuring: Define a Pydantic schema for your product specs. Force the LLM to extract the unstructured text/images into that JSON schema.   \nTip: This is where data hygiene matters. If you have duplicate catalogs or conflicting specs, your DB gets messy. (I actually built a tool called **entropyguard** specifically to clean raw data before this step, because extracting JSON from duplicate PDFs burns money fast).  \nRetrieval(Text-to-SQL): Dump that JSON into Postgres or SQLite.Your \"RAG\" is now actually an Agent that converts user questions (\"I need a 5-pin connector\") into SQL queries (SELECT \\* FROM products WHERE pins=5).",
+          "score": 3,
+          "created_utc": "2025-12-28 14:55:12",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "nwdemzm",
+              "author": "liyu711",
+              "text": "Thanks for the help!",
+              "score": 1,
+              "created_utc": "2025-12-28 15:05:18",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "nwfjwr0",
+          "author": "OnyxProyectoUno",
+          "text": "Your PDF parsing is probably mangling the structured data you need. Tables get scrambled, images lose context, and spec information gets split across chunks in ways that break the relationships you're trying to preserve.\n\nThe \"ask for specific product specs\" working better than \"find products that meet requirements\" is a dead giveaway. Your chunking strategy is destroying the structured relationships between specs and products. When you ask about a specific product, you're probably hitting chunks that still contain intact information. When you ask for products meeting criteria, the retrieval has to piece together fragments that got separated during processing.\n\nRAG can work for this, but not with naive PDF parsing and chunking. You need to preserve the structured relationships during document processing. Extract tables as tables, maintain product-to-spec mappings, and chunk in ways that keep related information together. The multimodal aspect makes it trickier since you need OCR on those cross-section images and ways to associate extracted text with the right products.\n\nI've been hitting similar issues with structured document processing while building [VectorFlow](https://vectorflow.dev/?utm_source=redditCP_g), specifically around preserving relationships that naive chunking destroys. The restructuring work you're considering might be worth it, but you'd want to see what your current pipeline is actually producing first. Most people discover their parsing is broken only after they've embedded everything.\n\nWhat kind of spec information are you trying to match? Physical dimensions, electrical specs, compatibility requirements?",
+          "score": 1,
+          "created_utc": "2025-12-28 21:24:31",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "nwg600l",
+              "author": "liyu711",
+              "text": "The spec I am trying to match are physical dimensions, electrical specs, product code naming convention and the number of pins. Physical dimension and electrical specs are listed in plain text, while other information mostly lies in tables and images.",
+              "score": 1,
+              "created_utc": "2025-12-28 23:17:15",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "nwibf0d",
+                  "author": "OnyxProyectoUno",
+                  "text": "Tables and images are where most PDF parsing falls apart for product catalogs. The pin counts, naming conventions, and dimensional specs you're after get scrambled when tables lose their structure or when OCR can't properly associate image content with the right product rows.\n\nYour physical dimensions and electrical specs in plain text are probably chunking fine, but the table-based info is likely getting separated from the products it describes. Pin count from a cross-section image might end up in a completely different chunk from the product name and specs.\n\nFor this kind of structured product data, you might actually be better off with the restructuring approach you mentioned. Extract the tables properly, OCR the technical diagrams with context about which product they belong to, then build a hybrid system where you can do exact matching on specs like pin count or voltage ranges, and semantic search on the descriptive content. The upfront work sucks but product catalogs are stable enough that it's usually worth it.\n\nWhat's your current parsing setup doing to those product specification tables?",
+                  "score": 1,
+                  "created_utc": "2025-12-29 07:22:18",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            },
+            {
+              "id": "nwgz1rb",
+              "author": "gardenia856",
+              "text": "The core problem here is that you’re asking for “set matching” (filtering products by constraints), not fuzzy Q&A, so you need explicit fields, not just text blobs.\n\nI’d first list the 10–20 spec dimensions you actually care about (e.g., pin count, voltage range, package type, footprint size, temperature, protocol, compatibility notes). Then:\n\n1) Fix extraction, but only for those fields\n\n\\- Use layout-aware PDF tools (PDFPlumber, Camelot/Tabula, Unstructured) to pull tables into CSV.\n\n\\- For images: run OCR or a vision model, but always attach the result to a specific product row (by page, table position, or nearby text).\n\n\\- Manually clean one or two catalogs end-to-end and turn them into a “golden sheet” → this becomes your target schema.\n\n2) Treat it as a structured search system\n\n\\- Load the cleaned specs into Postgres/Elasticsearch, then build a simple filter/search API on top (you can use things like Supabase or DreamFactory + Postgres + a vector DB, or Hasura + pgvector for a REST/GraphQL layer).\n\n\\- Use RAG only to parse messy user queries into normalized constraints (e.g., “small footprint, low power, 5V, 16 pins” → WHERE clauses over your spec table), not to store the product data itself.\n\nIn other words: do the painful structuring once, then use RAG as an intent → filter translator instead of as your main database.",
+              "score": 1,
+              "created_utc": "2025-12-29 01:56:15",
+              "is_submitter": false,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "nwjkq26",
+          "author": "Kortopi-98",
+          "text": "RAG alone struggles here. You’ll get better results with some structured extraction and use RAG only as support.",
+          "score": 1,
+          "created_utc": "2025-12-29 13:44:12",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1pumqyg",
+      "title": "How to create a sequential agent using LangGraph.",
+      "subreddit": "LangChain",
+      "url": "/r/LangGraph/comments/1pumqjr/how_to_create_a_sequential_agent/",
+      "author": "Particular-Peach-750",
+      "created_utc": "2025-12-24 12:54:57",
+      "score": 3,
+      "num_comments": 1,
+      "upvote_ratio": 1.0,
+      "text": "[External Link]",
+      "is_original_content": false,
+      "link_flair_text": null,
+      "permalink": "https://reddit.com/r/LangChain/comments/1pumqyg/how_to_create_a_sequential_agent_using_langgraph/",
+      "domain": "",
+      "is_self": false,
+      "comments": [
+        {
+          "id": "nvpn4yl",
+          "author": "Somanath444",
+          "text": "https://youtu.be/bAWujyAl1Kk?si=h4x8nvn-pKzXwjxl\n\nHope this helps",
+          "score": 1,
+          "created_utc": "2025-12-24 13:10:21",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1pyp3x5",
+      "title": "Everyone and their mother building AI agents while document extraction is still broken for most companies",
+      "subreddit": "LangChain",
+      "url": "https://www.reddit.com/r/LangChain/comments/1pyp3x5/everyone_and_their_mother_building_ai_agents/",
+      "author": "GloomyEquipment2120",
+      "created_utc": "2025-12-29 15:27:31",
+      "score": 2,
+      "num_comments": 3,
+      "upvote_ratio": 0.58,
+      "text": "While everyone's hyped about AI agents, I've been looking at a problem that's way more mundane but costs companies actual money: document processing still sucks.\n\nMost OCR systems plateau around 60% automation despite claiming high accuracy. The gap between test benchmarks and production reality is brutal - invoices with weird table layouts, multi-column forms, handwritten notes on printed docs, or just shitty scans break these pipelines constantly.\n\nSo I tried combining the two: built an agentic chatbot that uses a fine-tuned VLM (Qwen2.5-VL) for document extraction with a reflection-based verification process.\n\n**The basic idea:**\n\nInstead of rigid OCR → parse → extract, the agent plans extraction strategy based on document type, uses the VLM to pull information, then reflects on its own output before answering. If something looks wrong (numbers don't add up, dates are illogical, missing required fields), it re-runs extraction with refined prompts.\n\nThat self-correction loop is what pushes automation rates from 60% to 90%+. The system catches its own mistakes instead of sending garbage to humans.\n\n**What makes this different from traditional pipelines:**\n\n* VLM processes images directly, no separate OCR/layout analysis steps that create error cascades\n* Agent can adapt extraction strategy per document (financial tables ≠ contracts)\n* Reflection pattern validates outputs before returning answers\n* Handles the real failure cases: nested tables, multi-column layouts, mixed print/handwriting\n\nBuilt the whole thing as a chatbot interface where you can ask questions about documents and it extracts + verifies answers. Uses langchain for the agent framework, fine-tuned the VLM on DocVQA dataset (real invoices/receipts/forms with all the complexity issues).\n\nWrote up the full implementation with code - dataset prep, fine-tuning workflow, agent setup with reflection patterns, deployment approach: link in comments.\n\nThe accuracy/automation tradeoff part was interesting to figure out. Traditional systems can't escape it (high confidence = low automation, low confidence = high errors), but reflection changes the game since you can be less certain initially because validation catches mistakes.\n\n",
+      "is_original_content": false,
+      "link_flair_text": null,
+      "permalink": "https://reddit.com/r/LangChain/comments/1pyp3x5/everyone_and_their_mother_building_ai_agents/",
+      "domain": "self.LangChain",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "nwk3r6m",
+          "author": "GloomyEquipment2120",
+          "text": "You can read the details of the project here:  [https://ubiai.tools/agentic-document-intelligence-building-a-self-correcting-document-qna-pipeline/](https://ubiai.tools/agentic-document-intelligence-building-a-self-correcting-document-qna-pipeline/)",
+          "score": 1,
+          "created_utc": "2025-12-29 15:28:18",
+          "is_submitter": true,
+          "replies": []
+        },
+        {
+          "id": "nwl07dx",
+          "author": "Terrible_Attention83",
+          "text": "What was the impact on throughout numbers? How much more time your implementation took compared to just the ocr one? How scalable would this approach be?",
+          "score": 1,
+          "created_utc": "2025-12-29 18:02:18",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "nwpz4qh",
+              "author": "GloomyEquipment2120",
+              "text": "Good questions. The reflection approach is definitely slower per document since it makes multiple VLM passes for validation. Roughly 3-4x the processing time compared to standard OCR.\n\nScalability: This works best for moderate volumes where accuracy matters more than raw speed. For high-volume scenarios, you'd need aggressive batching or use it selectively on complex documents where basic OCR fails.\n\nThe key tradeoff: slower per-doc processing but way less human review overall, so total end-to-end time can actually improve despite the slower extraction.",
+              "score": 1,
+              "created_utc": "2025-12-30 12:40:02",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
