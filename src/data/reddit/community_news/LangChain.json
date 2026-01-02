@@ -1,11 +1,11 @@
 {
   "metadata": {
-    "last_updated": "2026-01-02 16:25:50",
+    "last_updated": "2026-01-02 20:25:40",
     "time_filter": "week",
     "subreddit": "LangChain",
     "total_items": 31,
-    "total_comments": 107,
-    "file_size_bytes": 170633
+    "total_comments": 108,
+    "file_size_bytes": 172984
   },
   "items": [
     {
@@ -15,7 +15,7 @@
       "url": "https://www.reddit.com/r/LangChain/comments/1pzno6m/semantic_caching_cut_our_llm_costs_by_almost_50/",
       "author": "Otherwise_Flan7339",
       "created_utc": "2025-12-30 17:12:23",
-      "score": 112,
+      "score": 117,
       "num_comments": 24,
       "upvote_ratio": 0.85,
       "text": "So we've been running this AI app in production for about 6 months now. Nothing crazy, maybe a few hundred daily users, but our OpenAI bill hit $4K last month and I was losing my mind. Boss asked me to figure out why we're burning through so much money.\n\nTurns out we were caching responses, but only with exact string matching. Which sounds smart until you realize users never type the exact same thing twice. \"What's the weather in SF?\" gets cached. \"What's the weather in San Francisco?\" hits the API again. Cache hit rate was like 12%. Basically useless.\n\nThen I learned about semantic caching and honestly it's one of those things that feels obvious in hindsight but I had no idea it existed. We ended up using Bifrost (it's an open source LLM gateway) because it has semantic caching built in and I didn't want to build this myself.\n\nThe way it works is pretty simple. Instead of matching exact strings, it matches the meaning of queries using embeddings. You generate an embedding for every query, store it with the response in a vector database, and when a new query comes in you check if something semantically similar already exists. If the similarity score is high enough, return the cached response instead of hitting the API.\n\nReal example from our logs - these four queries all had similarity scores above 0.90:\n\n* \"How do I reset my password?\"\n* \"Can't remember my password, help\"\n* \"Forgot password what do I do\"\n* \"Password reset instructions\"\n\nWith traditional caching that's 4 API calls. With semantic caching it's 1 API call and 3 instant cache hits.\n\nBifrost uses Weaviate for the vector store by default but you can configure it to use Qdrant or other options. The embedding cost is negligible - like $8/month for us even with decent traffic. GitHub: [https://github.com/maximhq/bifrost](https://github.com/maximhq/bifrost)\n\nAfter running this for 30 days our bill dropped from $4K to $2.1K. Cache hit rate went from 12% to 47%. And as a bonus, cached responses are way faster - like 180ms vs 2+ seconds for actual API calls.\n\nThe tricky part was picking the similarity threshold. We tried 0.70 at first and got some weird responses where the cache would return something that wasn't quite right. Bumped it to 0.95 and the cache barely hit anything. Settled on 0.85 and it's been working great.\n\nAlso had to think about cache invalidation - we expire responses after 24 hours for time-sensitive stuff and 7 days for general queries.\n\nThe best part is we didn't have to change any of our application code. Just pointed our OpenAI client at Bifrost's gateway instead of OpenAI directly and semantic caching just works. It also handles failover to Claude if OpenAI goes down, which has saved us twice already.\n\nIf you're running LLM stuff in production and not doing semantic caching you're probably leaving money on the table. We're saving almost $2K/month now.",
@@ -29,7 +29,7 @@
           "id": "nwt10pe",
           "author": "hyma",
           "text": "Advertisement?",
-          "score": 21,
+          "score": 20,
           "created_utc": "2025-12-30 21:48:42",
           "is_submitter": false,
           "replies": [
@@ -37,7 +37,7 @@
               "id": "nwuefsp",
               "author": "[deleted]",
               "text": "[removed]",
-              "score": 11,
+              "score": 12,
               "created_utc": "2025-12-31 02:16:09",
               "is_submitter": false,
               "replies": [
@@ -96,7 +96,7 @@
           "id": "nws6hgz",
           "author": "Conscious_Nobody9571",
           "text": "Repost",
-          "score": 6,
+          "score": 5,
           "created_utc": "2025-12-30 19:22:59",
           "is_submitter": false,
           "replies": []
@@ -113,7 +113,7 @@
               "id": "nws74sx",
               "author": "adiznats",
               "text": "I'm also wondering what is the cosine similarity between \"what's the weather in SF\" and \"whats's the weather in NY\". Also probably longer sentences like those above but with a very small detail changed will be even worse with this kind of caching.",
-              "score": 7,
+              "score": 8,
               "created_utc": "2025-12-30 19:26:05",
               "is_submitter": false,
               "replies": []
@@ -230,9 +230,9 @@
       "url": "https://www.reddit.com/r/LangChain/comments/1pxndjy/advanced_rag_token_optimization_and_cost/",
       "author": "Electrical-Signal858",
       "created_utc": "2025-12-28 09:33:31",
-      "score": 50,
+      "score": 47,
       "num_comments": 13,
-      "upvote_ratio": 0.92,
+      "upvote_ratio": 0.91,
       "text": "Following up on my previous RAG post: we've optimized production RAG systems further and discovered cost optimizations that nobody talks about. This is specifically about reducing token spend without sacrificing quality.\n\n# The Problem We Solved\n\nOur RAG system was working well (retrieval was solid, generation was accurate), but the token spend kept climbing:\n\n* Hybrid retrieval (BM25 + vector): \\~2,000 tokens/query\n* Retrieved documents: \\~3,000 tokens\n* LLM processing: \\~500 tokens\n* **Total: \\~5,500 tokens/query** × 100k queries/day = expensive\n\nAt $0.03 per 1K input tokens, that's **$16.50/day just for input tokens**. **$495/month**.\n\nWe asked: \"Can we get similar quality with fewer tokens?\"\n\nSpoiler: Yes. We reduced it to **2,200 tokens/query average** (60% reduction) while maintaining 92% accuracy (same as before).\n\n# The Optimizations\n\n# 1. Smart Document Chunking Reduces Retrieved Token Count\n\n**Before:** Fixed 1,000-token chunks\n\n* Simple but wasteful\n* Lots of redundant context\n* Padding with irrelevant info\n\n**After:** Semantic chunks with metadata filtering\n\n    from langchain.text_splitter import RecursiveCharacterTextSplitter\n    from sentence_transformers import SentenceTransformer\n    import numpy as np\n    \n    class SemanticChunker:\n        def __init__(self, min_chunk_size=200, max_chunk_size=800):\n            self.min_chunk_size = min_chunk_size\n            self.max_chunk_size = max_chunk_size\n            self.model = SentenceTransformer('all-MiniLM-L6-v2')\n        \n        def chunk_semantically(self, text, title=\"\"):\n            \"\"\"Break text into semantic chunks\"\"\"\n            sentences = text.split('. ')\n            \n            embeddings = self.model.encode(sentences)\n            chunks = []\n            current_chunk = []\n            current_embedding = None\n            \n            for i, sentence in enumerate(sentences):\n                current_chunk.append(sentence)\n                \n                if len(' '.join(current_chunk)) >= self.min_chunk_size:\n                    # Check semantic coherence\n                    chunk_embedding = self.model.encode(' '.join(current_chunk))\n                    \n                    if current_embedding is not None:\n                        # Cosine similarity with previous chunk\n                        similarity = np.dot(chunk_embedding, current_embedding) / (\n                            np.linalg.norm(chunk_embedding) * np.linalg.norm(current_embedding)\n                        )\n                        \n                        # If semantic break detected or max size reached\n                        if similarity < 0.6 or len(' '.join(current_chunk)) >= self.max_chunk_size:\n                            chunks.append({\n                                'content': ' '.join(current_chunk),\n                                'title': title,\n                                'tokens': len(' '.join(current_chunk).split())\n                            })\n                            current_chunk = []\n                            current_embedding = None\n                            continue\n                    \n                    current_embedding = chunk_embedding\n            \n            if current_chunk:\n                chunks.append({\n                    'content': ' '.join(current_chunk),\n                    'title': title,\n                    'tokens': len(' '.join(current_chunk).split())\n                })\n            \n            return chunks\n    \n\n**Result:** Average chunk size went from 1,000 tokens → 400 tokens (but more relevant). Retrieved fewer chunks but with less padding.\n\n# 2. Retrieval Pre-filtering Reduces What Gets Retrieved\n\n**Before:** \"Get top-5 by relevance, send all to LLM\"\n\n**After:** Multi-stage retrieval pre-filtering\n\n    def filtered_retrieval(query: str, documents: List[str], top_k=5):\n        \"\"\"Retrieve with automatic filtering\"\"\"\n        \n        # Stage 1: Broad retrieval (get more candidates)\n        candidates = vector_store.search(query, top_k=20)\n        \n        # Stage 2: Filter by relevance threshold\n        scored = [(doc, score) for doc, score in candidates]\n        high_confidence = [\n            (doc, score) for doc, score in scored \n            if score > 0.7  # Only confident matches\n        ]\n        \n        if not high_confidence:\n            high_confidence = scored[:5]  # Fallback to top-5\n        \n        # Stage 3: Deduplicate similar content\n        unique = []\n        seen_hashes = set()\n        \n        for doc, score in high_confidence:\n            doc_hash = hash(doc[:200])  # Hash of first 200 chars\n            \n            if doc_hash not in seen_hashes:\n                unique.append((doc, score))\n                seen_hashes.add(doc_hash)\n        \n        # Stage 4: Sort by relevance and return top-k\n        final = sorted(unique, key=lambda x: x[1], reverse=True)[:top_k]\n        \n        return [doc for doc, _ in final]\n    \n\n**Result:** Retrieved fewer documents, but only high-confidence ones. Reduced retrieved token count by 40%.\n\n# 3. Query Simplification Before Retrieval\n\n**Before:** Send raw user query to retriever\n\n    User: \"What are the refund policies for digital products if the customer received \n           a defective item and wants to know about international shipping costs?\"\n    (Complex, confusing retriever)\n    \n\n**After:** Pre-process query to find key concepts\n\n    from langchain.chains import LLMChain\n    from langchain.prompts import PromptTemplate\n    \n    def simplify_query(query: str, llm) -> str:\n        \"\"\"Simplify query for better retrieval\"\"\"\n        \n        prompt = PromptTemplate(\n            input_variables=[\"query\"],\n            template=\"\"\"Extract the main topic from this query. \n            Remove adjectives, clarifications, and side questions.\n            \n            User query: {query}\n            \n            Simplified: \"\"\"\n        )\n        \n        chain = LLMChain(llm=llm, prompt=prompt)\n        \n        # Use cheaper model for this (gpt-3.5-turbo)\n        simplified = chain.run(query=query).strip()\n        \n        return simplified\n    \n    # Usage:\n    simplified = simplify_query(\n        \"What are the refund policies for digital products if the customer received \"\n        \"a defective item and wants to know about international shipping costs?\",\n        llm\n    )\n    # Result: \"refund policy digital products\"\n    \n\n**Result:** Better retrieval queries → fewer iterations → fewer tokens.\n\n# 4. Response Compression Before Sending to LLM\n\n**Before:** Send all retrieved documents as-is\n\n    Retrieved documents (all 3,000 tokens):\n    [Document 1: 1000 tokens]\n    [Document 2: 1000 tokens]\n    [Document 3: 1000 tokens]\n    \n\n**After:** Compress while preserving information\n\n    def compress_context(documents: List[str], query: str, llm) -> str:\n        \"\"\"Compress documents while preserving relevant info\"\"\"\n        \n        compression_prompt = PromptTemplate(\n            input_variables=[\"documents\", \"query\"],\n            template=\"\"\"Summarize the following documents in as few words as possible \n            while preserving information relevant to the question.\n            \n            Question: {query}\n            \n            Documents:\n            {documents}\n            \n            Compressed summary:\"\"\"\n        )\n        \n        chain = LLMChain(llm=llm, prompt=compression_prompt)\n        \n        documents_text = \"\\n---\\n\".join(documents)\n        \n        compressed = chain.run(\n            documents=documents_text,\n            query=query\n        )\n        \n        return compressed\n    \n    # Usage:\n    context = compress_context(retrieved_docs, user_query, llm)\n    # 3000 tokens → 800 tokens (still has all relevant info)\n    \n\n**Result:** 60-70% context reduction with minimal quality loss.\n\n# 5. Caching at the Context Level (Not Just Response Level)\n\n**Before:** Cache full responses only\n\n    cache_key = hash(f\"{query}_{user_id}\")\n    cached_response = cache.get(cache_key)  # Only hits if identical query\n    \n\n**After:** Cache compressed context\n\n    def cached_context_retrieval(query: str, user_context: str) -> str:\n        \"\"\"Retrieve and cache at context level\"\"\"\n        \n        # Hash just the query (not user context)\n        context_key = f\"context:{hash(query)}\"\n        \n        # Check if we've retrieved this query before\n        cached_context = cache.get(context_key)\n        \n        if cached_context:\n            return cached_context  # Reuse compressed context\n        \n        # If not cached, retrieve and compress\n        documents = retriever.get_relevant_documents(query)\n        compressed = compress_context(documents, query, llm)\n        \n        # Cache the compressed context\n        cache.set(context_key, compressed, ttl=86400)  # 24 hours\n        \n        return compressed\n    \n    # Usage:\n    context = cached_context_retrieval(query, user_context)\n    \n    # For identical queries from different users:\n    # User A: Retrieves, compresses (3000 tokens), caches\n    # User B: Uses cached context (0 tokens)\n    \n\n**Result:** Context-level caching hits on 35% of queries (many users asking similar things).\n\n# 6. Token Counting Before Sending to LLM\n\n**Before:** Blindly send context to LLM, hope it fits\n\n    response = llm.generate(system_prompt + context + user_query)\n    # Sometimes exceeds context window, sometimes wastes tokens\n    \n\n**After:** Count tokens, optimize if needed\n\n    import tiktoken\n    \n    def smart_context_sending(context: str, query: str, llm, max_tokens=6000):\n        \"\"\"Send context to LLM, optimizing token usage\"\"\"\n        \n        enc = tiktoken.encoding_for_model(\"gpt-4\")\n        \n        # Count tokens in different parts\n        system_tokens = len(enc.encode(SYSTEM_PROMPT))\n        query_tokens = len(enc.encode(query))\n        context_tokens = len(enc.encode(context))\n        \n        total_input = system_tokens + query_tokens + context_tokens\n        \n        # If over budget, compress context further\n        if total_input > max_tokens:\n            compression_ratio = (total_input - max_tokens) / context_tokens\n            \n            # Aggressive compression if needed\n            compressed = aggressive_compress(context, compression_ratio)\n            context_tokens = len(enc.encode(compressed))\n            context = compressed\n        \n        # Now send to LLM\n        response = llm.generate(\n            system_prompt=SYSTEM_PROMPT,\n            context=context,\n            query=query\n        )\n        \n        return response\n    \n\n**Result:** Stayed under token limits, never wasted tokens on too-large contexts.\n\n# The Results\n\n|Optimization|Before|After|Savings|\n|:-|:-|:-|:-|\n|Chunk size|1,000 tokens|400 tokens|Smaller chunks|\n|Retrieved docs|5 docs|3 docs|40% fewer|\n|Context compression|None|60% reduction|2x tokens|\n|Query simplification|None|Applied|Better retrieval|\n|Context caching|0% hit rate|35% hit rate|35% queries free|\n|Token counting|None|Applied|No waste|\n|**Total per query**|**5,500 tokens**|**2,200 tokens**|**60% reduction**|\n\n**Cost Impact:**\n\n* Before: 100k queries × 5,500 tokens × $0.03/1K = **$16.50/day** ($495/month)\n* After: 100k queries × 2,200 tokens × $0.03/1K = **$6.60/day** ($198/month)\n* **Savings: $297/month (60% reduction)**\n\n**Accuracy Impact:**\n\n* Before: 92% accuracy\n* After: 92% accuracy (unchanged)\n\n# Important Caveat\n\nThese optimizations come with tradeoffs:\n\n1. **Query simplification** adds latency (extra LLM call, even if cheap)\n2. **Context compression** could lose edge-case information\n3. **Caching** reduces freshness (stale context for 24 hours)\n4. **Aggressive filtering** might miss relevant documents\n\nWe accepted these tradeoffs. Your situation might differ.\n\n# Implementation Difficulty\n\n* **Easy:** Token counting (1 hour)\n* **Easy:** Retrieval filtering (2 hours)\n* **Medium:** Query simplification (3 hours)\n* **Medium:** Context compression (4 hours)\n* **Medium:** Semantic chunking (4 hours)\n* **Hard:** Context-level caching (5 hours)\n\n**Total:** \\~19 hours of engineering work to save $297/month.\n\nPayback period: \\~1 month.\n\n# Code: Complete Pipeline\n\n    class OptimizedRAGPipeline:\n        def __init__(self, llm, retriever, cache):\n            self.llm = llm\n            self.retriever = retriever\n            self.cache = cache\n            self.encoder = tiktoken.encoding_for_model(\"gpt-4\")\n        \n        def process_query(self, user_query: str) -> str:\n            \"\"\"Complete optimized pipeline\"\"\"\n            \n            # Step 1: Simplify query\n            simplified_query = self.simplify_query(user_query)\n            \n            # Step 2: Retrieve with caching\n            context = self.cached_context_retrieval(simplified_query)\n            \n            # Step 3: Smart token handling\n            response = self.smart_context_sending(\n                context=context,\n                query=user_query\n            )\n            \n            return response\n        \n        def simplify_query(self, query: str) -> str:\n            \"\"\"Extract main topic from query\"\"\"\n            # Implementation from above\n            pass\n        \n        def cached_context_retrieval(self, query: str) -> str:\n            \"\"\"Retrieve and cache at context level\"\"\"\n            # Implementation from above\n            pass\n        \n        def smart_context_sending(self, context: str, query: str) -> str:\n            \"\"\"Send context with token optimization\"\"\"\n            # Implementation from above\n            pass\n    \n\n# Questions for the Community\n\n1. **Are you doing context-level caching?** We found 35% hit rate. What's your experience?\n2. **How much quality loss do you see from compression?** We measured \\~1-2% accuracy drop.\n3. **Query simplification latency trade:** Is it worth the extra LLM call?\n4. **Semantic chunking:** Are you doing it? How much better are results?\n5. **Token optimization:** What's the best bang-for-buck optimization you've found?\n\n# Edit: Responses\n\n**On query simplification latency:** \\~200-300ms added. With caching, only happens once per unique query. Worth it for most systems.\n\n**On context compression quality:** We tested with GPT-3.5-turbo for compression (cheaper). Slightly more loss than GPT-4, but acceptable trade. Saves another $150/month.\n\n**On whether these are general:** Yes, we tested on 3 different domains (legal, technical docs, customer support). Results were similar.\n\n**On LangChain compatibility:** All of this integrates cleanly with LangChain's abstractions. No fighting the framework.\n\nWould love to hear if others have found different optimizations. Token cost is becoming the bottleneck.",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -244,7 +244,7 @@
           "id": "nwcccn3",
           "author": "KegOfAppleJuice",
           "text": "Even though it's written up by AI, nice overview of things one can do for token optimisation",
-          "score": 6,
+          "score": 7,
           "created_utc": "2025-12-28 10:13:41",
           "is_submitter": false,
           "replies": []
@@ -253,7 +253,7 @@
           "id": "nwg4nze",
           "author": "OnyxProyectoUno",
           "text": "The semantic chunking approach is solid but you're still doing fixed-size boundaries. The real gains come from content-aware splitting that preserves logical units.\n\nYour compression step is interesting but risky. Compressing 3000 tokens to 800 means you're losing 70% of the information and trusting an LLM to keep what matters. That works until it doesn't. The accuracy might look the same in aggregate but you're probably missing edge cases where the compressed context drops critical details.\n\nThe context-level caching is clever. Most people only cache final responses which misses the opportunity to reuse expensive retrieval work. 35% hit rate is good, though 24-hour TTL might be too aggressive depending on how often your docs change.\n\nOne thing that jumps out is you're optimizing downstream when the real waste might be upstream. If your chunks are poorly formed to begin with, you're just optimizing garbage. Bad chunks mean more retrieval attempts, more irrelevant context, more compression losses. Have you looked at what your semantic chunker is actually producing? Sometimes the chunking strategy matters more than all the downstream optimization combined.\n\nThe token counting is table stakes at this point. Surprised more people aren't doing that by default.\n\nWhat's your chunk quality like after the semantic splitting? Are you seeing clean breaks at logical boundaries or is it still cutting mid-thought sometimes?",
-          "score": 3,
+          "score": 4,
           "created_utc": "2025-12-28 23:10:06",
           "is_submitter": false,
           "replies": []
@@ -314,9 +314,9 @@
       "url": "https://www.reddit.com/r/LangChain/comments/1q0t2qd/graphqlite_embedded_graph_database_for_building/",
       "author": "Fit-Presentation-591",
       "created_utc": "2026-01-01 01:59:35",
-      "score": 29,
+      "score": 28,
       "num_comments": 14,
-      "upvote_ratio": 0.97,
+      "upvote_ratio": 0.95,
       "text": "For anyone building GraphRAG systems who doesn't want to run Neo4j just to store a knowledge graph, I've been working on something that might help.\n\n\n\nGraphQLite is an SQLite extension that adds Cypher query support. The idea is that you can store your extracted entities and relationships in a graph structure, then use Cypher to traverse and expand context during retrieval. Combined with sqlite-vec for the vector search component, you get a fully embedded RAG stack in a single database file.\n\n\n\nIt includes graph algorithms like PageRank and community detection, which are useful for identifying important entities or clustering related concepts. There's an example in the repo using the HotpotQA multi-hop reasoning dataset if you want to see how the pieces fit together.\n\n\n\n\\`pip install graphqlite\\`\n\n\n\nGitHub: [https://github.com/colliery-io/graphqlite](https://github.com/colliery-io/graphqlite)",
       "is_original_content": false,
       "link_flair_text": null,
@@ -345,7 +345,7 @@
               "id": "nx0ut5y",
               "author": "Fit-Presentation-591",
               "text": "There’s an example in the project at [https://github.com/colliery-io/graphqlite/tree/main/examples/llm-graphrag](https://github.com/colliery-io/graphqlite/tree/main/examples/llm-graphrag)  \n\n\nTraditional RAG uses only vector similarity to find relevant documents. But multi-hop questions require connecting information across documents. By pre processing the documents and building up a set of relationships (COOCCURS in this case is set when two people are in the same sentence), we can use traversals to find information that may be related to the inital query and add it to the context for evaluation. \n\nThe concrete example from the demo is \n\n**Example:** \"Were Scott Derrickson and Ed Wood of the same nationality?\"\n\n* Vector search finds \"Ed Wood\" but may miss \"Scott Derrickson\"\n* Graph traversal via COOCCURS edges discovers the connection\n* Community detection finds topically related articles",
-              "score": 5,
+              "score": 4,
               "created_utc": "2026-01-01 03:04:26",
               "is_submitter": true,
               "replies": [
@@ -419,8 +419,8 @@
       "url": "https://www.reddit.com/r/LangChain/comments/1pykyuj/are_agent_evals_the_new_unit_tests/",
       "author": "Hot-Guide-4464",
       "created_utc": "2025-12-29 12:23:16",
-      "score": 21,
-      "num_comments": 11,
+      "score": 22,
+      "num_comments": 12,
       "upvote_ratio": 0.8,
       "text": "I’ve been thinking about this a lot as agent workflows get more complex. Because in software, we’d never ship anything without unit tests. But right now most people just “try a few prompts” and call it good. That clearly doesn’t scale once you have agents doing workflow automation or anything that has a real failure cost.\n\nSo I’m wondering if we’re moving to a future where CI-style evals become a standard part of building and deploying agents? Or am I overthinking it and we’re still too early for something this structured? I’d appreciate any insights on how folks in this community are running evals without drowning in infra.",
       "is_original_content": false,
@@ -433,7 +433,7 @@
           "id": "nwjsa3j",
           "author": "Kortopi-98",
           "text": "I think evals have to become the new unit tests because once an agent interacts with real data or systems, \"vibes-based QA\" becomes a liability. So we’ve been moving towards lightweight CI-like evals for our internal agents. Nothing super formal, just a set of representative tasks and expected behaviors. Just so you know, setting up the infra for this sucks unless you build your own harness. We switched to Moyai because they make this a lot less painful. Their eval workflow is basically: define agent, run them across diverse tasks, get diffs or outliers, done.",
-          "score": 11,
+          "score": 9,
           "created_utc": "2025-12-29 14:28:04",
           "is_submitter": false,
           "replies": [
@@ -462,7 +462,7 @@
           "id": "nwjhors",
           "author": "imnotafanofit",
           "text": "We started doing mini regression suite for agents. They're fast and lightweight but the biggest challenge is infra though. Spinning up evals can get expensive if you run them often.",
-          "score": 6,
+          "score": 7,
           "created_utc": "2025-12-29 13:25:27",
           "is_submitter": false,
           "replies": [
@@ -490,7 +490,7 @@
           "id": "nwld9em",
           "author": "MathematicianSome289",
           "text": "See em as more integration tests than unit tests. Evals test how the pieces work together. Units test the individual pieces.",
-          "score": 3,
+          "score": 4,
           "created_utc": "2025-12-29 19:01:59",
           "is_submitter": false,
           "replies": []
@@ -528,6 +528,15 @@
           "text": "I’d say they’re more analogous to a mix of CI/CD and production testing TBH. They’re a bit more complex than your average unit test IME.",
           "score": 1,
           "created_utc": "2026-01-01 03:37:11",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "nxa9f75",
+          "author": "No-Common1466",
+          "text": "Absolutely spot on – agent evals are becoming the new unit tests (or more accurately, the new integration/regression suite) for anything that's going to touch production.\n\nTraditional software has deterministic functions, so unit tests with exact assertions work great. Agents? They're non-deterministic, multi-turn, tool-using beasts that can go off the rails in infinite creative ways. \"Try a few prompts\" catches the obvious hallucinations, but it won't save you when a real user phrashes something weirdly, injects noise, or triggers an edge case in a 20-step workflow.\n\nFrom LangChain's own State of Agent Engineering report (late 2025 survey): observability is basically table stakes now (\\~89% adoption), but offline evals on test sets are only at \\~52%. That gap is closing fast though – teams shipping real-stakes agents (workflow automation, customer-facing, etc.) are treating evals as non-negotiable regression gates in CI/CD, just like we do with code.\n\nLangSmith/LangGraph is pushing hard here with multi-turn evals, trajectory evaluators, open evals catalog, and even running evals directly in Studio. Other tools (Braintrust, Promptfoo, etc.) are making it easy to fail builds on dropping robustness scores.\n\nThe missing piece a lot of folks run into: most evals focus on correctness (did it get the right answer?), but in production the bigger killer is robustness (does it still work when the input is sloppy, paraphrased, noisy, or adversarial?). That's where adversarial stress-testing comes in – mutate prompts automatically and enforce invariants to quantify how \"flaky\" your agent really is.\n\nWe're still early-ish, but the direction is clear: no serious agent ships without automated evals in the pipeline. Curious – what tools/workflows are you all using today to avoid drowning in manual testing?\n\n(Full disclosure: I'm building an open-source tool called Flakestorm exactly for the robustness side – local-first adversarial mutations + reports. Early days, would love feedback if anyone wants to kick the tires. LInk here: https://github.com/flakestorm/flakestorm)",
+          "score": 1,
+          "created_utc": "2026-01-02 17:20:07",
           "is_submitter": false,
           "replies": []
         }
@@ -1188,7 +1197,7 @@
       "created_utc": "2025-12-31 14:02:45",
       "score": 10,
       "num_comments": 6,
-      "upvote_ratio": 0.86,
+      "upvote_ratio": 0.82,
       "text": "Hi everyone,\nthis question is for people building AI agents that go a bit beyond basic demos.\nI keep running into the same limitation: many memory layers (mem0, Zep, Letta, Supermemory, etc.) decide for you what should be remembered.\n\nConcrete example: contracts that evolve over time\n– initial agreement\n– addenda / amendments\n– clauses that get modified or replaced\n\nWhat I see in practice:\nRAG: good at retrieving text, but it doesn’t understand versions, temporal priority, or clause replacement.\nVector DBs: they flatten everything, mixing old and new clauses together.\n\nMemory layers: they store generic or conversational “memories”, but not the information that actually matters, such as:\n\n-clause IDs or fingerprints\n-effective dates\n-active vs superseded clauses\n-relationships between different versions of the same contract\n\nThe problem isn’t how much is remembered, but what gets chosen as memory.\n\nSo my questions are:\nhow do you handle cases where you need structured, deterministic, temporal memory?\n\ndo you build custom schemas, graphs, or event logs on top of the LLM?\n\nor do these use cases inevitably require a fully custom memory layer?",
       "is_original_content": false,
       "link_flair_text": "Question | Help",
@@ -1252,9 +1261,9 @@
       "url": "https://www.reddit.com/r/LangChain/comments/1pzierz/i_built_a_lightweight_durable_full_stack_ai/",
       "author": "Worried_Market4466",
       "created_utc": "2025-12-30 13:41:19",
-      "score": 9,
+      "score": 10,
       "num_comments": 5,
-      "upvote_ratio": 0.91,
+      "upvote_ratio": 0.92,
       "text": "Hello everyone,\n\nI've been building agentic webapps for around a year and a half now. Started with loops, then moved onto langgraph + Assistant UI. I've been using the lang ecosystem since their launch and have seen their evolution.\n\nIt's great and easy to build agents, but things got really frustrating once I needed more fine grained control, especially has a hard time building interesting user experiences. I loved the idea of building agents as DAGs, but I really wanted to model UIs in my flow as nodes too. \n\nDeployment was another nightmare. I am kinda cheap and the per node executed tax seemed ... Well, not great. But hey, the devs gotta eat.\n\n\nAround six months back, I snapped and started working on an idea i had been throwing around for a while. It's called Cascaide.\n\nCascaide is a lightweight low level AI orchestration framework written in typescript designed to run anywhere JS/TS can. It is primarily built for web applications. However, you can create headless AI agents and workflows with it in Node.js.\n\nHere are the reasons why you should try it out. We are in the process of opensourcing it(probably Jan first week).\n\nDeveloper Experience and UX\n\n🍱 Learn Fast – Simple, powerful abstractions you can learn over lunch\n\n🎨 Build UI First – UI and human-in-the-loop support is natural, not an add-on\n\n🏎️ Build Fast – Single codebase (if you choose), no context switching\n\n⏳ Debug Easily – Debugging and time-travel out of the box\n\n🌍 Deploy Anywhere – Deploy like any other application, no caveats\n\n🪶 Stay Light – Tiny bundle size, small enough to actually understand\n\n🔮 UX Possibilities – Enables novel UX patterns beyond chatbots: smart components, AI workflow visualization, and dynamic portalling\n\n🔌 Extensibility – Easily extend for custom capabilities via middleware patterns\n\n🧑‍💻Stack Agnostic – Use with your favorite stack\n\nCosts\n\nZero orchestration costs in production \n\nLow TCO - far less moving parts to maintain\n\nTalent pool: enable any web dev to easily transition to AI engineering.\n\nObservability and reliability \n\n\nDurability: enterprise grade durability with no new overhead. Resume workflows post server/client crashes easily, or pick up weeks or months later.\n\nObservability and control: full observability out of the box with easy timetravel rollback and forking\n\n\nI have two production apps running on it and it's working great for us. It's very easy to use with serverless as well.\n\nI would love to talk to devs and get some feedback. We can do an early sneek peek!\n\nCheers!",
       "is_original_content": false,
       "link_flair_text": null,
@@ -1318,9 +1327,9 @@
       "url": "https://www.reddit.com/r/LangChain/comments/1pxgqfs/what_do_people_here_think_about_draganddrop_agent/",
       "author": "Ok-Introduction354",
       "created_utc": "2025-12-28 03:17:46",
-      "score": 9,
+      "score": 8,
       "num_comments": 8,
-      "upvote_ratio": 0.84,
+      "upvote_ratio": 0.79,
       "text": "I'm thinking of frameworks such as n8n and Gumloop, and equivalent prompted agents such as Lindy.ai that generate flow charts from prompts that can then be customized.\n\nRelated: do you know of or use any agent builder platforms that create agents directly in code (rather than drag-and-drop interfaces) from natural language prompts? For example, the agent could write code in Langchain, or some other framework.\n\nThere have been a few players in this broader space. Curious what folks are using and finding helpful, if anything.",
       "is_original_content": false,
       "link_flair_text": null,
@@ -1332,7 +1341,7 @@
           "id": "nwb2gjm",
           "author": "ur-krokodile",
           "text": "Same as drag-n-drop websites.",
-          "score": 7,
+          "score": 8,
           "created_utc": "2025-12-28 03:47:30",
           "is_submitter": false,
           "replies": []
@@ -1407,24 +1416,6 @@
       ]
     },
     {
-      "id": "1pys6wv",
-      "title": "Implementing Production-Grade Human-in-the-Loop (HITL) with LangGraph for Sensitive Workflows",
-      "subreddit": "LangChain",
-      "url": "https://rampakanayev.com/blog/langgraph-human-in-the-loop",
-      "author": "No-Conversation-8984",
-      "created_utc": "2025-12-29 17:23:45",
-      "score": 8,
-      "num_comments": 0,
-      "upvote_ratio": 0.91,
-      "text": "[External Link]",
-      "is_original_content": false,
-      "link_flair_text": "Tutorial",
-      "permalink": "https://reddit.com/r/LangChain/comments/1pys6wv/implementing_productiongrade_humanintheloop_hitl/",
-      "domain": "rampakanayev.com",
-      "is_self": false,
-      "comments": []
-    },
-    {
       "id": "1pwp8k4",
       "title": "I built a LangChain tool for searching Federal Acquisition Regulations (FAR)",
       "subreddit": "LangChain",
@@ -1461,6 +1452,24 @@
           ]
         }
       ]
+    },
+    {
+      "id": "1pys6wv",
+      "title": "Implementing Production-Grade Human-in-the-Loop (HITL) with LangGraph for Sensitive Workflows",
+      "subreddit": "LangChain",
+      "url": "https://rampakanayev.com/blog/langgraph-human-in-the-loop",
+      "author": "No-Conversation-8984",
+      "created_utc": "2025-12-29 17:23:45",
+      "score": 7,
+      "num_comments": 0,
+      "upvote_ratio": 0.9,
+      "text": "[External Link]",
+      "is_original_content": false,
+      "link_flair_text": "Tutorial",
+      "permalink": "https://reddit.com/r/LangChain/comments/1pys6wv/implementing_productiongrade_humanintheloop_hitl/",
+      "domain": "rampakanayev.com",
+      "is_self": false,
+      "comments": []
     },
     {
       "id": "1puphjs",
@@ -1593,15 +1602,72 @@
       "comments": []
     },
     {
+      "id": "1pvt637",
+      "title": "LangChain Beginner’s Guide | Basic RAG — Playlist & What You’ll Learn",
+      "subreddit": "LangChain",
+      "url": "https://www.youtube.com/playlist?list=PL04fRXMy5cnYTA11ppBwSqTxK0g65RWoI",
+      "author": "Amplifyabhi1",
+      "created_utc": "2025-12-26 02:25:41",
+      "score": 6,
+      "num_comments": 4,
+      "upvote_ratio": 1.0,
+      "text": "[External Link]",
+      "is_original_content": false,
+      "link_flair_text": "Tutorial",
+      "permalink": "https://reddit.com/r/LangChain/comments/1pvt637/langchain_beginners_guide_basic_rag_playlist_what/",
+      "domain": "youtube.com",
+      "is_self": false,
+      "comments": [
+        {
+          "id": "nvyvjbr",
+          "author": "Hot_Substance_9432",
+          "text": "Very cool video thanks for sharing!!",
+          "score": 1,
+          "created_utc": "2025-12-26 03:21:02",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "nvz2scp",
+              "author": "Amplifyabhi1",
+              "text": "Thank you still more yet to come may stay subscribed if looking forward.",
+              "score": 1,
+              "created_utc": "2025-12-26 04:13:08",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "nvz3nlo",
+                  "author": "Hot_Substance_9432",
+                  "text": "Of course, the channel helps a lot",
+                  "score": 1,
+                  "created_utc": "2025-12-26 04:19:47",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "nw5gbp0",
+          "author": "Amplifyabhi1",
+          "text": "New tutorial in this series - [https://youtu.be/R\\_cIN3QMvW0](https://youtu.be/R_cIN3QMvW0)",
+          "score": 1,
+          "created_utc": "2025-12-27 06:20:37",
+          "is_submitter": true,
+          "replies": []
+        }
+      ]
+    },
+    {
       "id": "1py0skm",
       "title": "Relay: a proposal for framework-agnostic agent orchestration",
       "subreddit": "LangChain",
       "url": "https://www.reddit.com/r/LangChain/comments/1py0skm/relay_a_proposal_for_frameworkagnostic_agent/",
       "author": "bumswagger",
       "created_utc": "2025-12-28 19:57:35",
-      "score": 6,
+      "score": 5,
       "num_comments": 7,
-      "upvote_ratio": 0.88,
+      "upvote_ratio": 0.78,
       "text": "You have LangGraph agents, teammate has CrewAI, another team uses custom agents. Getting them to work together sucks.\n\nProposal: agents coordinate through \"relay repos\"\n\n* Shared versioned state store\n* Agents commit outputs, read inputs from previous commits\n* Branch for parallel experimentation\n* Policies define triggers (when agent A commits, run agent B)\n* MCP for agent interface - framework agnostic\n\nIt's like git for agent collaboration instead of code collaboration.\n\nWould this actually help? What's wrong with this model?",
       "is_original_content": false,
       "link_flair_text": null,
@@ -1668,61 +1734,59 @@
       ]
     },
     {
-      "id": "1pvt637",
-      "title": "LangChain Beginner’s Guide | Basic RAG — Playlist & What You’ll Learn",
+      "id": "1pwxoq5",
+      "title": "Best Paid Courses for Generative AI + Agentic AI Learning Path? (Developer Track)",
       "subreddit": "LangChain",
-      "url": "https://www.youtube.com/playlist?list=PL04fRXMy5cnYTA11ppBwSqTxK0g65RWoI",
-      "author": "Amplifyabhi1",
-      "created_utc": "2025-12-26 02:25:41",
-      "score": 6,
-      "num_comments": 4,
+      "url": "https://www.reddit.com/r/LangChain/comments/1pwxoq5/best_paid_courses_for_generative_ai_agentic_ai/",
+      "author": "Grand-Moment6104",
+      "created_utc": "2025-12-27 13:20:34",
+      "score": 5,
+      "num_comments": 2,
       "upvote_ratio": 1.0,
-      "text": "[External Link]",
+      "text": "Hey folks,\n\nI'm looking to deepen my skills in **Generative AI and Agentic AI** this year, and I want to invest in quality paid courses rather than relying purely on free resources. I have a solid Python background and some experience with APIs, so I'm not starting from zero.",
       "is_original_content": false,
-      "link_flair_text": "Tutorial",
-      "permalink": "https://reddit.com/r/LangChain/comments/1pvt637/langchain_beginners_guide_basic_rag_playlist_what/",
-      "domain": "youtube.com",
-      "is_self": false,
+      "link_flair_text": null,
+      "permalink": "https://reddit.com/r/LangChain/comments/1pwxoq5/best_paid_courses_for_generative_ai_agentic_ai/",
+      "domain": "self.LangChain",
+      "is_self": true,
       "comments": [
         {
-          "id": "nvyvjbr",
-          "author": "Hot_Substance_9432",
-          "text": "Very cool video thanks for sharing!!",
+          "id": "nw7ay3v",
+          "author": "WineOrDeath",
+          "text": "Check Maven.  Lots of quality courses there.",
           "score": 1,
-          "created_utc": "2025-12-26 03:21:02",
+          "created_utc": "2025-12-27 15:28:54",
           "is_submitter": false,
-          "replies": [
-            {
-              "id": "nvz2scp",
-              "author": "Amplifyabhi1",
-              "text": "Thank you still more yet to come may stay subscribed if looking forward.",
-              "score": 1,
-              "created_utc": "2025-12-26 04:13:08",
-              "is_submitter": true,
-              "replies": [
-                {
-                  "id": "nvz3nlo",
-                  "author": "Hot_Substance_9432",
-                  "text": "Of course, the channel helps a lot",
-                  "score": 1,
-                  "created_utc": "2025-12-26 04:19:47",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
+          "replies": []
         },
         {
-          "id": "nw5gbp0",
-          "author": "Amplifyabhi1",
-          "text": "New tutorial in this series - [https://youtu.be/R\\_cIN3QMvW0](https://youtu.be/R_cIN3QMvW0)",
+          "id": "nwvv9ak",
+          "author": "Happy-Conversation54",
+          "text": "When I started learning Agentic AI, my background was mostly in time series analysis with traditional ML. I tried building a job application pipeline on my own, but realized I needed a framework like LangChain or an SDK to make real progress. Following a structured program helped me understand the current landscape and get ready for what’s coming next.\n\nIf anyone’s curious, here’s the program I used: [link](https://go.readytensor.ai/cert-983-certifications)",
           "score": 1,
-          "created_utc": "2025-12-27 06:20:37",
-          "is_submitter": true,
+          "created_utc": "2025-12-31 08:42:38",
+          "is_submitter": false,
           "replies": []
         }
       ]
+    },
+    {
+      "id": "1pywsxg",
+      "title": "[Open Source] LangGraph Threads Export Tool - Backup, migrate, and own your conversation data",
+      "subreddit": "LangChain",
+      "url": "https://www.reddit.com/r/LangChain/comments/1pywsxg/open_source_langgraph_threads_export_tool_backup/",
+      "author": "SignatureHuman8057",
+      "created_utc": "2025-12-29 20:13:30",
+      "score": 5,
+      "num_comments": 0,
+      "upvote_ratio": 1.0,
+      "text": "Hey everyone! 👋\n\nI built a tool to solve a problem I had with LangGraph Cloud and wanted to share it with the community.\n\n### The Problem\n\nI had two LangGraph Cloud deployments - a production one (expensive) and a dev one (cheaper). I wanted to:\n- Migrate all user conversations from prod to dev\n- Keep the same thread IDs so users don't lose their chat history\n- Preserve multi-tenancy (each user only sees their own threads)\n\nThere's no built-in way to do this in LangGraph Cloud, so I built one.\n\n### What This Tool Does\n\n**Export your LangGraph threads to:**\n- 📄 **JSON file** - Simple backup you can store anywhere\n- 🐘 **PostgreSQL database** - Own your data with proper schema and indexes\n- 🔄 **Another deployment** - Migrate between environments\n\n**What gets exported:**\n- Thread IDs (preserved exactly)\n- Metadata (including `owner` for multi-tenancy)\n- Full checkpoint history\n- Conversation values/messages\n\n### Quick Example\n\n```bash\n# Export all threads to JSON\npython migrate_threads.py \\\n  --source-url https://my-deployment.langgraph.app \\\n  --export-json backup.json\n\n# Export to PostgreSQL\npython migrate_threads.py \\\n  --source-url https://my-deployment.langgraph.app \\\n  --export-postgres\n\n# Migrate between deployments\npython migrate_threads.py \\\n  --source-url https://prod.langgraph.app \\\n  --target-url https://dev.langgraph.app \\\n  --full\n```\n\n### Why You Might Need This\n\n- **Cost optimization** - Move from expensive prod to cheaper deployment\n- **Backup before deletion** - Export everything before removing a deployment\n- **Compliance** - Store conversation data in your own database\n- **Analytics** - Query your threads with SQL\n- **Disaster recovery** - Restore from JSON backup\n\n### GitHub\n\n🔗 **[github.com/farouk09/langgraph-threads-migration](https://github.com/farouk09/langgraph-threads-migration)**\n\nMIT licensed, PRs welcome!\n\n---\n\n### Note for deployments with custom auth\n\nIf you use Auth0 or custom authentication, you'll need to temporarily disable it during export (the tool uses the LangSmith API key, not user tokens). Just set `\"auth\": null` in your `langgraph.json`, export, then re-enable.\n\n---\n\nHope this helps someone! Let me know if you have questions or feature requests. 🙂",
+      "is_original_content": false,
+      "link_flair_text": null,
+      "permalink": "https://reddit.com/r/LangChain/comments/1pywsxg/open_source_langgraph_threads_export_tool_backup/",
+      "domain": "self.LangChain",
+      "is_self": true,
+      "comments": []
     },
     {
       "id": "1q0uf3q",
@@ -1731,9 +1795,9 @@
       "url": "https://www.reddit.com/r/LangChain/comments/1q0uf3q/is_it_one_big_agent_or_subagents/",
       "author": "AdditionalWeb107",
       "created_utc": "2026-01-01 03:16:38",
-      "score": 5,
+      "score": 4,
       "num_comments": 6,
-      "upvote_ratio": 1.0,
+      "upvote_ratio": 0.84,
       "text": "If you are building agents, are you resorting to send traffic to one agent that is responsible for all sub-tasks (via its instructions) and packaging tools intelligently - or are you using a lightweight router to define/test/update sub-agents that can handle user specific tasks.\n\nThe former is a simple architecture, but I feel its a large bloated piece of software that's harder to debug. The latter is cleaner and simpler to build (especially packaging tools) but requires a great/robust orchestration/router.\n\nHow are you all thinking about this? Would love framework-agnostic approaches because these frameworks add very little value and become an operational nightmare as you push agents to production.",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -1801,52 +1865,15 @@
       ]
     },
     {
-      "id": "1pwxoq5",
-      "title": "Best Paid Courses for Generative AI + Agentic AI Learning Path? (Developer Track)",
-      "subreddit": "LangChain",
-      "url": "https://www.reddit.com/r/LangChain/comments/1pwxoq5/best_paid_courses_for_generative_ai_agentic_ai/",
-      "author": "Grand-Moment6104",
-      "created_utc": "2025-12-27 13:20:34",
-      "score": 5,
-      "num_comments": 2,
-      "upvote_ratio": 0.86,
-      "text": "Hey folks,\n\nI'm looking to deepen my skills in **Generative AI and Agentic AI** this year, and I want to invest in quality paid courses rather than relying purely on free resources. I have a solid Python background and some experience with APIs, so I'm not starting from zero.",
-      "is_original_content": false,
-      "link_flair_text": null,
-      "permalink": "https://reddit.com/r/LangChain/comments/1pwxoq5/best_paid_courses_for_generative_ai_agentic_ai/",
-      "domain": "self.LangChain",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "nw7ay3v",
-          "author": "WineOrDeath",
-          "text": "Check Maven.  Lots of quality courses there.",
-          "score": 1,
-          "created_utc": "2025-12-27 15:28:54",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "nwvv9ak",
-          "author": "Happy-Conversation54",
-          "text": "When I started learning Agentic AI, my background was mostly in time series analysis with traditional ML. I tried building a job application pipeline on my own, but realized I needed a framework like LangChain or an SDK to make real progress. Following a structured program helped me understand the current landscape and get ready for what’s coming next.\n\nIf anyone’s curious, here’s the program I used: [link](https://go.readytensor.ai/cert-983-certifications)",
-          "score": 1,
-          "created_utc": "2025-12-31 08:42:38",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
       "id": "1pz5grg",
       "title": "I am converting early, hello folks <waves>",
       "subreddit": "LangChain",
       "url": "https://i.redd.it/71ihbnh729ag1.png",
       "author": "gta_ws",
       "created_utc": "2025-12-30 02:09:52",
-      "score": 5,
+      "score": 4,
       "num_comments": 4,
-      "upvote_ratio": 0.86,
+      "upvote_ratio": 0.83,
       "text": "[External Link]",
       "is_original_content": false,
       "link_flair_text": null,
@@ -1891,24 +1918,6 @@
           "replies": []
         }
       ]
-    },
-    {
-      "id": "1pywsxg",
-      "title": "[Open Source] LangGraph Threads Export Tool - Backup, migrate, and own your conversation data",
-      "subreddit": "LangChain",
-      "url": "https://www.reddit.com/r/LangChain/comments/1pywsxg/open_source_langgraph_threads_export_tool_backup/",
-      "author": "SignatureHuman8057",
-      "created_utc": "2025-12-29 20:13:30",
-      "score": 4,
-      "num_comments": 0,
-      "upvote_ratio": 0.84,
-      "text": "Hey everyone! 👋\n\nI built a tool to solve a problem I had with LangGraph Cloud and wanted to share it with the community.\n\n### The Problem\n\nI had two LangGraph Cloud deployments - a production one (expensive) and a dev one (cheaper). I wanted to:\n- Migrate all user conversations from prod to dev\n- Keep the same thread IDs so users don't lose their chat history\n- Preserve multi-tenancy (each user only sees their own threads)\n\nThere's no built-in way to do this in LangGraph Cloud, so I built one.\n\n### What This Tool Does\n\n**Export your LangGraph threads to:**\n- 📄 **JSON file** - Simple backup you can store anywhere\n- 🐘 **PostgreSQL database** - Own your data with proper schema and indexes\n- 🔄 **Another deployment** - Migrate between environments\n\n**What gets exported:**\n- Thread IDs (preserved exactly)\n- Metadata (including `owner` for multi-tenancy)\n- Full checkpoint history\n- Conversation values/messages\n\n### Quick Example\n\n```bash\n# Export all threads to JSON\npython migrate_threads.py \\\n  --source-url https://my-deployment.langgraph.app \\\n  --export-json backup.json\n\n# Export to PostgreSQL\npython migrate_threads.py \\\n  --source-url https://my-deployment.langgraph.app \\\n  --export-postgres\n\n# Migrate between deployments\npython migrate_threads.py \\\n  --source-url https://prod.langgraph.app \\\n  --target-url https://dev.langgraph.app \\\n  --full\n```\n\n### Why You Might Need This\n\n- **Cost optimization** - Move from expensive prod to cheaper deployment\n- **Backup before deletion** - Export everything before removing a deployment\n- **Compliance** - Store conversation data in your own database\n- **Analytics** - Query your threads with SQL\n- **Disaster recovery** - Restore from JSON backup\n\n### GitHub\n\n🔗 **[github.com/farouk09/langgraph-threads-migration](https://github.com/farouk09/langgraph-threads-migration)**\n\nMIT licensed, PRs welcome!\n\n---\n\n### Note for deployments with custom auth\n\nIf you use Auth0 or custom authentication, you'll need to temporarily disable it during export (the tool uses the LangSmith API key, not user tokens). Just set `\"auth\": null` in your `langgraph.json`, export, then re-enable.\n\n---\n\nHope this helps someone! Let me know if you have questions or feature requests. 🙂",
-      "is_original_content": false,
-      "link_flair_text": null,
-      "permalink": "https://reddit.com/r/LangChain/comments/1pywsxg/open_source_langgraph_threads_export_tool_backup/",
-      "domain": "self.LangChain",
-      "is_self": true,
-      "comments": []
     },
     {
       "id": "1pyp3x5",
@@ -2049,9 +2058,9 @@
       "url": "https://www.reddit.com/r/LangChain/comments/1pzwcpo/how_do_you_handle_oauth_for_headless_tools_google/",
       "author": "tacattac",
       "created_utc": "2025-12-30 22:53:04",
-      "score": 3,
+      "score": 4,
       "num_comments": 6,
-      "upvote_ratio": 0.72,
+      "upvote_ratio": 0.75,
       "text": "I'm building an agent that needs to interact with GitHub and Google APIs. The problem: OAuth tokens expire, and when my agent is running a long task, authentication just breaks. Current hacky solution, I'm manually refreshing tokens before each API call, but this adds latency and feels wrong.\n\nTried looking at Composio but it seems overkill for what I need. [Arcade.dev](http://Arcade.dev) looks interesting but I couldn't figure out if it handles refresh automatically.\n\nHow are others solving this? Is everyone just:   \n1. Using long-lived API keys where possible?   \n2. Building custom token refresh middleware?   \n3. Some library I don't know about?   \n  \nRunning LangChain + GPT + Python  if that matters",
       "is_original_content": false,
       "link_flair_text": null,
