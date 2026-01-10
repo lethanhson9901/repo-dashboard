@@ -1,11 +1,11 @@
 {
   "metadata": {
-    "last_updated": "2026-01-09 08:49:57",
+    "last_updated": "2026-01-10 02:26:45",
     "time_filter": "week",
     "subreddit": "aws",
-    "total_items": 41,
-    "total_comments": 298,
-    "file_size_bytes": 363888
+    "total_items": 42,
+    "total_comments": 300,
+    "file_size_bytes": 368763
   },
   "items": [
     {
@@ -16,7 +16,7 @@
       "author": "NTCTech",
       "created_utc": "2026-01-05 03:28:54",
       "score": 94,
-      "num_comments": 30,
+      "num_comments": 32,
       "upvote_ratio": 0.96,
       "text": "I refused to pay for a dedicated SageMaker endpoint (or even a reserved EC2) for an internal chatbot that gets hit maybe 40–60 times a day. It felt like lighting money on fire.\n\nEveryone told me not to bother with Lambda because of cold starts — and honestly, they were right at first. Out of the box, loading a \\~4GB model took \\~40 seconds. Completely unusable for anything chat-like. I wasted a few hours proving that point.\n\nBut I went down a rabbit hole over the weekend and ended up with something that’s actually usable. I’m seeing cold starts consistently under \\~500ms now.\n\nTwo things that mattered way more than I expected:\n\n**1)** You have to “waste” RAM to get CPU  \nI initially ran it at 4GB since the model fit, but inference was crawling at \\~3–4 tokens/sec. Lambda throttles CPU pretty hard unless you provision more memory.\n\nI cranked it up (mostly to unlock the 6 vCPUs), and inference jumped to \\~18–22 tokens/sec. Same code, same model — just more memory.\n\n**2**) Bypassing disk entirely to fix cold starts  \nSnapStart helps, but it currently doesn’t work with Python container images and caps `/tmp` at 512MB, which is too small for the model.\n\nSo I did something a bit ugly.\n\nDuring the init phase, I stream the model bytes straight from S3 into RAM using `memfd_create` (anonymous memory-backed files). I hand that file descriptor to `llama.cpp`, which thinks it’s reading a file — but it never touches disk.\n\nWhen SnapStart snapshots the function, it captures that in-memory model. On restore, the model is already “loaded,” which kills the cold start.\n\nThis definitely isn’t something I’d ship blindly. Debugging is painful, memory visibility is opaque, and I wouldn’t be shocked if AWS breaks this in a future runtime. But for this use case, it’s been stable so far.\n\nI wrote up the full architecture and code snippets separately because it didn’t really fit in a Reddit post. If anyone wants the full breakdown, I can drop the link in the comments.\n\nSide question: has anyone replaced Step Functions with Durable Functions for this kind of orchestration? I’m tempted to simplify state management, but I’m worried the state history storage costs might sneak up later.",
       "is_original_content": false,
@@ -29,7 +29,7 @@
           "id": "nxtj0mm",
           "author": "d70",
           "text": ">gets hit maybe 40–60 times a day\n\nWhy not Bedrock? Tons more options than just Llama if you want cheap and fast models.",
-          "score": 48,
+          "score": 49,
           "created_utc": "2026-01-05 14:15:14",
           "is_submitter": false,
           "replies": [
@@ -37,7 +37,7 @@
               "id": "nxtlca4",
               "author": "NTCTech",
               "text": "Bedrock was on the shortlist to be honest, fair question though....\n\nFor this case, the main reasons I didn’t go that route were cost predictability and control. Even at low volume, per-token pricing added up faster than I expected once I factored in experimentation and prompt retries, and I wanted tighter control over the runtime behavior.\n\nThis was also partly an exercise in seeing how far Lambda could be pushed for inference under very low utilization. If this were customer-facing or spikier traffic, Bedrock would probably be the more boring (and safer) choice.",
-              "score": 6,
+              "score": 5,
               "created_utc": "2026-01-05 14:28:09",
               "is_submitter": true,
               "replies": [
@@ -45,7 +45,7 @@
                   "id": "nxxa18p",
                   "author": "BaxterPad",
                   "text": "40-60  requests a day and \"costs add up fast\" are hard to fathom. What are we talking... $5 bucks on a horrible day?",
-                  "score": 6,
+                  "score": 7,
                   "created_utc": "2026-01-06 01:04:45",
                   "is_submitter": false,
                   "replies": []
@@ -66,7 +66,7 @@
               "id": "nxtxkhk",
               "author": "NTCTech",
               "text": "Bedrock was definitely considered.\n\nThis was mostly about cost predictability at very low usage and seeing how far Lambda could be pushed. For anything customer-facing or higher volume, Bedrock is probably the sane choice.",
-              "score": 11,
+              "score": 10,
               "created_utc": "2026-01-05 15:30:56",
               "is_submitter": true,
               "replies": [
@@ -87,7 +87,7 @@
           "id": "nxtdvus",
           "author": "Old_Pomegranate_822",
           "text": "This does sound interesting, would like to see more ",
-          "score": 7,
+          "score": 9,
           "created_utc": "2026-01-05 13:45:55",
           "is_submitter": false,
           "replies": [
@@ -125,7 +125,7 @@
           "id": "nxthgmp",
           "author": "gwinerreniwg",
           "text": "Please do share the samples - I might have time to play with this today.  Thanks!",
-          "score": 3,
+          "score": 5,
           "created_utc": "2026-01-05 14:06:30",
           "is_submitter": false,
           "replies": []
@@ -224,6 +224,15 @@
               "replies": []
             }
           ]
+        },
+        {
+          "id": "nyklfo3",
+          "author": "AcrobaticLime6103",
+          "text": "Assumption: average 30-second invocations\n\n10GB Lambda with Snapstart\n($0.0000166667 x 10GB x 30secs) Invocation + ($0.0001397998 x 10GB) Snapstart restore = $0.006398008\nNote: Ignoring Snapstart caching cost\n30secs x 22 tokens/sec = 660 output tokens\n\n384MB Lambda with Snapstart\n($0.0000166667 x 0.375GB x 30secs) Invocation + ($0.0001397998 x 0.375GB) Snapstart restore = $0.0002399253\n\nCost difference to afford Bedrock API = $0.006398008 - $0.0002399253 = $0.0061580827\n\nAssumption: 50% input tokens, 50% output tokens (adjust accordingly to suit your narrative), so $0.00307904135 to afford output tokens\n\nNova 2 Lite = 1,231 output tokens\nLlama 4 Scout = 4,665 output tokens\nQwen3 Coder = 5,131 output tokens\ngpt-oss-20b = 10,263 output tokens\n\nEdit: I did like your wild idea. Thanks for sharing!",
+          "score": 1,
+          "created_utc": "2026-01-09 10:14:07",
+          "is_submitter": false,
+          "replies": []
         }
       ]
     },
@@ -234,9 +243,9 @@
       "url": "https://www.reddit.com/r/aws/comments/1q5dkvz/why_doesnt_aws_need_a_router_network_between_two/",
       "author": "Last-Pie-607",
       "created_utc": "2026-01-06 08:57:42",
-      "score": 70,
-      "num_comments": 33,
-      "upvote_ratio": 0.91,
+      "score": 71,
+      "num_comments": 34,
+      "upvote_ratio": 0.92,
       "text": "I’ve been a bit confused about AWS networking, and I’m trying to reconcile it with what I learned in college.\n\nBack then, if we had two networks/subnets that needed to talk to each other, we’d always create a router (or a separate network in between). The router would have one IP in each subnet, and both sides would use it as the gateway. That mental model made sense to me.\n\nNow in AWS:\n\n* Two subnets in the same VPC can talk without any visible router\n* Two VPCs can talk using VPC peering, but peering itself isn’t a “network” and doesn’t have IPs\n* There’s no device with two interfaces that I configure\n\nConceptually I get that AWS is abstracting things, but mentally it still feels weird because *something* must be routing the traffic.\n\nHow do experienced AWS folks think about this?  \nIs the right way to think of it as a distributed, managed router built into the VPC / AWS backbone rather than an actual network or device?",
       "is_original_content": false,
       "link_flair_text": "technical question",
@@ -248,7 +257,7 @@
           "id": "nxz7p0v",
           "author": "theonlywaye",
           "text": "Why do you think there isn’t a router? It’s all virtual networking at the end of the day. The details are just abstracted away from the end user. Each subnet you create you lose IPs because AWS reserves them to assign to stuff like the router and that is in the documentation, have a read over \n\nhttps://docs.aws.amazon.com/vpc/latest/userguide/subnet-sizing.html",
-          "score": 111,
+          "score": 113,
           "created_utc": "2026-01-06 09:04:53",
           "is_submitter": false,
           "replies": [
@@ -265,7 +274,7 @@
               "id": "ny34bjs",
               "author": "Zenin",
               "text": "Yes and no.  VPC is an internal, software-defined network that is *not* IP based and does *not* use traditional IP routing.  Customer's IP packets are encapsulated and there are no IP \"hops\" while in VPC that the user will ever see.  That .1 \"VPC router\" address on subnets?  Yah, you'll never see a route to or from that address, I'm not even sure it's internally used by anything and isn't just legacy at this point.\n\nThis btw is why tools like traceroute don't work in VPC: There's no visible routing hop for traceroute to expose, even when crossing VPC to VPC.  The only hops are at the edges of VPC (Internet, VPN, etc).  \n  \nRelated, this is indirectly why traceroute isn't \"needed\" because a packet can't get blocked partway through VPC routing.  That's because VPC evaluates the path before the packet even leaves the device and nothing that can't route will be sent at all, it dies at the source.  So even if you've got layers of NACLs and Security Groups and going across multiple VPCs etc, if there's a block in any of those policies the packet won't even leave the ENI.",
-              "score": 10,
+              "score": 11,
               "created_utc": "2026-01-06 21:53:59",
               "is_submitter": false,
               "replies": [
@@ -286,7 +295,7 @@
           "id": "nxzj2zz",
           "author": "blissadmin",
           "text": "The short answer is: VPC didn't exist for the first few years of AWS, all customers were on one giant private network. AWS built VPC as a packet encapsulation service in order to enable inter-VPC routing of potentially overlapping customer address spaces and quasi-unlimited scaling which was simply not possible with the original networking approach.\n\nThe long answer is in this re:Invent 2013 session where you can hear the entire thought process throughout the building and launching of VPC: https://youtu.be/Zd5hsL-JNY4\n\nIf you can find the 45 minutes to watch this you will know more about VPC than most customers.\n\nSource: ex-AWS",
-          "score": 61,
+          "score": 58,
           "created_utc": "2026-01-06 10:50:58",
           "is_submitter": false,
           "replies": [
@@ -294,7 +303,7 @@
               "id": "ny0avmn",
               "author": "llima1987",
               "text": "Any other resources you'd recommend for deeper understanding of AWS? I personally love to learn what's inside the box.",
-              "score": 3,
+              "score": 4,
               "created_utc": "2026-01-06 14:02:02",
               "is_submitter": false,
               "replies": [
@@ -302,7 +311,7 @@
                   "id": "ny18zsj",
                   "author": "ImmortalMurder",
                   "text": "Search through re:invent YouTube channel to see some recorded sessions. I was there a few years back and sat on a session that explained how AWS builds custom networking gear to handle their redundancy and insane throughput requirements. Everything is software defined over there so they do some really cool hardware/software stuff to achieve all this",
-                  "score": 4,
+                  "score": 5,
                   "created_utc": "2026-01-06 16:48:04",
                   "is_submitter": false,
                   "replies": []
@@ -361,7 +370,7 @@
           "id": "nxzpyrg",
           "author": "The_Packeteer",
           "text": "I think of it like “thank god I don’t have to fuss with router interferences just to configure a subnet”\n\nYou’re seeing a good example of cloud abstracting away complexity to reduce friction and simplify \n\nBut under the hood, there’s virtual and physical routers. U can see this by checking the “default gateway” for your ec2 nodes. That’s a virtual router interface within the VPC.",
-          "score": 5,
+          "score": 6,
           "created_utc": "2026-01-06 11:48:01",
           "is_submitter": false,
           "replies": []
@@ -379,7 +388,7 @@
           "id": "nxzzrv0",
           "author": "RecordingForward2690",
           "text": "Coming from a physical networking background and trying to wrap my head around AWS networking, this video helped me a lot:\n\n[https://www.youtube.com/watch?v=Zd5hsL-JNY4](https://www.youtube.com/watch?v=Zd5hsL-JNY4)\n\nMost important takeways:\n\nAWS VPC is IP-over-IP. Not VLANs and such.\n\nBecause the network has its own compute, the network itself has become intelligent. So we can have dumb hosts and we don't need to define/add intelligent devices to the network.\n\n\\*A lot\\* of the traditional networking stuff that used to be solved either in the hosts or by adding devices to a network, are now handled by the Nitro system.",
-          "score": 3,
+          "score": 4,
           "created_utc": "2026-01-06 12:57:31",
           "is_submitter": false,
           "replies": []
@@ -388,7 +397,7 @@
           "id": "nxz7xnd",
           "author": "Living_off_coffee",
           "text": "Remember that everything in AWS is software defined networking - there are ultimately physical switches and firewalls and things, but that bears no resemblance to what you see in the AWS console.\n\nYou generally don't need to think too much about it, but yeah, you can think of a VPC as having a router. Each subnet has a route table that you can configure from the VPC dashboard.",
-          "score": 7,
+          "score": 5,
           "created_utc": "2026-01-06 09:07:15",
           "is_submitter": false,
           "replies": []
@@ -416,7 +425,7 @@
           "id": "nxz7nkk",
           "author": "ElderCantPvm",
           "text": "All the networking objects and concepts are virtualized/abstracted in the first place. You don't need a router because you're not actually routing traffic between physical devices, you're just updating your rules for what is allowed to talk to what on the virtual network.",
-          "score": 5,
+          "score": 4,
           "created_utc": "2026-01-06 09:04:29",
           "is_submitter": false,
           "replies": [
@@ -505,9 +514,9 @@
       "url": "https://www.reddit.com/r/aws/comments/1q4iqjw/aws_console_is_now_unusable_with_firefox/",
       "author": "ManuelKiessling",
       "created_utc": "2026-01-05 10:57:18",
-      "score": 63,
+      "score": 64,
       "num_comments": 47,
-      "upvote_ratio": 0.84,
+      "upvote_ratio": 0.85,
       "text": "Anyone else experiencing this, or am I holding it wrong?\n\nFor several months by now, accessing the AWS Console (i.e., the AWS web-based user interface) via Firefox (latest version, on a M1 MacBook Pro) has become an exercise in futility.\n\nAfter a couple of minutes that a UI like EC2 or S3 etc. is open in a tab, that tab just \"stops\" or \"freezes\", that is, I can no longer interact with the UI elements of the opened AWS Console page, and Firefox shows a warning about how that tab stopped working.\n\nNot even reload works anymore — I need to close the tab and open the page in a new tab, which will then also reliably run into the same issue in 100% of all cases after a couple of minutes.\n\nBottom line is, I had to switch to Google Chrome for all things AWS Console.\n\nFeels like the bad ol' days of the 90s browser wars to be honest...",
       "is_original_content": false,
       "link_flair_text": "console",
@@ -527,7 +536,7 @@
               "id": "nxuz7ee",
               "author": "Vakz",
               "text": "How are you using different AWS in different accounts? Something like https://granted.dev with https://addons.mozilla.org/en-US/firefox/addon/multi-account-containers/, or are you using another solution?",
-              "score": 2,
+              "score": 3,
               "created_utc": "2026-01-05 18:24:44",
               "is_submitter": false,
               "replies": [
@@ -603,7 +612,7 @@
           "id": "nxsqrvf",
           "author": "4sokol",
           "text": "AWS web ui under Firefox 146.0 (64-bit) \\[Fedora Linux\\] works as usual, JFYI",
-          "score": 11,
+          "score": 13,
           "created_utc": "2026-01-05 11:00:17",
           "is_submitter": false,
           "replies": [
@@ -649,7 +658,7 @@
               "id": "nxsvwtl",
               "author": "ManuelKiessling",
               "text": "As suggested by u/MartijnKooij I am now running multiple AWS Console tabs in Firefox Troubleshoot mode, and the first one already ran into the issues:\n\n[https://imgur.com/a/QWVcfYJ](https://imgur.com/a/QWVcfYJ)",
-              "score": 11,
+              "score": 9,
               "created_utc": "2026-01-05 11:43:06",
               "is_submitter": true,
               "replies": [
@@ -679,7 +688,7 @@
           "id": "nxtolaa",
           "author": "baever",
           "text": "I'm seeing it on my 2021 MBP M1 Pro with Firefox 146.01/Tahoe 26.1 and ublock origin with multi account turned on. It's typically happening when returning to a tab after a period of inactivity.",
-          "score": 4,
+          "score": 3,
           "created_utc": "2026-01-05 14:45:45",
           "is_submitter": false,
           "replies": []
@@ -688,7 +697,7 @@
           "id": "nxszxm1",
           "author": "Nemergal",
           "text": "Hello,\n\nExactly same problem since 1 month with Firefox.",
-          "score": 7,
+          "score": 6,
           "created_utc": "2026-01-05 12:14:05",
           "is_submitter": false,
           "replies": []
@@ -724,7 +733,7 @@
           "id": "nxsvyt2",
           "author": "PashaPostaaja",
           "text": "I have the same problem.",
-          "score": 5,
+          "score": 4,
           "created_utc": "2026-01-05 11:43:32",
           "is_submitter": false,
           "replies": []
@@ -733,7 +742,7 @@
           "id": "nxt122r",
           "author": "KeyPerformance2810",
           "text": "Me and a few colleagues have had same issue on MacOS & latest Firefox for the past month or so, M1 Macbook Pro as well.",
-          "score": 5,
+          "score": 6,
           "created_utc": "2026-01-05 12:22:26",
           "is_submitter": false,
           "replies": []
@@ -932,7 +941,7 @@
       "author": "theyeeha",
       "created_utc": "2026-01-04 00:31:20",
       "score": 45,
-      "num_comments": 71,
+      "num_comments": 72,
       "upvote_ratio": 0.85,
       "text": "Primarily interested in full stack application teams\n\nEC2 vs App Runner vs Elastic Beanstalk for backend/compute (with RDS/DynamoDB)\n\nApp Runner vs CloudFront + S3 for frontend",
       "is_original_content": false,
@@ -953,7 +962,7 @@
               "id": "nxjuisn",
               "author": "Unlucky_Major4434",
               "text": "Basically everything uses APIG + lambda + DDB unless there’s a verrrry good reason not to lol.",
-              "score": 41,
+              "score": 37,
               "created_utc": "2026-01-04 02:02:36",
               "is_submitter": false,
               "replies": [
@@ -961,7 +970,7 @@
                   "id": "nxlef56",
                   "author": "SanJJ_1",
                   "text": "Golden path is more commonly ECS instead of lambda, no?",
-                  "score": 5,
+                  "score": 6,
                   "created_utc": "2026-01-04 08:30:14",
                   "is_submitter": false,
                   "replies": []
@@ -983,7 +992,7 @@
           "id": "nxk9uq1",
           "author": "chemosh_tz",
           "text": "S3 is probably the most used in any team",
-          "score": 33,
+          "score": 30,
           "created_utc": "2026-01-04 03:28:52",
           "is_submitter": false,
           "replies": []
@@ -992,7 +1001,7 @@
           "id": "nxjrahd",
           "author": "MmmmmmJava",
           "text": "Everything is frequently used with the exception of RDS. Use of relational DBs require senior approval.",
-          "score": 37,
+          "score": 35,
           "created_utc": "2026-01-04 01:44:49",
           "is_submitter": false,
           "replies": [
@@ -1000,7 +1009,7 @@
               "id": "nxjw41u",
               "author": "Infamous_Art1174",
               "text": "Interesting. Why’s this?",
-              "score": 10,
+              "score": 11,
               "created_utc": "2026-01-04 02:11:20",
               "is_submitter": false,
               "replies": [
@@ -1026,7 +1035,7 @@
                   "id": "nxk8qcf",
                   "author": "maretard",
                   "text": "Any application developer can generally figure out (or be easily taught) high availability and operations for most AWS technologies. On the other hand relational datastores are so complex they have their own job description (DBA) with specializations per platform. An underprepared team getting thrown into a relational datastore with no senior/principal level DBA expertise is a recipe for disaster, but even worse, you won’t realize the extent of your fucked-ness until years later when it’s too late to go back easily.",
-                  "score": 10,
+                  "score": 9,
                   "created_utc": "2026-01-04 03:22:26",
                   "is_submitter": false,
                   "replies": []
@@ -1076,7 +1085,7 @@
           "id": "nxn3sn8",
           "author": "Horror-Tower2571",
           "text": "Lambda for literally anything that works with it, never used EC2 or ECS/EKS unless we absolutely have to",
-          "score": 7,
+          "score": 6,
           "created_utc": "2026-01-04 15:50:37",
           "is_submitter": false,
           "replies": []
@@ -1101,7 +1110,7 @@
                   "id": "nxlkad3",
                   "author": "Hopeful-Trainer-5479",
                   "text": "everything we do is via cdk. i meant cloud formation to provision the cdk stuff",
-                  "score": 6,
+                  "score": 7,
                   "created_utc": "2026-01-04 09:23:35",
                   "is_submitter": false,
                   "replies": []
@@ -1110,7 +1119,7 @@
                   "id": "nxlkm7s",
                   "author": "KarelKat",
                   "text": "Most of the new stuff is CDK. And guess you could argue that CDK is just Clouformation anyways heh",
-                  "score": 4,
+                  "score": 3,
                   "created_utc": "2026-01-04 09:26:37",
                   "is_submitter": false,
                   "replies": []
@@ -1123,7 +1132,7 @@
           "id": "nxjxdyj",
           "author": "Quinnypig",
           "text": "Isengard, to my chagrin.",
-          "score": 26,
+          "score": 24,
           "created_utc": "2026-01-04 02:18:26",
           "is_submitter": false,
           "replies": [
@@ -1159,7 +1168,7 @@
               "id": "nxm6hcd",
               "author": "baever",
               "text": "Externally, [Identity Center](https://aws.amazon.com/iam/identity-center/) is the closest thing to Isengard. It provides group based access to temporary credentials in roles. If you need just in time access to your roles use [TEAM](https://aws.amazon.com/blogs/security/temporary-elevated-access-management-with-iam-identity-center/). If you want the easier console deeplink functionality and to quickly pivot between accounts and roles use [Speedrun](https://speedrun.cc).",
-              "score": 3,
+              "score": 4,
               "created_utc": "2026-01-04 12:36:15",
               "is_submitter": false,
               "replies": []
@@ -1168,7 +1177,7 @@
               "id": "nxkk7ue",
               "author": "bizzygreenthumb",
               "text": "What is Isengard",
-              "score": 4,
+              "score": 6,
               "created_utc": "2026-01-04 04:32:05",
               "is_submitter": false,
               "replies": [
@@ -1176,7 +1185,7 @@
                   "id": "nxkpo9a",
                   "author": "tybit",
                   "text": "It’s an internal tool for managing AWS accounts, and it’s great. \n\nHere’s @Quinnypig’s blog post on it https://www.lastweekinaws.com/blog/the-aws-service-i-hate-the-most/\n\nI’m impressed he’s still holding the grudge all these years later.",
-                  "score": 17,
+                  "score": 16,
                   "created_utc": "2026-01-04 05:08:35",
                   "is_submitter": false,
                   "replies": []
@@ -1185,7 +1194,7 @@
                   "id": "nxkl0ge",
                   "author": "zanathan33",
                   "text": "Essentially an identity provider and account provisioning tool.",
-                  "score": 4,
+                  "score": 3,
                   "created_utc": "2026-01-04 04:37:20",
                   "is_submitter": false,
                   "replies": []
@@ -1198,7 +1207,7 @@
           "id": "nxn5uiz",
           "author": "EssenceOfLlama81",
           "text": "We use Kinesis, Apache Flink, SNS, S3, Glue, and RDS for collecting, processing, and storing data.\n\nWe then use CloudFront, API Gateway, Lambda@Edge, Lambda, S3, and DynamoDB for the frontend.\n\nFor data use-cases we use Athena/Glue to fetch high latency backend data, RDS for lower latency backend data, and use Dynamo mostly for storing data just used for frontend support (like user preferences and saved pages). We aslo ocassionally use ddb kind of like a cache for high latency queries.",
-          "score": 4,
+          "score": 3,
           "created_utc": "2026-01-04 16:00:20",
           "is_submitter": false,
           "replies": [
@@ -1265,7 +1274,7 @@
           "id": "nxjf2q4",
           "author": "lobbo80s",
           "text": "CodeDeploy",
-          "score": -9,
+          "score": -11,
           "created_utc": "2026-01-04 00:38:06",
           "is_submitter": false,
           "replies": [
@@ -1281,7 +1290,7 @@
                   "id": "nxlkgli",
                   "author": "KarelKat",
                   "text": "Except that those internal build tools use codedeploy when deploying to lambda and certain other targets. Using cdk and targeting lambda with blue/green or canary deployment? Code deploy under the hood. Sure the internal stuff builds the assets and gets them to the AWS account  but the last stage is codedeploy with Lambda. This is mostly hidden though so you don't really \"use\" it but it is an important part under the hood.",
-                  "score": 4,
+                  "score": 2,
                   "created_utc": "2026-01-04 09:25:11",
                   "is_submitter": false,
                   "replies": []
@@ -1358,7 +1367,7 @@
           "id": "nxjhcyh",
           "author": "Physics_Prop",
           "text": "EBS is virtually unused, ECS is far more popular with more flexibility.",
-          "score": -21,
+          "score": -20,
           "created_utc": "2026-01-04 00:50:12",
           "is_submitter": false,
           "replies": [
@@ -1374,7 +1383,7 @@
                   "id": "nxl5qpa",
                   "author": "Physics_Prop",
                   "text": "I mean elastic beanstalk, poor choice of acronym lol.",
-                  "score": 5,
+                  "score": 3,
                   "created_utc": "2026-01-04 07:12:54",
                   "is_submitter": false,
                   "replies": []
@@ -1401,9 +1410,9 @@
       "url": "https://aws.amazon.com/about-aws/whats-new/2026/01/amazon-ecs-tmpfs-mounts-aws-fargate-managed-instances/",
       "author": "sleeps_lit",
       "created_utc": "2026-01-07 01:16:07",
-      "score": 41,
+      "score": 43,
       "num_comments": 2,
-      "upvote_ratio": 0.93,
+      "upvote_ratio": 0.95,
       "text": "[External Link]",
       "is_original_content": false,
       "link_flair_text": "security",
@@ -1432,6 +1441,149 @@
       ]
     },
     {
+      "id": "1q6gki2",
+      "title": "Python 3.12 Lambda functions slower than 3.9",
+      "subreddit": "aws",
+      "url": "https://www.reddit.com/r/aws/comments/1q6gki2/python_312_lambda_functions_slower_than_39/",
+      "author": "henk1122",
+      "created_utc": "2026-01-07 14:20:02",
+      "score": 43,
+      "num_comments": 16,
+      "upvote_ratio": 0.91,
+      "text": "Due to deprecation, we have to update our python version from 3.9 to 3.14. We run it on ARM.\n\nHowever, after upgrade, we see a 4 times performance drop on execution time. This lambda is fairly simply, just checking a sns message and forwarding this as destination.\n\nhttps://preview.redd.it/mdi5es9vrxbg1.png?width=540&format=png&auto=webp&s=a8ac2d906fbba8669296b3676e1dd6f9d8fecea0\n\nDoes other people also experience this?\n\n\\-- edit  \nI can't edit the post title, but I mean updated to 3.14",
+      "is_original_content": false,
+      "link_flair_text": "technical question",
+      "permalink": "https://reddit.com/r/aws/comments/1q6gki2/python_312_lambda_functions_slower_than_39/",
+      "domain": "self.aws",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "ny7g4yi",
+          "author": "yusufmayet",
+          "text": "AWS Lambda Python 3.12 Blog Post Reference:\n\n\n\nFrom the official AWS blog post - [https://aws.amazon.com/blogs/compute/python-3-12-runtime-now-available-in-aws-lambda](https://aws.amazon.com/blogs/compute/python-3-12-runtime-now-available-in-aws-lambda)\n\n \"At launch, new Lambda runtimes receive less usage than existing, established runtimes. This can \n\nresult in longer cold start times due to reduced cache residency within internal Lambda sub-systems.\n\nCold start times typically improve in the weeks following launch as usage increases.\"\n\n \"As a result, AWS recommends not drawing conclusions from side-by-side performance comparisons \n\nwith other Lambda runtimes until the performance has stabilized.\"\n\n\n\nThis may explain your slowdown with Python 3.14 - it's a brand new runtime with minimal cache \n\nresidency in AWS's internal systems.",
+          "score": 69,
+          "created_utc": "2026-01-07 14:42:09",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "ny7gldc",
+              "author": "henk1122",
+              "text": "Yes, it seems something about that. With 3.13 it's only twice the execution time",
+              "score": 9,
+              "created_utc": "2026-01-07 14:44:29",
+              "is_submitter": true,
+              "replies": []
+            },
+            {
+              "id": "ny8mzjr",
+              "author": "randomusername0582",
+              "text": "But they say 99.9% of lambda invocations are \"warm\"\n\nThis should have effectively no impact on average duration for any \"real\" scale",
+              "score": 5,
+              "created_utc": "2026-01-07 17:59:21",
+              "is_submitter": false,
+              "replies": [
+                {
+                  "id": "nybeyfe",
+                  "author": "minirova",
+                  "text": "Yeah, and at least 99.9% of lambda invocations are running on the older versions of python.",
+                  "score": 2,
+                  "created_utc": "2026-01-08 01:39:54",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            },
+            {
+              "id": "nyc50q8",
+              "author": "Zenin",
+              "text": "That's absolutely ridiculous.  It's not like they have 10,000 different runtime options: Why not simply pin the base runtimes in the cache so they're never cold no matter the popularity?  User-code going cold I totally get, but the *base runtime layers* what the hell?  This seems like a no-brainer?\n\nThis literally means anyone cost and/or performance sensitive needs to be running simulations constantly across all acceptable runtime combinations and dynamically changing their configurations to match the moving target.  What a crock!",
+              "score": 5,
+              "created_utc": "2026-01-08 03:59:54",
+              "is_submitter": false,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "ny7vmbm",
+          "author": "henk1122",
+          "text": "Update:\n\nAfter some more tests:\n\nARM - python 3.14 - execution time increases 4 times  \nARM - python 3.13 - execution time increases 2 times\n\nChanging the function back to x86 and the execution time is the same as python 3.9 on ARM\n\nTLDR;\n\nARM is slower with newer python versions which eliminates the cost advantage of running the lambda on ARM.",
+          "score": 34,
+          "created_utc": "2026-01-07 15:56:24",
+          "is_submitter": true,
+          "replies": [
+            {
+              "id": "ny82dpa",
+              "author": "Pavrr",
+              "text": "Interesting. i would reach out to aws support and ask them.",
+              "score": 11,
+              "created_utc": "2026-01-07 16:27:09",
+              "is_submitter": false,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "ny7chye",
+          "author": "edthesmokebeard",
+          "text": "Check memory usage.   I found this a while back and it gave some interesting insights: [https://github.com/alexcasalboni/aws-lambda-power-tuning](https://github.com/alexcasalboni/aws-lambda-power-tuning)",
+          "score": 8,
+          "created_utc": "2026-01-07 14:23:09",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "ny7cx0g",
+              "author": "henk1122",
+              "text": "That's very interesting! However, nothing has been changed in the configuration, just the python version.   \nIt might be because it's running on their newer OS: [https://docs.aws.amazon.com/lambda/latest/dg/lambda-python.html#python-sdk-included](https://docs.aws.amazon.com/lambda/latest/dg/lambda-python.html#python-sdk-included)",
+              "score": 5,
+              "created_utc": "2026-01-07 14:25:20",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "ny7e1im",
+                  "author": "edthesmokebeard",
+                  "text": "Thats kind of what I was thinking - perhaps python3.12 has fatter memory requirements.  In the tests I ran on a lot of our little infrastructure 'utility' lambdas, they almost always ran faster if you gave them more than the minimal memory.   The trick is since its memoryXtime, you might double memory but save 10% time, so its not worth it, etc.  Gotta profile.\n\nIf its NOT that, then that sucks that some python3.12 library isn't optimized for what you need.",
+                  "score": 4,
+                  "created_utc": "2026-01-07 14:31:12",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "ny8gyz4",
+          "author": "choseusernamemyself",
+          "text": "Can you try updating your dependencies to newer glibc versions with the right Python version? It might be about the nativity from the OS change to AL2023.",
+          "score": 2,
+          "created_utc": "2026-01-07 17:32:51",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "ny8k5gw",
+              "author": "henk1122",
+              "text": "This is a very basic lambda with no dependency",
+              "score": 4,
+              "created_utc": "2026-01-07 17:47:03",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "nycgta6",
+                  "author": "Sea-Us-RTO",
+                  "text": "all functions have dependencies. a plain print(\"hello world\") function has a dependency on python's print function, which in turn needs stdout libraries.\n\nsince all lambdas make network calls, check your client library for network config changes that occurred between 3.9 -> 3.13.  might be a new setting you can enable in 3.14, for example, or an extra security setting that you could disable.  maybe a default timeout or retry backoff minimum delay was increased.\n\n\nand definitely try doubling the functions memory.  if the 3.9 function was close to the cap, the updayed libraries in 3.14 might have tipped you over the brink.\n\n\ntry using provisioned concurrency to determine if the increase is coming from init, or from your handler.",
+                  "score": 3,
+                  "created_utc": "2026-01-08 05:14:14",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
       "id": "1q2mf1g",
       "title": "Scaling 'Mark All as Read' in DynamoDB: Avoiding the 1MB limit without 100k background writes.",
       "subreddit": "aws",
@@ -1440,7 +1592,7 @@
       "created_utc": "2026-01-03 05:39:26",
       "score": 39,
       "num_comments": 14,
-      "upvote_ratio": 0.89,
+      "upvote_ratio": 0.88,
       "text": "Building a notification system (Missed calls, alerts, etc.) and I've run into the classic DynamoDB 1MB response limit.\n\nBasically, my users can have thousands of notifications. I need to be able to \"Mark All as Read\" instantly.\n\n Currently, my \"unread\" query is returning way too much data because I can't effectively update every single row in the DB without the cost being insane.\n\nI tried using a timestamp in Redis to filter the results in my backend, but I’m still paying for the \"Read\" units in Dynamo for items that are technically already read. It feels like I'm fighting the database.\n\nIf you’ve built a notification feed,  how did you handle the \"Mark All\" feature? Did you use a \"watermark\" timestamp, or did you find a clever way to batch update?\n\nAppreciate any tips or war stories!",
       "is_original_content": false,
       "link_flair_text": "technical question",
@@ -1452,7 +1604,7 @@
           "id": "nxg1rbw",
           "author": "Mishoniko",
           "text": ">I tried using a timestamp in Redis to filter the results in my backend, but I’m still paying for the \"Read\" units in Dynamo for items that are technically already read. It feels like I'm fighting the database.\n\nYou are because your schema design is faulty. Putting a read marker in the message when you can expect users to generate millions of notifications was never going to scale.\n\nIndex notifications by Sargable value (timestamp, etc.). Put a watermark in the user record. One row update to mark read all. \n\nIf that's not doable then build a SQS/Lambda pipeline to run the marking async and batch queries by the size limit.",
-          "score": 67,
+          "score": 70,
           "created_utc": "2026-01-03 14:46:12",
           "is_submitter": false,
           "replies": [
@@ -1471,7 +1623,7 @@
           "id": "nxg76xp",
           "author": "Limp-Maximum9662",
           "text": "Add a version field. When all marked as read inc by 1 in one global user config. When reading the notifications, read only latest version",
-          "score": 16,
+          "score": 17,
           "created_utc": "2026-01-03 15:15:04",
           "is_submitter": false,
           "replies": []
@@ -1509,7 +1661,7 @@
           "id": "nxh6kdh",
           "author": "alex_bilbie",
           "text": "Store a lastReadTimestamp property on the user record.\n\nWhen the user marks all as read, update that property, then you can easily determine if notifications added after that time are new.",
-          "score": 10,
+          "score": 9,
           "created_utc": "2026-01-03 18:02:20",
           "is_submitter": false,
           "replies": []
@@ -1527,7 +1679,7 @@
           "id": "nxg6v9q",
           "author": "ReturnOfNogginboink",
           "text": "Create a secondary index with just the users ID and the 'hasbeenread' flag. Use the secondary index to query and mark items read.",
-          "score": 4,
+          "score": 3,
           "created_utc": "2026-01-03 15:13:23",
           "is_submitter": false,
           "replies": []
@@ -1571,143 +1723,161 @@
       ]
     },
     {
-      "id": "1q6gki2",
-      "title": "Python 3.12 Lambda functions slower than 3.9",
+      "id": "1q4h6h9",
+      "title": "GitHub - huseyinbabal/taws: Terminal UI for AWS (taws) - A terminal-based AWS resource viewer and manager",
       "subreddit": "aws",
-      "url": "https://www.reddit.com/r/aws/comments/1q6gki2/python_312_lambda_functions_slower_than_39/",
-      "author": "henk1122",
-      "created_utc": "2026-01-07 14:20:02",
-      "score": 38,
+      "url": "https://github.com/huseyinbabal/taws",
+      "author": "huseyinbabal",
+      "created_utc": "2026-01-05 09:23:26",
+      "score": 39,
       "num_comments": 16,
       "upvote_ratio": 0.9,
-      "text": "Due to deprecation, we have to update our python version from 3.9 to 3.14. We run it on ARM.\n\nHowever, after upgrade, we see a 4 times performance drop on execution time. This lambda is fairly simply, just checking a sns message and forwarding this as destination.\n\nhttps://preview.redd.it/mdi5es9vrxbg1.png?width=540&format=png&auto=webp&s=a8ac2d906fbba8669296b3676e1dd6f9d8fecea0\n\nDoes other people also experience this?\n\n\\-- edit  \nI can't edit the post title, but I mean updated to 3.14",
+      "text": "[External Link]",
       "is_original_content": false,
-      "link_flair_text": "technical question",
-      "permalink": "https://reddit.com/r/aws/comments/1q6gki2/python_312_lambda_functions_slower_than_39/",
-      "domain": "self.aws",
-      "is_self": true,
+      "link_flair_text": "general aws",
+      "permalink": "https://reddit.com/r/aws/comments/1q4h6h9/github_huseyinbabaltaws_terminal_ui_for_aws_taws/",
+      "domain": "github.com",
+      "is_self": false,
       "comments": [
         {
-          "id": "ny7g4yi",
-          "author": "yusufmayet",
-          "text": "AWS Lambda Python 3.12 Blog Post Reference:\n\n\n\nFrom the official AWS blog post - [https://aws.amazon.com/blogs/compute/python-3-12-runtime-now-available-in-aws-lambda](https://aws.amazon.com/blogs/compute/python-3-12-runtime-now-available-in-aws-lambda)\n\n \"At launch, new Lambda runtimes receive less usage than existing, established runtimes. This can \n\nresult in longer cold start times due to reduced cache residency within internal Lambda sub-systems.\n\nCold start times typically improve in the weeks following launch as usage increases.\"\n\n \"As a result, AWS recommends not drawing conclusions from side-by-side performance comparisons \n\nwith other Lambda runtimes until the performance has stabilized.\"\n\n\n\nThis may explain your slowdown with Python 3.14 - it's a brand new runtime with minimal cache \n\nresidency in AWS's internal systems.",
-          "score": 69,
-          "created_utc": "2026-01-07 14:42:09",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "ny7gldc",
-              "author": "henk1122",
-              "text": "Yes, it seems something about that. With 3.13 it's only twice the execution time",
-              "score": 9,
-              "created_utc": "2026-01-07 14:44:29",
-              "is_submitter": true,
-              "replies": []
-            },
-            {
-              "id": "ny8mzjr",
-              "author": "randomusername0582",
-              "text": "But they say 99.9% of lambda invocations are \"warm\"\n\nThis should have effectively no impact on average duration for any \"real\" scale",
-              "score": 4,
-              "created_utc": "2026-01-07 17:59:21",
-              "is_submitter": false,
-              "replies": [
-                {
-                  "id": "nybeyfe",
-                  "author": "minirova",
-                  "text": "Yeah, and at least 99.9% of lambda invocations are running on the older versions of python.",
-                  "score": 2,
-                  "created_utc": "2026-01-08 01:39:54",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            },
-            {
-              "id": "nyc50q8",
-              "author": "Zenin",
-              "text": "That's absolutely ridiculous.  It's not like they have 10,000 different runtime options: Why not simply pin the base runtimes in the cache so they're never cold no matter the popularity?  User-code going cold I totally get, but the *base runtime layers* what the hell?  This seems like a no-brainer?\n\nThis literally means anyone cost and/or performance sensitive needs to be running simulations constantly across all acceptable runtime combinations and dynamically changing their configurations to match the moving target.  What a crock!",
-              "score": 5,
-              "created_utc": "2026-01-08 03:59:54",
-              "is_submitter": false,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "ny7vmbm",
-          "author": "henk1122",
-          "text": "Update:\n\nAfter some more tests:\n\nARM - python 3.14 - execution time increases 4 times  \nARM - python 3.13 - execution time increases 2 times\n\nChanging the function back to x86 and the execution time is the same as python 3.9 on ARM\n\nTLDR;\n\nARM is slower with newer python versions which eliminates the cost advantage of running the lambda on ARM.",
-          "score": 34,
-          "created_utc": "2026-01-07 15:56:24",
-          "is_submitter": true,
-          "replies": [
-            {
-              "id": "ny82dpa",
-              "author": "Pavrr",
-              "text": "Interesting. i would reach out to aws support and ask them.",
-              "score": 10,
-              "created_utc": "2026-01-07 16:27:09",
-              "is_submitter": false,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "ny7chye",
-          "author": "edthesmokebeard",
-          "text": "Check memory usage.   I found this a while back and it gave some interesting insights: [https://github.com/alexcasalboni/aws-lambda-power-tuning](https://github.com/alexcasalboni/aws-lambda-power-tuning)",
-          "score": 8,
-          "created_utc": "2026-01-07 14:23:09",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "ny7cx0g",
-              "author": "henk1122",
-              "text": "That's very interesting! However, nothing has been changed in the configuration, just the python version.   \nIt might be because it's running on their newer OS: [https://docs.aws.amazon.com/lambda/latest/dg/lambda-python.html#python-sdk-included](https://docs.aws.amazon.com/lambda/latest/dg/lambda-python.html#python-sdk-included)",
-              "score": 5,
-              "created_utc": "2026-01-07 14:25:20",
-              "is_submitter": true,
-              "replies": [
-                {
-                  "id": "ny7e1im",
-                  "author": "edthesmokebeard",
-                  "text": "Thats kind of what I was thinking - perhaps python3.12 has fatter memory requirements.  In the tests I ran on a lot of our little infrastructure 'utility' lambdas, they almost always ran faster if you gave them more than the minimal memory.   The trick is since its memoryXtime, you might double memory but save 10% time, so its not worth it, etc.  Gotta profile.\n\nIf its NOT that, then that sucks that some python3.12 library isn't optimized for what you need.",
-                  "score": 3,
-                  "created_utc": "2026-01-07 14:31:12",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "ny8gyz4",
-          "author": "choseusernamemyself",
-          "text": "Can you try updating your dependencies to newer glibc versions with the right Python version? It might be about the nativity from the OS change to AL2023.",
+          "id": "nxsq886",
+          "author": "DiTochat",
+          "text": "Need to get this listed on scoop for Windows",
           "score": 2,
-          "created_utc": "2026-01-07 17:32:51",
+          "created_utc": "2026-01-05 10:55:36",
           "is_submitter": false,
           "replies": [
             {
-              "id": "ny8k5gw",
-              "author": "henk1122",
-              "text": "This is a very basic lambda with no dependency",
-              "score": 4,
-              "created_utc": "2026-01-07 17:47:03",
+              "id": "nxsqlqs",
+              "author": "huseyinbabal",
+              "text": "Will be available soon :pray: [https://github.com/huseyinbabal/taws/issues/19](https://github.com/huseyinbabal/taws/issues/19)",
+              "score": 2,
+              "created_utc": "2026-01-05 10:58:50",
+              "is_submitter": true,
+              "replies": []
+            },
+            {
+              "id": "nxt6sua",
+              "author": "huseyinbabal",
+              "text": "Now it is supported\n\nscoop bucket add huseyinbabal [https://github.com/huseyinbabal/scoop-bucket](https://github.com/huseyinbabal/scoop-bucket)\n\nscoop install taws",
+              "score": 2,
+              "created_utc": "2026-01-05 13:02:30",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "nxsv7wa",
+          "author": "WoodpeckerNational29",
+          "text": "2 günde 800 star iyiymiş.",
+          "score": 2,
+          "created_utc": "2026-01-05 11:37:32",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "nxt0zaa",
+              "author": "huseyinbabal",
+              "text": "12 saatte 😁",
+              "score": 1,
+              "created_utc": "2026-01-05 12:21:53",
               "is_submitter": true,
               "replies": [
                 {
-                  "id": "nycgta6",
-                  "author": "Sea-Us-RTO",
-                  "text": "all functions have dependencies. a plain print(\"hello world\") function has a dependency on python's print function, which in turn needs stdout libraries.\n\nsince all lambdas make network calls, check your client library for network config changes that occurred between 3.9 -> 3.13.  might be a new setting you can enable in 3.14, for example, or an extra security setting that you could disable.  maybe a default timeout or retry backoff minimum delay was increased.\n\n\nand definitely try doubling the functions memory.  if the 3.9 function was close to the cap, the updayed libraries in 3.14 might have tipped you over the brink.\n\n\ntry using provisioned concurrency to determine if the increase is coming from init, or from your handler.",
-                  "score": 3,
-                  "created_utc": "2026-01-08 05:14:14",
+                  "id": "nxu4ji6",
+                  "author": "WoodpeckerNational29",
+                  "text": "abi bot degil biliyorum da bu nedir yav, 1000 olmus. benim anlamadığım çok özel bir şey mi çözüyor? bu kadar insan ne ara bundan haberdar oldu, valla helal olsun",
+                  "score": 1,
+                  "created_utc": "2026-01-05 16:03:49",
                   "is_submitter": false,
                   "replies": []
                 }
               ]
+            }
+          ]
+        },
+        {
+          "id": "nxu8mlj",
+          "author": "synackk",
+          "text": "This is freaking cool",
+          "score": 1,
+          "created_utc": "2026-01-05 16:22:55",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "nxu8vw7",
+              "author": "huseyinbabal",
+              "text": "Thanks ☺️",
+              "score": 1,
+              "created_utc": "2026-01-05 16:24:08",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "ny1ama2",
+          "author": "pivovarit",
+          "text": "Just tried it and it looks great :) great job!",
+          "score": 1,
+          "created_utc": "2026-01-06 16:55:23",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "ny6n4ex",
+              "author": "huseyinbabal",
+              "text": "Thanks :)",
+              "score": 1,
+              "created_utc": "2026-01-07 11:47:02",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "ny3tyv0",
+          "author": "foomanjee",
+          "text": "This is cool, but danger danger!\n\nYour readme lists control+d as pagedown, but that's the hotkey for deleting resources!\n\nI'd much rather you support proper page up and page down",
+          "score": 1,
+          "created_utc": "2026-01-07 00:01:28",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "ny6n1re",
+              "author": "huseyinbabal",
+              "text": "Thanks for informing about this. Actually, we don't support page up/down since we already have filter, up and down. It was a confusion in README but fixed now. Btw, 1.1.2 released with new features, you are welcome to test it :) [https://github.com/huseyinbabal/taws](https://github.com/huseyinbabal/taws)",
+              "score": 1,
+              "created_utc": "2026-01-07 11:46:29",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "ny6n9j8",
+          "author": "huseyinbabal",
+          "text": "Cool features like SSO support are released in 1.1.0, if you want to check it out: [https://github.com/huseyinbabal/taws/releases/tag/v1.1.0](https://github.com/huseyinbabal/taws/releases/tag/v1.1.0)",
+          "score": 1,
+          "created_utc": "2026-01-07 11:48:06",
+          "is_submitter": true,
+          "replies": []
+        },
+        {
+          "id": "nxsloay",
+          "author": "foamz13",
+          "text": "Nice! Gonna try it out, I have guys in my team that don’t like using the web console",
+          "score": 0,
+          "created_utc": "2026-01-05 10:15:27",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "nxsm0ce",
+              "author": "huseyinbabal",
+              "text": "Thanks 🙏 New features are coming, ı really would like to see the feedbacks",
+              "score": 1,
+              "created_utc": "2026-01-05 10:18:28",
+              "is_submitter": true,
+              "replies": []
             }
           ]
         }
@@ -2150,167 +2320,6 @@
       ]
     },
     {
-      "id": "1q4h6h9",
-      "title": "GitHub - huseyinbabal/taws: Terminal UI for AWS (taws) - A terminal-based AWS resource viewer and manager",
-      "subreddit": "aws",
-      "url": "https://github.com/huseyinbabal/taws",
-      "author": "huseyinbabal",
-      "created_utc": "2026-01-05 09:23:26",
-      "score": 37,
-      "num_comments": 16,
-      "upvote_ratio": 0.89,
-      "text": "[External Link]",
-      "is_original_content": false,
-      "link_flair_text": "general aws",
-      "permalink": "https://reddit.com/r/aws/comments/1q4h6h9/github_huseyinbabaltaws_terminal_ui_for_aws_taws/",
-      "domain": "github.com",
-      "is_self": false,
-      "comments": [
-        {
-          "id": "nxsq886",
-          "author": "DiTochat",
-          "text": "Need to get this listed on scoop for Windows",
-          "score": 2,
-          "created_utc": "2026-01-05 10:55:36",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "nxsqlqs",
-              "author": "huseyinbabal",
-              "text": "Will be available soon :pray: [https://github.com/huseyinbabal/taws/issues/19](https://github.com/huseyinbabal/taws/issues/19)",
-              "score": 2,
-              "created_utc": "2026-01-05 10:58:50",
-              "is_submitter": true,
-              "replies": []
-            },
-            {
-              "id": "nxt6sua",
-              "author": "huseyinbabal",
-              "text": "Now it is supported\n\nscoop bucket add huseyinbabal [https://github.com/huseyinbabal/scoop-bucket](https://github.com/huseyinbabal/scoop-bucket)\n\nscoop install taws",
-              "score": 2,
-              "created_utc": "2026-01-05 13:02:30",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "nxsv7wa",
-          "author": "WoodpeckerNational29",
-          "text": "2 günde 800 star iyiymiş.",
-          "score": 2,
-          "created_utc": "2026-01-05 11:37:32",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "nxt0zaa",
-              "author": "huseyinbabal",
-              "text": "12 saatte 😁",
-              "score": 1,
-              "created_utc": "2026-01-05 12:21:53",
-              "is_submitter": true,
-              "replies": [
-                {
-                  "id": "nxu4ji6",
-                  "author": "WoodpeckerNational29",
-                  "text": "abi bot degil biliyorum da bu nedir yav, 1000 olmus. benim anlamadığım çok özel bir şey mi çözüyor? bu kadar insan ne ara bundan haberdar oldu, valla helal olsun",
-                  "score": 1,
-                  "created_utc": "2026-01-05 16:03:49",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "nxu8mlj",
-          "author": "synackk",
-          "text": "This is freaking cool",
-          "score": 1,
-          "created_utc": "2026-01-05 16:22:55",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "nxu8vw7",
-              "author": "huseyinbabal",
-              "text": "Thanks ☺️",
-              "score": 1,
-              "created_utc": "2026-01-05 16:24:08",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "ny1ama2",
-          "author": "pivovarit",
-          "text": "Just tried it and it looks great :) great job!",
-          "score": 1,
-          "created_utc": "2026-01-06 16:55:23",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "ny6n4ex",
-              "author": "huseyinbabal",
-              "text": "Thanks :)",
-              "score": 1,
-              "created_utc": "2026-01-07 11:47:02",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "ny3tyv0",
-          "author": "foomanjee",
-          "text": "This is cool, but danger danger!\n\nYour readme lists control+d as pagedown, but that's the hotkey for deleting resources!\n\nI'd much rather you support proper page up and page down",
-          "score": 1,
-          "created_utc": "2026-01-07 00:01:28",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "ny6n1re",
-              "author": "huseyinbabal",
-              "text": "Thanks for informing about this. Actually, we don't support page up/down since we already have filter, up and down. It was a confusion in README but fixed now. Btw, 1.1.2 released with new features, you are welcome to test it :) [https://github.com/huseyinbabal/taws](https://github.com/huseyinbabal/taws)",
-              "score": 1,
-              "created_utc": "2026-01-07 11:46:29",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "ny6n9j8",
-          "author": "huseyinbabal",
-          "text": "Cool features like SSO support are released in 1.1.0, if you want to check it out: [https://github.com/huseyinbabal/taws/releases/tag/v1.1.0](https://github.com/huseyinbabal/taws/releases/tag/v1.1.0)",
-          "score": 1,
-          "created_utc": "2026-01-07 11:48:06",
-          "is_submitter": true,
-          "replies": []
-        },
-        {
-          "id": "nxsloay",
-          "author": "foamz13",
-          "text": "Nice! Gonna try it out, I have guys in my team that don’t like using the web console",
-          "score": 0,
-          "created_utc": "2026-01-05 10:15:27",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "nxsm0ce",
-              "author": "huseyinbabal",
-              "text": "Thanks 🙏 New features are coming, ı really would like to see the feedbacks",
-              "score": 1,
-              "created_utc": "2026-01-05 10:18:28",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        }
-      ]
-    },
-    {
       "id": "1pxmx0q",
       "title": "Memory spikes killing my workers💀  need scaling advice",
       "subreddit": "aws",
@@ -2628,15 +2637,82 @@
       ]
     },
     {
+      "id": "1q4xkf7",
+      "title": "pydynox: DynamoDB ORM with Rust core",
+      "subreddit": "aws",
+      "url": "https://www.reddit.com/r/aws/comments/1q4xkf7/pydynox_dynamodb_orm_with_rust_core/",
+      "author": "leandro_damascena",
+      "created_utc": "2026-01-05 20:47:01",
+      "score": 25,
+      "num_comments": 6,
+      "upvote_ratio": 0.93,
+      "text": "I built a DynamoDB ORM called pydynox. The core is written in Rust for speed.\n\nI work with DynamoDB + Lambda a lot and got tired of slow serialization in Python, so I moved that part to Rust.\n\n`class User(Model):`  \n`model_config = ModelConfig(table=\"users\")`  \n`pk = String(hash_key=True)`  \n`name = String()`\n\n`user = User(pk=\"USER#123\", name=\"John\")`  \n`user.save()`\n\n`user = await User.get(pk=\"USER#123\")`\n\nHas the usual stuff: batch ops, transactions, GSI, Pydantic, TTL, encryption, compression, async. Also added S3Attribute for large files (DynamoDB has a 400KB limit, so you store the file in S3 and metadata in DynamoDB).\n\nBeen using it in production for a few months now. Works well for my use cases but I'm sure there are edge cases I haven't hit yet.\n\nStill pre-release (0.12.0). Would love to hear what's missing or broken. If you use DynamoDB and want to try it, let me know how it goes.\n\n[https://github.com/leandrodamascena/pydynox](https://github.com/leandrodamascena/pydynox)\n\n**What my project does**\n\nIt's an ORM for DynamoDB. You define models as Python classes and it handles serialization, queries, batch operations, transactions, etc. The heavy work (serialization, compression, encryption) runs in Rust via PyO3.\n\n**Target audience**\n\nPeople who use DynamoDB in Python, especially in AWS Lambda where performance matters. It's in pre-release but I'm using it in production.\n\n**Comparison**\n\nThe main alternative is PynamoDB. pydynox has a similar API but uses Rust for the hot path. Also has some extras like S3Attribute for large files, field-level encryption with KMS, and compression built-in.",
+      "is_original_content": false,
+      "link_flair_text": "technical resource",
+      "permalink": "https://reddit.com/r/aws/comments/1q4xkf7/pydynox_dynamodb_orm_with_rust_core/",
+      "domain": "self.aws",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "nxx645w",
+          "author": "nemec",
+          "text": "neat. I only briefly looked at the code, so apologies if I missed something but you should consider using KMS:GenerateDataKey and handling encryption and decryption client side rather than via KMS:Encrypt/Decrypt. Beyond just running into the [max plaintext size](https://docs.aws.amazon.com/kms/latest/APIReference/API_Encrypt.html) of 4KB per operation (where a DDB record/field can be up to 400KB), if you do a batch Put with 30 records and each record has 3 encrypted fields, it looks like your library will make 90 calls to KMS:Encrypt. With data keys, you make one KMS call and then encrypt locally 90 times which should be significantly faster.\n\nYou could even just wrap the Rust AWS database encryption SDK if you're willing to live with the extra metadata fields it requires - the ItemEncryptor will let you client-side encrypt and decrypt DDB records without touching DDB, so you can continue to use the DDB client code you wrote. I've never used the Rust one, but I assume it has much the same features as the Java client.\n\nhttps://docs.aws.amazon.com/database-encryption-sdk/latest/devguide/ddb-rust-using.html#ddb-rust-item-encryptors",
+          "score": 2,
+          "created_utc": "2026-01-06 00:43:55",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "nxzeazi",
+              "author": "leandro_damascena",
+              "text": "Damn, you're right. I totally missed this.\n\nCalling KMS:Encrypt for each field is dumb - 90 KMS calls for a batch write? And the 4KB limit would break on larger fields anyway.\n\nGoing to switch to envelope encryption:\n\n\\- GenerateDataKey once  \n\\- AES locally in Rust  \n\\- Store the encrypted DEK with the data\n\nWill check out the Database Encryption SDK too. Might be worth the metadata overhead.\n\nThanks for this SUPER important catch!",
+              "score": 1,
+              "created_utc": "2026-01-06 10:08:09",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "nydlto1",
+          "author": "FarkCookies",
+          "text": "Would love to see some benchmarking against PynamoDB. When working with a DB CPU is rarely the bottleneck.",
+          "score": 1,
+          "created_utc": "2026-01-08 10:59:04",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "nydmqwa",
+              "author": "leandro_damascena",
+              "text": "Hey u/FarkCookies thanks for replying. I do have some benchmarks.\n\nYou can check the source code here: [https://github.com/leandrodamascena/pydynox/tree/main/benchmarks](https://github.com/leandrodamascena/pydynox/tree/main/benchmarks)\n\nAnd the docs here: [https://leandrodamascena.github.io/pydynox/guides/benchmarks/](https://leandrodamascena.github.io/pydynox/guides/benchmarks/)\n\nI can't attach images here in this post, but I have a CloudWatch dashboard with those metrics and will make it public soon.\n\nI'm using AWS Lambda for my tests because it is a good use case where memory/cpu are limited in a very specific environment, but I'm open to ideas on how to improve this benchmark to other computer environments and what make sense or not.\n\nRegarding your comment about CPU, yeah, I agree that some of the heavy work is done by the DB engine, but DynamoDB is a special case that we need to deal with serialization and a lot of other stuff.",
+              "score": 1,
+              "created_utc": "2026-01-08 11:06:45",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "nydqhrd",
+                  "author": "FarkCookies",
+                  "text": "I am just a big fan of PynamoDB and I need a lot of convincing to switch. Indeed (de)serialisation is super slow so maybe the biggest bang for the buck would be to rewrite that part in Rust in some drop in replacement?",
+                  "score": 1,
+                  "created_utc": "2026-01-08 11:37:14",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
       "id": "1q511r9",
       "title": "Rate Increase: EC2 Capacity Blocks",
       "subreddit": "aws",
       "url": "https://www.reddit.com/r/aws/comments/1q511r9/rate_increase_ec2_capacity_blocks/",
       "author": "cloudnavig8r",
       "created_utc": "2026-01-05 22:57:36",
-      "score": 24,
+      "score": 23,
       "num_comments": 18,
-      "upvote_ratio": 0.84,
+      "upvote_ratio": 0.83,
       "text": "I’ve been with AWS for over 8 1/2 years, and it has been very rare to see _rate increases_.  \n\nI saw this Register article [https://www.theregister.com/2026/01/05/aws_price_increase/] today.  \n\nA 15% decrease would be something u/jeffbarr would be happy to share the news about.  But a 15% increase will attract u/quinnypig to interject his $0.02, I mean $0.023 (must factor in the 15% increase)\n\nWhen I would teach Cloud Finance courses. I often challenged learners to identify when AWS has increased rates.  Usually the only thing they can come up with is the EIP fees (and that is debatable if going from free to charged is a price increase or the ending of a free inclusion).  \n\nWhen are other times that AWS has **raised** prices?\n\nWhat impact does this have for you and your workloads?\n\n_Note:_ this is a specialised workload that not too many “average” users are consuming.\n\nHow would you identify if AWS increases the rates of your workloads. And do you have a proactive mitigation plan in place?",
       "is_original_content": false,
       "link_flair_text": "billing",
@@ -2657,7 +2733,7 @@
           "id": "nxwnvra",
           "author": "Sirwired",
           "text": "Errr... the article was written by QuinnyPig, so you don't have to wait at all for his take!",
-          "score": 18,
+          "score": 17,
           "created_utc": "2026-01-05 23:08:37",
           "is_submitter": false,
           "replies": [
@@ -2676,7 +2752,7 @@
           "id": "nxyxdsw",
           "author": "Ahrimaan",
           "text": "Capacity Blocks have ALWAYS been Dynamic pricing, i don't know why he is whining about \"spot\" price fluctuation",
-          "score": 4,
+          "score": 3,
           "created_utc": "2026-01-06 07:27:54",
           "is_submitter": false,
           "replies": [
@@ -2695,7 +2771,7 @@
           "id": "nxwmvlw",
           "author": "coinclink",
           "text": "It's interesting, because Capacity Blocks are really the only way you can even use these instance types. It's extremely rare that you can ever just spin one of these up on-demand. So in effect, it's a way for them to advertise one price (on-demand) while actually charging more. It's not surprising that GPU prices are increasing in a general sense though.",
-          "score": 4,
+          "score": 3,
           "created_utc": "2026-01-05 23:03:27",
           "is_submitter": false,
           "replies": [
@@ -2799,7 +2875,7 @@
           "id": "nxwn4ep",
           "author": "abofh",
           "text": "In an indirect way, forcing everyone to VPC's baked in NAT gateway pricing for (almost) every workload",
-          "score": -7,
+          "score": -8,
           "created_utc": "2026-01-05 23:04:42",
           "is_submitter": false,
           "replies": [
@@ -2817,69 +2893,30 @@
       ]
     },
     {
-      "id": "1q4xkf7",
-      "title": "pydynox: DynamoDB ORM with Rust core",
+      "id": "1q7fmbk",
+      "title": "AWS Community Builders Applications Are Now Open",
       "subreddit": "aws",
-      "url": "https://www.reddit.com/r/aws/comments/1q4xkf7/pydynox_dynamodb_orm_with_rust_core/",
-      "author": "leandro_damascena",
-      "created_utc": "2026-01-05 20:47:01",
-      "score": 23,
-      "num_comments": 6,
-      "upvote_ratio": 0.9,
-      "text": "I built a DynamoDB ORM called pydynox. The core is written in Rust for speed.\n\nI work with DynamoDB + Lambda a lot and got tired of slow serialization in Python, so I moved that part to Rust.\n\n`class User(Model):`  \n`model_config = ModelConfig(table=\"users\")`  \n`pk = String(hash_key=True)`  \n`name = String()`\n\n`user = User(pk=\"USER#123\", name=\"John\")`  \n`user.save()`\n\n`user = await User.get(pk=\"USER#123\")`\n\nHas the usual stuff: batch ops, transactions, GSI, Pydantic, TTL, encryption, compression, async. Also added S3Attribute for large files (DynamoDB has a 400KB limit, so you store the file in S3 and metadata in DynamoDB).\n\nBeen using it in production for a few months now. Works well for my use cases but I'm sure there are edge cases I haven't hit yet.\n\nStill pre-release (0.12.0). Would love to hear what's missing or broken. If you use DynamoDB and want to try it, let me know how it goes.\n\n[https://github.com/leandrodamascena/pydynox](https://github.com/leandrodamascena/pydynox)\n\n**What my project does**\n\nIt's an ORM for DynamoDB. You define models as Python classes and it handles serialization, queries, batch operations, transactions, etc. The heavy work (serialization, compression, encryption) runs in Rust via PyO3.\n\n**Target audience**\n\nPeople who use DynamoDB in Python, especially in AWS Lambda where performance matters. It's in pre-release but I'm using it in production.\n\n**Comparison**\n\nThe main alternative is PynamoDB. pydynox has a similar API but uses Rust for the hot path. Also has some extras like S3Attribute for large files, field-level encryption with KMS, and compression built-in.",
+      "url": "https://builder.aws.com/community/community-builders",
+      "author": "No_Secretary2862",
+      "created_utc": "2026-01-08 16:02:29",
+      "score": 18,
+      "num_comments": 1,
+      "upvote_ratio": 1.0,
+      "text": "[External Link]",
       "is_original_content": false,
-      "link_flair_text": "technical resource",
-      "permalink": "https://reddit.com/r/aws/comments/1q4xkf7/pydynox_dynamodb_orm_with_rust_core/",
-      "domain": "self.aws",
-      "is_self": true,
+      "link_flair_text": "general aws",
+      "permalink": "https://reddit.com/r/aws/comments/1q7fmbk/aws_community_builders_applications_are_now_open/",
+      "domain": "builder.aws.com",
+      "is_self": false,
       "comments": [
         {
-          "id": "nxx645w",
-          "author": "nemec",
-          "text": "neat. I only briefly looked at the code, so apologies if I missed something but you should consider using KMS:GenerateDataKey and handling encryption and decryption client side rather than via KMS:Encrypt/Decrypt. Beyond just running into the [max plaintext size](https://docs.aws.amazon.com/kms/latest/APIReference/API_Encrypt.html) of 4KB per operation (where a DDB record/field can be up to 400KB), if you do a batch Put with 30 records and each record has 3 encrypted fields, it looks like your library will make 90 calls to KMS:Encrypt. With data keys, you make one KMS call and then encrypt locally 90 times which should be significantly faster.\n\nYou could even just wrap the Rust AWS database encryption SDK if you're willing to live with the extra metadata fields it requires - the ItemEncryptor will let you client-side encrypt and decrypt DDB records without touching DDB, so you can continue to use the DDB client code you wrote. I've never used the Rust one, but I assume it has much the same features as the Java client.\n\nhttps://docs.aws.amazon.com/database-encryption-sdk/latest/devguide/ddb-rust-using.html#ddb-rust-item-encryptors",
-          "score": 2,
-          "created_utc": "2026-01-06 00:43:55",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "nxzeazi",
-              "author": "leandro_damascena",
-              "text": "Damn, you're right. I totally missed this.\n\nCalling KMS:Encrypt for each field is dumb - 90 KMS calls for a batch write? And the 4KB limit would break on larger fields anyway.\n\nGoing to switch to envelope encryption:\n\n\\- GenerateDataKey once  \n\\- AES locally in Rust  \n\\- Store the encrypted DEK with the data\n\nWill check out the Database Encryption SDK too. Might be worth the metadata overhead.\n\nThanks for this SUPER important catch!",
-              "score": 1,
-              "created_utc": "2026-01-06 10:08:09",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "nydlto1",
-          "author": "FarkCookies",
-          "text": "Would love to see some benchmarking against PynamoDB. When working with a DB CPU is rarely the bottleneck.",
+          "id": "nyh7bci",
+          "author": "goguppy",
+          "text": "Thanks for sharing!",
           "score": 1,
-          "created_utc": "2026-01-08 10:59:04",
+          "created_utc": "2026-01-08 21:37:19",
           "is_submitter": false,
-          "replies": [
-            {
-              "id": "nydmqwa",
-              "author": "leandro_damascena",
-              "text": "Hey u/FarkCookies thanks for replying. I do have some benchmarks.\n\nYou can check the source code here: [https://github.com/leandrodamascena/pydynox/tree/main/benchmarks](https://github.com/leandrodamascena/pydynox/tree/main/benchmarks)\n\nAnd the docs here: [https://leandrodamascena.github.io/pydynox/guides/benchmarks/](https://leandrodamascena.github.io/pydynox/guides/benchmarks/)\n\nI can't attach images here in this post, but I have a CloudWatch dashboard with those metrics and will make it public soon.\n\nI'm using AWS Lambda for my tests because it is a good use case where memory/cpu are limited in a very specific environment, but I'm open to ideas on how to improve this benchmark to other computer environments and what make sense or not.\n\nRegarding your comment about CPU, yeah, I agree that some of the heavy work is done by the DB engine, but DynamoDB is a special case that we need to deal with serialization and a lot of other stuff.",
-              "score": 1,
-              "created_utc": "2026-01-08 11:06:45",
-              "is_submitter": true,
-              "replies": [
-                {
-                  "id": "nydqhrd",
-                  "author": "FarkCookies",
-                  "text": "I am just a big fan of PynamoDB and I need a lot of convincing to switch. Indeed (de)serialisation is super slow so maybe the biggest bang for the buck would be to rewrite that part in Rust in some drop in replacement?",
-                  "score": 1,
-                  "created_utc": "2026-01-08 11:37:14",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
+          "replies": []
         }
       ]
     },
@@ -3174,7 +3211,7 @@
           "id": "nxl0yaf",
           "author": "wreckuiem48",
           "text": "If you have thousands of accounts it sounds like it might be worth also considering enterprise support where you will get a dedicated AWS team to help guide you in this process. ES does have a cost though...",
-          "score": 7,
+          "score": 6,
           "created_utc": "2026-01-04 06:32:51",
           "is_submitter": false,
           "replies": []
@@ -3183,7 +3220,7 @@
           "id": "nxk8kj2",
           "author": "Akimotoh",
           "text": "Tags, control tower, and organization policies. Are all root account passwords baselined?",
-          "score": 10,
+          "score": 11,
           "created_utc": "2026-01-04 03:21:34",
           "is_submitter": false,
           "replies": [
@@ -3200,7 +3237,7 @@
               "id": "nxkxxxa",
               "author": "PeteTinNY",
               "text": "As a former AWS SA who was very involved with the beginnings of multi account architecture, I really disagree.    Yes multi account can build complexity if you don’t automate not building protective guardrails that can only be done via multiple accounts is the only way to control the blast radius of risk.   Even the simple risk of very large platform limits. \n\nLook at ControlTower, look at the old multi account frameworks and solutions.   Those a good starts.    But looking at some of the work J&J, Thompson Ruters, Disney, and Comcast did as mega enterprise orgs ….  It would be crazy unsafe to run as one mega account.   \n\nEven just for the account limits.",
-              "score": 4,
+              "score": 5,
               "created_utc": "2026-01-04 06:09:00",
               "is_submitter": false,
               "replies": [
@@ -3280,9 +3317,9 @@
       "url": "https://www.reddit.com/r/aws/comments/1q5quh0/aws_cli_am_i_the_only_one_who_is_terrified_of/",
       "author": "WeirdWebDev",
       "created_utc": "2026-01-06 18:36:22",
-      "score": 14,
+      "score": 15,
       "num_comments": 66,
-      "upvote_ratio": 0.76,
+      "upvote_ratio": 0.75,
       "text": "AWS CLI - am I the only one who is terrified of being in the wrong account when I do something?\n\nI know the answer to \"am I the only one\" is always no, but the purpose of my question is more of a \"how do I mitigate this fear or possibility of what I fear coming true\"\n\nI've even toyed with the idea of a separate machine for updating prod, which I'm not ruling out.\n\nUPDATE: Thanks for all the responses, I am reading them all even if I don't respond to them all. I was half expecting to get reamed for posing the question lol.",
       "is_original_content": false,
       "link_flair_text": "technical question",
@@ -3294,7 +3331,7 @@
           "id": "ny1yplh",
           "author": "Extreme-Accident-968",
           "text": "i never have a default account. i have my credentials configured and use --profile <name of the account> for everything",
-          "score": 79,
+          "score": 77,
           "created_utc": "2026-01-06 18:43:41",
           "is_submitter": false,
           "replies": [
@@ -3302,7 +3339,7 @@
               "id": "ny20gsb",
               "author": "onbiver9871",
               "text": "This, for sure. I never have a default set, so whether interactively or in any scripting, I am forced to specify a profile.",
-              "score": 11,
+              "score": 12,
               "created_utc": "2026-01-06 18:51:22",
               "is_submitter": false,
               "replies": []
@@ -3359,7 +3396,7 @@
           "id": "ny20824",
           "author": "dghah",
           "text": "    $ aws sts get-caller-identity\n\n ... is your friend along with no default credentials, only SSO profiles along with terminal extensions that graphically display the value of the current sso role name",
-          "score": 35,
+          "score": 33,
           "created_utc": "2026-01-06 18:50:19",
           "is_submitter": false,
           "replies": [
@@ -3393,7 +3430,7 @@
                   "id": "ny50q5d",
                   "author": "iamaperson3133",
                   "text": "`whoamz`",
-                  "score": 7,
+                  "score": 6,
                   "created_utc": "2026-01-07 03:53:28",
                   "is_submitter": false,
                   "replies": []
@@ -3415,7 +3452,7 @@
           "id": "ny1zszx",
           "author": "Akimotoh",
           "text": "You should modify your terminal’s ps1 variable to dynamically show the account number that is in use. It can show up behind or after your folder display",
-          "score": 27,
+          "score": 28,
           "created_utc": "2026-01-06 18:48:30",
           "is_submitter": false,
           "replies": [
@@ -3480,7 +3517,7 @@
               "id": "ny27elx",
               "author": "jdptechnc",
               "text": "CloudShell is good in a pinch.",
-              "score": 2,
+              "score": 4,
               "created_utc": "2026-01-06 19:22:44",
               "is_submitter": false,
               "replies": []
@@ -3830,36 +3867,8 @@
           "id": "ny1xgbf",
           "author": "Suspicious-Kiwi-6105",
           "text": "Don't worry, use [leapp](https://www.leapp.cloud/download/desktop-app)",
-          "score": -2,
+          "score": -4,
           "created_utc": "2026-01-06 18:38:03",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
-      "id": "1q7fmbk",
-      "title": "AWS Community Builders Applications Are Now Open",
-      "subreddit": "aws",
-      "url": "https://builder.aws.com/community/community-builders",
-      "author": "No_Secretary2862",
-      "created_utc": "2026-01-08 16:02:29",
-      "score": 13,
-      "num_comments": 1,
-      "upvote_ratio": 0.9,
-      "text": "[External Link]",
-      "is_original_content": false,
-      "link_flair_text": "general aws",
-      "permalink": "https://reddit.com/r/aws/comments/1q7fmbk/aws_community_builders_applications_are_now_open/",
-      "domain": "builder.aws.com",
-      "is_self": false,
-      "comments": [
-        {
-          "id": "nyh7bci",
-          "author": "goguppy",
-          "text": "Thanks for sharing!",
-          "score": 1,
-          "created_utc": "2026-01-08 21:37:19",
           "is_submitter": false,
           "replies": []
         }
@@ -4260,63 +4269,6 @@
       ]
     },
     {
-      "id": "1q4049t",
-      "title": "Decommissioning Directory Service",
-      "subreddit": "aws",
-      "url": "https://www.reddit.com/r/aws/comments/1q4049t/decommissioning_directory_service/",
-      "author": "cryptoconvos",
-      "created_utc": "2026-01-04 20:07:56",
-      "score": 10,
-      "num_comments": 4,
-      "upvote_ratio": 1.0,
-      "text": "I am attempting to decommission AWS Microsoft AD Directory Service and am unable to get it to release it's tentacles from the VPC. I opened a ticket a couple days ago using the free Support, but haven't heard back. My concern is that it's charging daily for things I'm not using. Has anyone else experienced something like this? Any ideas how I can expedite this or get this deleted faster?\n\nHere's the Ticket I opened:\n\nThe service reports authorized applications, but none are visible or removable via console or CLI. The directory has AWS-owned ENIs that cannot be deleted by the customer. This appears to be a stale authorization record in the Directory Service control plane. Please clear the internal authorization binding so the directory can be deleted. \n\nThanks for any comments and energy about this... I just need counsel. 🤓",
-      "is_original_content": false,
-      "link_flair_text": "technical question",
-      "permalink": "https://reddit.com/r/aws/comments/1q4049t/decommissioning_directory_service/",
-      "domain": "self.aws",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "nxppeec",
-          "author": "yourparadigm",
-          "text": "ENIs and VPC subnets don't cost anything. Usually these ENIs will get cleaned up automatically, but sometimes they get stuck and need manual cleanup from AWS.",
-          "score": 3,
-          "created_utc": "2026-01-04 22:59:08",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "nxxsgbb",
-              "author": "cryptoconvos",
-              "text": "Great! Thank you.",
-              "score": 1,
-              "created_utc": "2026-01-06 02:44:30",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "nxrt3uf",
-          "author": "VictorBaird_",
-          "text": "Yeah, that sounds like a stuck control plane issue, not something you can fix yourself. If console and CLI show no authorized apps but the directory still has AWS-owned ENIs, only AWS can clear it. Open a second ticket under billing, reference the original case, and say you’re being charged for a resource you literally can’t delete. That usually gets a faster response and often credits if they admit it’s stuck.",
-          "score": 2,
-          "created_utc": "2026-01-05 05:58:18",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "nxxsi5w",
-              "author": "cryptoconvos",
-              "text": "Perfect. Thank you. I will open the second ticket. Thanks!",
-              "score": 1,
-              "created_utc": "2026-01-06 02:44:46",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        }
-      ]
-    },
-    {
       "id": "1pyc5zb",
       "title": "Denial of Wallet Via Route 53?",
       "subreddit": "aws",
@@ -4429,7 +4381,7 @@
           "id": "ny34m25",
           "author": "The-Wizard-of-AWS",
           "text": "Just so we’re clear, Lambda may execute many concurrent executions on your function, but each is a completely isolated instance. There is no scenario where the same function instance is processing multiple requests at the same time. \n\nWith that said, where it may make sense is if there is something else your function can be doing while it’s waiting for the I/O operation to complete. If everything in your code has to be done after the previous thing then there isn’t any value in threading when running in Lambda. \n\nIt’s also worth noting that you probably only have a single thread available unless you crank up the memory on the function.",
-          "score": 18,
+          "score": 17,
           "created_utc": "2026-01-06 21:55:20",
           "is_submitter": false,
           "replies": [
@@ -4448,7 +4400,7 @@
           "id": "ny30rxt",
           "author": "RecordingForward2690",
           "text": "If the Lambda is called from the API Gateway, then the event that triggers the Lambda is a single API Gateway request. Usually, but not always, handling such a request is a series of dependent steps that have to be executed in order. It doesn't make sense to use asynchronous/threading in that case.\n\nBut I've written a complex Lambda in the past that was triggered by an API Gateway request, and needed to do a bunch of things, including querying two DynamoDB tables, updating a different DynamoDB table, and making a bunch of API calls back to the API Gateway. (This one was using wss:// so I had to make multiple API calls to the API Gateway to send the wss:// responses to a variety of other channels.) By carefully applying async constructs in the code (using NodeJS Promises and async/await in my case) I was able to run a whole bunch of calls in parallel, significantly reducing latency and cost.\n\nIf your Lambda is triggered from an SQS queue, for instance, then the event that triggers the Lambda holds multiple SQS messages which can usually be handled independently. Writing your code in an async/parallel fashion is pretty much a no-brainer in that case.",
-          "score": 7,
+          "score": 5,
           "created_utc": "2026-01-06 21:37:45",
           "is_submitter": false,
           "replies": []
@@ -4547,7 +4499,7 @@
       "created_utc": "2026-01-08 06:37:38",
       "score": 9,
       "num_comments": 4,
-      "upvote_ratio": 0.91,
+      "upvote_ratio": 0.85,
       "text": "Let's say I want to make a POST request to some third party API, and because they're from the stone age and don't support callbacks or polling, the API response takes up to 15 minutes and I need to wait for that. Do durable functions support waiting for a response from these long running network calls without getting billed for waiting?",
       "is_original_content": false,
       "link_flair_text": "technical question",
@@ -4602,9 +4554,9 @@
       "url": "https://www.reddit.com/r/aws/comments/1q3ghv6/changed_mfa_device/",
       "author": "Valuable-Cap-3357",
       "created_utc": "2026-01-04 04:35:38",
-      "score": 8,
+      "score": 9,
       "num_comments": 8,
-      "upvote_ratio": 0.91,
+      "upvote_ratio": 0.92,
       "text": "Hi, I have changed the MFA device for my root login and I am unable to login. I have tried the steps provided and it's only generating AI answers with no support.\n\nI raised a case and still the response is to go back to that same page which generated AI response.\n\nThere is an alternative login process where email and contact is used. I get email OTP but no call on the registered contact.\n\nI am stuck, any suggestions.\n\n",
       "is_original_content": false,
       "link_flair_text": "general aws",
@@ -4688,6 +4640,24 @@
           "replies": []
         }
       ]
+    },
+    {
+      "id": "1q3eofu",
+      "title": "Update: Added Terraform state mapping to the open-source AWS cleanup CLI (v1.3)",
+      "subreddit": "aws",
+      "url": "https://www.reddit.com/r/aws/comments/1q3eofu/update_added_terraform_state_mapping_to_the/",
+      "author": "DrSkyle",
+      "created_utc": "2026-01-04 03:09:14",
+      "score": 9,
+      "num_comments": 0,
+      "upvote_ratio": 0.76,
+      "text": "Hey everyone, back with an update on cloudslash that I posted a few weeks ago in this subreddit.\n\nthe feedback last time was super helpful, but the biggest complaint was valid: “we found a zombie NAT Gateway costing $30/mo, but if I delete it in the AWS Console, terraform state is instantly out of sync.\"\n\nfinding the waste is the easy part. Cleaning it up without breaking your state file is the actual headache. So for v1.3, I went down the rabbit hole of parsing .tfstate files to fix this.\n\n\n\nThe New Features\n\nThe Terraform Bridge Instead of just telling you \"Delete nat-0abc123\", the tool now scans your local .tfstate (read-only), maps the physical AWS ID to the Terraform Resource Address (e.g., module.vpc.aws\\_nat\\_gateway.main), and generates the specific terraform state rm command for you.\n\nIt also auto-backups your state file before recommending changes. This lets you decouple the resource from your state before you nuke it.\n\nDeeper Waste Detection (The Graph) I moved beyond simple CloudWatch metrics to find \"Second-Order Waste\".\n\n\"Hollow\" Load Balancers: ELBs that look healthy, but their targets are in a subnet with no active route to the internet.\n\n\"Vampire\" EBS: Finds volumes attached to instances that have been stopped for >30 days. You're paying storage costs for a dead server.\n\nEKS Ghost Clusters: AutoScaling Groups that are burning cash but only running DaemonSets (like kube-proxy) with zero actual app pods.\n\n\n\nNew Safety Logic (Open Source)\n\nDeleting resources based purely on \"0% CPU\" is risky, so I added these checks to verify DNS and config data before recommending a delete.\n\nDNS Safety Lock: Before telling you to release an Elastic IP, it checks your Route53 zones. If an A-Record still points to that IP, it stops you. (Prevents subdomain takeovers).\n\nLambda Pruning: Finds functions with 0 invocations in 90 days + no code updates in 6 months.\n\nLog Rot: Identifies CloudWatch Log Groups set to \"Never Expire\" (the AWS default), which silently accumulate TBs of storage costs over time.\n\nOrphaned Snapshots: Flags old EBS snapshots where the original volume was deleted months ago, but the backup was left behind.\n\n\n\nThe Repo & License\n\nThe core scanner, TUI, and detection engine are AGPL (Open Source) and free forever. i sell a Pro License ($49 lifetime) for the automation layer (the scripts that fix the Terraform state for you). Since it's just me building this, the sales keep the project alive and allow me to support grassroots orphanages and animal sanctuaries (I post the receipts on X).\n\n\n\nRepo: [https://github.com/DrSkyle/CloudSlash](https://github.com/DrSkyle/CloudSlash)\n\n\n\nParsing nested modules in the state file is tricky, so let me know if you hit any edge cases.\n\n:) DrSkyle",
+      "is_original_content": false,
+      "link_flair_text": "monitoring",
+      "permalink": "https://reddit.com/r/aws/comments/1q3eofu/update_added_terraform_state_mapping_to_the/",
+      "domain": "self.aws",
+      "is_self": true,
+      "comments": []
     },
     {
       "id": "1pzj2kg",
@@ -4970,7 +4940,7 @@
               "id": "nxx0em0",
               "author": "asantos6",
               "text": "It basically died when aws shifted the DA to the AI hype 😕\nMiss this site, and the containers from the couch show",
-              "score": 3,
+              "score": 4,
               "created_utc": "2026-01-06 00:14:17",
               "is_submitter": false,
               "replies": []
@@ -4980,22 +4950,61 @@
       ]
     },
     {
-      "id": "1q3eofu",
-      "title": "Update: Added Terraform state mapping to the open-source AWS cleanup CLI (v1.3)",
+      "id": "1q4049t",
+      "title": "Decommissioning Directory Service",
       "subreddit": "aws",
-      "url": "https://www.reddit.com/r/aws/comments/1q3eofu/update_added_terraform_state_mapping_to_the/",
-      "author": "DrSkyle",
-      "created_utc": "2026-01-04 03:09:14",
+      "url": "https://www.reddit.com/r/aws/comments/1q4049t/decommissioning_directory_service/",
+      "author": "cryptoconvos",
+      "created_utc": "2026-01-04 20:07:56",
       "score": 7,
-      "num_comments": 0,
-      "upvote_ratio": 0.73,
-      "text": "Hey everyone, back with an update on cloudslash that I posted a few weeks ago in this subreddit.\n\nthe feedback last time was super helpful, but the biggest complaint was valid: “we found a zombie NAT Gateway costing $30/mo, but if I delete it in the AWS Console, terraform state is instantly out of sync.\"\n\nfinding the waste is the easy part. Cleaning it up without breaking your state file is the actual headache. So for v1.3, I went down the rabbit hole of parsing .tfstate files to fix this.\n\n\n\nThe New Features\n\nThe Terraform Bridge Instead of just telling you \"Delete nat-0abc123\", the tool now scans your local .tfstate (read-only), maps the physical AWS ID to the Terraform Resource Address (e.g., module.vpc.aws\\_nat\\_gateway.main), and generates the specific terraform state rm command for you.\n\nIt also auto-backups your state file before recommending changes. This lets you decouple the resource from your state before you nuke it.\n\nDeeper Waste Detection (The Graph) I moved beyond simple CloudWatch metrics to find \"Second-Order Waste\".\n\n\"Hollow\" Load Balancers: ELBs that look healthy, but their targets are in a subnet with no active route to the internet.\n\n\"Vampire\" EBS: Finds volumes attached to instances that have been stopped for >30 days. You're paying storage costs for a dead server.\n\nEKS Ghost Clusters: AutoScaling Groups that are burning cash but only running DaemonSets (like kube-proxy) with zero actual app pods.\n\n\n\nNew Safety Logic (Open Source)\n\nDeleting resources based purely on \"0% CPU\" is risky, so I added these checks to verify DNS and config data before recommending a delete.\n\nDNS Safety Lock: Before telling you to release an Elastic IP, it checks your Route53 zones. If an A-Record still points to that IP, it stops you. (Prevents subdomain takeovers).\n\nLambda Pruning: Finds functions with 0 invocations in 90 days + no code updates in 6 months.\n\nLog Rot: Identifies CloudWatch Log Groups set to \"Never Expire\" (the AWS default), which silently accumulate TBs of storage costs over time.\n\nOrphaned Snapshots: Flags old EBS snapshots where the original volume was deleted months ago, but the backup was left behind.\n\n\n\nThe Repo & License\n\nThe core scanner, TUI, and detection engine are AGPL (Open Source) and free forever. i sell a Pro License ($49 lifetime) for the automation layer (the scripts that fix the Terraform state for you). Since it's just me building this, the sales keep the project alive and allow me to support grassroots orphanages and animal sanctuaries (I post the receipts on X).\n\n\n\nRepo: [https://github.com/DrSkyle/CloudSlash](https://github.com/DrSkyle/CloudSlash)\n\n\n\nParsing nested modules in the state file is tricky, so let me know if you hit any edge cases.\n\n:) DrSkyle",
+      "num_comments": 4,
+      "upvote_ratio": 0.83,
+      "text": "I am attempting to decommission AWS Microsoft AD Directory Service and am unable to get it to release it's tentacles from the VPC. I opened a ticket a couple days ago using the free Support, but haven't heard back. My concern is that it's charging daily for things I'm not using. Has anyone else experienced something like this? Any ideas how I can expedite this or get this deleted faster?\n\nHere's the Ticket I opened:\n\nThe service reports authorized applications, but none are visible or removable via console or CLI. The directory has AWS-owned ENIs that cannot be deleted by the customer. This appears to be a stale authorization record in the Directory Service control plane. Please clear the internal authorization binding so the directory can be deleted. \n\nThanks for any comments and energy about this... I just need counsel. 🤓",
       "is_original_content": false,
-      "link_flair_text": "monitoring",
-      "permalink": "https://reddit.com/r/aws/comments/1q3eofu/update_added_terraform_state_mapping_to_the/",
+      "link_flair_text": "technical question",
+      "permalink": "https://reddit.com/r/aws/comments/1q4049t/decommissioning_directory_service/",
       "domain": "self.aws",
       "is_self": true,
-      "comments": []
+      "comments": [
+        {
+          "id": "nxppeec",
+          "author": "yourparadigm",
+          "text": "ENIs and VPC subnets don't cost anything. Usually these ENIs will get cleaned up automatically, but sometimes they get stuck and need manual cleanup from AWS.",
+          "score": 3,
+          "created_utc": "2026-01-04 22:59:08",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "nxxsgbb",
+              "author": "cryptoconvos",
+              "text": "Great! Thank you.",
+              "score": 1,
+              "created_utc": "2026-01-06 02:44:30",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "nxrt3uf",
+          "author": "VictorBaird_",
+          "text": "Yeah, that sounds like a stuck control plane issue, not something you can fix yourself. If console and CLI show no authorized apps but the directory still has AWS-owned ENIs, only AWS can clear it. Open a second ticket under billing, reference the original case, and say you’re being charged for a resource you literally can’t delete. That usually gets a faster response and often credits if they admit it’s stuck.",
+          "score": 2,
+          "created_utc": "2026-01-05 05:58:18",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "nxxsi5w",
+              "author": "cryptoconvos",
+              "text": "Perfect. Thank you. I will open the second ticket. Thanks!",
+              "score": 1,
+              "created_utc": "2026-01-06 02:44:46",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        }
+      ]
     },
     {
       "id": "1pyj2w6",
@@ -5365,6 +5374,34 @@
           "text": "Hello,\n\nFor more information on which services are covered by your credits, you can reach out to our Billing team via our Support Center: http://go.aws/support-center.\n\n\\- Adri N.",
           "score": -5,
           "created_utc": "2026-01-06 10:14:37",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1q7iexe",
+      "title": "Open-source CQRS + Event Sourcing framework for AWS Serverless (Lambda, DynamoDB, Step Functions)",
+      "subreddit": "aws",
+      "url": "https://www.reddit.com/r/aws/comments/1q7iexe/opensource_cqrs_event_sourcing_framework_for_aws/",
+      "author": "mbc-net",
+      "created_utc": "2026-01-08 17:44:24",
+      "score": 6,
+      "num_comments": 2,
+      "upvote_ratio": 1.0,
+      "text": "I've been building enterprise SaaS applications on AWS and kept re-implementing the same patterns. So I open-sourced a framework that handles CQRS and Event Sourcing on AWS serverless.\n\n# AWS Architecture\n\n* **Lambda** \\+ API Gateway for compute\n* **DynamoDB** as event store (with Streams for event processing)\n* **Step Functions** for workflow orchestration\n* **RDS/Aurora** for read models (complex queries)\n* **Cognito** for authentication\n* **SNS/SQS** for async messaging\n* **CDK** for infrastructure as code\n\n# Key Features\n\n* CQRS pattern with automatic DynamoDB → RDS synchronization\n* Multi-tenant data isolation out of the box\n* Optimistic locking for concurrent updates\n* Full audit trail via event sourcing\n* Local development with DynamoDB Local + LocalStack (no AWS costs during dev)\n\n# Quick Start\n\n      npm install -g @mbc-cqrs-serverless/cli\n      mbc new my-app\n      cd my-app && npm install\n      npm run build            # Build the project\n      npm run offline:docker   # Start local AWS services\n      npm run migrate          # Run database migrations\n      npm run offline:sls      # Start API server\n      # Running at http://localhost:4000\n\nBuilt on NestJS + TypeScript for type safety and familiar patterns.\n\n# Links\n\n* 📚 Docs: [https://mbc-cqrs-serverless.mbc-net.com/](https://mbc-cqrs-serverless.mbc-net.com/)\n* ⭐ GitHub: [https://github.com/mbc-net/mbc-cqrs-serverless](https://github.com/mbc-net/mbc-cqrs-serverless)\n* 📦 npm: [https://www.npmjs.com/package/@mbc-cqrs-serverless/core](https://www.npmjs.com/package/@mbc-cqrs-serverless/core)\n\nCurrently at v1.0.17, battle-tested in production. Looking for feedback from the AWS community!",
+      "is_original_content": false,
+      "link_flair_text": "serverless",
+      "permalink": "https://reddit.com/r/aws/comments/1q7iexe/opensource_cqrs_event_sourcing_framework_for_aws/",
+      "domain": "self.aws",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "nyoz9fy",
+          "author": "HosseinKakavand",
+          "text": "This is a really cool project and we are huge fans of a CQRS architecture. We especially love the idea of standardizing this in a framework to make it easier for adoption, and the CLI tool is a great touch for local building and testing.\n\nWe took a similar approach with our platform, but with a different architecture and tech stack. We focused on a MSA running a Golang-based runtime on EKS, which more naturally fit our target apps (tailored for high-complexity mega-workflows). \n\nSpecifically, our runtime executes process logic that stores data in LevelDB as fast, transactional write commands. These commands raise events that a downstream relational database (RDS) then picks up to persist for fast reads (queries). This separation has worked incredibly well for us in maintaining zero-downtime and high performance in enterprise environments (some details here: https://dev.luthersystems.com/template/technologies/id\\_postgres)\n\nIt’s really cool to see others tackling the standardization of these effective patterns—it definitely makes life easier for developers dealing with distributed state and need high performance.",
+          "score": 1,
+          "created_utc": "2026-01-09 23:46:12",
           "is_submitter": false,
           "replies": []
         }
