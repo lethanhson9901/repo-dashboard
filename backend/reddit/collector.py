@@ -662,13 +662,34 @@ class RedditContentCollector:
                 "last_updated": data["metadata"]["last_updated"]
             })
 
+        # Build index from ALL existing JSON files in the directory (not just current run)
+        all_index_entries = []
+        for json_file in output_dir.glob("*.json"):
+            if json_file.name == "index.json":
+                continue
+            try:
+                with json_file.open("r", encoding="utf-8") as f:
+                    file_data = json.load(f)
+                    metadata = file_data.get("metadata", {})
+                    all_index_entries.append({
+                        "subreddit": metadata.get("subreddit", json_file.stem),
+                        "file": json_file.name,
+                        "total_items": metadata.get("total_items", len(file_data.get("items", []))),
+                        "last_updated": metadata.get("last_updated", "")
+                    })
+            except Exception as e:
+                logger.warning(f"⚠️ Không thể đọc file {json_file.name}: {e}")
+                continue
+
         index = {
             "metadata": {
                 "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "time_filter": time_filter,
-                "total_subreddits": len(index_entries)
+                "total_subreddits": len(all_index_entries)
             },
-            "items": sorted(index_entries, key=lambda entry: entry["subreddit"].lower())
+            "items": sorted(all_index_entries, key=lambda entry: entry["subreddit"].lower())
         }
         with (output_dir / "index.json").open("w", encoding="utf-8") as f:
             json.dump(index, f, ensure_ascii=False, indent=2)
+        
+        logger.info(f"📋 Đã cập nhật index.json với {len(all_index_entries)} subreddits")
