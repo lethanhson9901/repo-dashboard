@@ -1,4 +1,5 @@
 import re
+from datetime import datetime, timedelta
 from typing import Dict, List
 
 
@@ -12,6 +13,22 @@ def group_by_subreddit(items: List[Dict]) -> Dict[str, List[Dict]]:
         subreddit = item.get("subreddit", "unknown")
         grouped.setdefault(subreddit, []).append(item)
     return grouped
+
+
+def filter_recent_posts(items: List[Dict], days: int = 7) -> List[Dict]:
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    recent_items: List[Dict] = []
+    for item in items:
+        created_str = item.get("created_utc")
+        if not created_str:
+            continue
+        try:
+            created_at = datetime.strptime(created_str, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            continue
+        if created_at >= cutoff:
+            recent_items.append(item)
+    return recent_items
 
 
 def trim_top_posts(items: List[Dict], limit: int) -> List[Dict]:

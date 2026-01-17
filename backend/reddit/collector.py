@@ -14,6 +14,7 @@ from models import *
 from news_merge import merge_news_items
 from state import load_state, save_state
 from subreddit_news import (
+    filter_recent_posts,
     group_by_subreddit,
     sanitize_subreddit_name,
     trim_top_posts,
@@ -633,7 +634,8 @@ class RedditContentCollector:
                     existing_items = []
 
             merged_items = merge_news_items(existing_items, items)
-            trimmed_items = trim_top_posts(merged_items, limit=50)
+            recent_items = filter_recent_posts(merged_items, days=7)
+            trimmed_items = trim_top_posts(recent_items, limit=20)
             total_comments = sum(len(item.get("comments", [])) for item in trimmed_items)
             data = {
                 "metadata": {
