@@ -1,13 +1,354 @@
 {
   "metadata": {
-    "last_updated": "2026-02-07 02:58:05",
+    "last_updated": "2026-02-07 16:47:15",
     "time_filter": "week",
     "subreddit": "LLMDevs",
     "total_items": 20,
-    "total_comments": 89,
-    "file_size_bytes": 130848
+    "total_comments": 99,
+    "file_size_bytes": 138005
   },
   "items": [
+    {
+      "id": "1qxmeee",
+      "title": "I built RAG for 10K+ NASA docs (1950s–present) in 2 weeks: VLMs for complex tables, diagrams & formulas, 657K+ pages on a single H100, live-streamed full build.",
+      "subreddit": "LLMDevs",
+      "url": "https://www.reddit.com/r/LLMDevs/comments/1qxmeee/i_built_rag_for_10k_nasa_docs_1950spresent_in_2/",
+      "author": "Low_Acanthisitta7686",
+      "created_utc": "2026-02-06 16:32:09",
+      "score": 155,
+      "num_comments": 35,
+      "upvote_ratio": 0.93,
+      "text": "**TL;DR:** I designed and built a full RAG system over 10,000 NASA technical documents spanning the 1950s to 2025 — we're talking scanned typewriter reports, handwritten notes, propulsion diagrams, mathematical formulas, failure investigations. Off-the-shelf tools broke down fast. I ended up building a custom pipeline using Qwen3-VL-8B to process what traditional OCR and parsers couldn't handle, ran the whole thing on a single H100 (657,000+ pages, \\~180 pages/min), and built an agentic retrieval system that doesn't just search — it investigates like a domain expert. The architecture is designed to scale to 100K+ documents. Everything was live-streamed (140+ hours across 15 streams), and the GitHub repo for the document processing pipeline and infra is coming soon.\n\nHey everyone, I'm Raj. Over the last 2 weeks, I live-streamed building what turned out to be the most technically challenging project I've taken on — and I wanted to share the experience while it's fresh. This is a long one, I tried to keep it short, but there was too much that I think is genuinely useful to cut.\n\n# The Domain\n\nSo here's the scenario I designed for this project — a fictional aerospace consultancy called \"Meridian Aerospace,\" modeled on very real challenges these companies face.\n\n85,000+ documents accumulated over 70+ years — real documents from NASA's Technical Reports Server (NTRS). Propulsion test reports, failure investigations, component specs, regulatory filings. Engineers spending 4-6 hours per project digging through archives. A missed critical failure mode last quarter because the relevant data was buried in a 1997 test report nobody knew existed.\n\nNow here's what makes these documents painful:\n\n* 1950s–1990s scanned reports — photocopied, faxed, re-scanned, degraded quality\n* Dense technical diagrams everywhere: thrust curves, propulsion schematics, thermal analysis charts\n* Mathematical formulas and engineering equations scattered throughout\n* Domain-specific acronyms (Isp, TWR, LOX, MMH, NTO) that are often never expanded in the text\n* Cross-references between documents — failure reports cite original test data, compliance docs reference design specs\n* Tables spanning multiple pages with nested sub-headers\n\nI used 10,000 documents from NASA's Technical Reports Server as the working dataset, with the architecture designed from day one to handle the full 85K+ and beyond.\n\n# What I Built\n\nI'll walk through the three main layers, but I want to be clear — these aren't independent pieces you build one after another. They feed into each other constantly. Decisions in the document processing layer directly shaped how the agent works, and understanding how engineers actually think (the agent layer) changed how I approached extraction. It's all connected.\n\n# The Document Processing Pipeline\n\nThis is where a huge chunk of the work lived, and honestly where most people underestimate the difficulty. The core realization: **you cannot build good retrieval over bad extractions.** If your chunked text is garbage, no embedding model or re-ranker is going to save you.\n\nI used Docling (from IBM, I know it has a ton of issues — I found workarounds and solved them too) for layout detection — figuring out where tables, figures, formulas, and text blocks sit on each page. Then Qwen3-VL-8B to actually interpret what's in those regions.\n\nA few of the harder problems:\n\n**Formula association:** Docling detects formulas fine, but they lose their position in the document flow. So you get a formula floating at the end of a page with no connection to the paragraph it belongs to. I built a system that paints colored bounding boxes with ID numbers directly onto page screenshots, then asks the VLM \"where does Formula 7 belong relative to these numbered paragraphs?\" Sounds weird, works surprisingly well. Gives you reading-order accuracy without re-OCRing anything.\n\n**Complex tables:** These were probably the single most painful thing to solve. We're talking massive grids — 72 columns by 50 rows of stability data — where position determines meaning. Down arrows mean \"carry this value down.\" Brackets group five rows under \"Unstable.\" Zebra lines and grid lines guide the human eye across dense numbers. Standard OCR reads left-to-right, top-to-bottom and has no idea what to do with any of this. Parsers treat the grid lines as noise or lose alignment if the scan is slightly tilted.\n\nI went through a lot of approaches. Standard markdown extraction lost alignment. CV-based heatmaps and projection lines to detect rows — worked about 80% but too brittle for production. JSON output from the VLM broke constantly on large tables (missed closing brackets). Small models (7B) hallucinated numbers and missed columns entirely.\n\nWhat actually worked was treating the table as a photograph of data rather than a stream of text. Use Docling purely for finding the bounding box coordinates, crop the original high-res page image (no downscaling — that destroys data in dense tables), and send the full-resolution crop to a large VLM. You need 72B+ to hold context across a 30-column table without losing track.\n\nTwo tricks that made a real difference. First, for tables with zebra lines or warped scans, I pre-process the image by drawing red horizontal lines onto it before sending to the VLM — basically a \"digital ruler\" that forces the model to keep row alignment. Second, the prompt strategy — instead of asking for just structured output, I ask for markdown (way more robust than JSON for grid data) plus a \"notes\" field where the model captures visual shorthand. \"If there's a down arrow, note the value is carried down. If there's a bracket, note the grouping.\" The model successfully returned \"unstable\" for rows that didn't explicitly have the text but were visually grouped under an \"Unstable\" bracket.\n\nFor the truly dense tables that still needed more work, I have a fallback that generates a detailed description and serves the raw image alongside it — which honestly, in aerospace, engineers prefer anyway over a potentially wrong structured output. But this isn't a dead end. The digital ruler approach and the prompt strategy were working well, and with more time I think there's a solid solution there. I was time-boxed to 2 weeks for this entire project, so I made the pragmatic call to move on. Might revisit this specifically and share if I make a breakthrough.\n\n**Legacy scan quality:** Documents from the 1960s have noise, \"Confidential\" stamps, hole punches, scan artifacts — and models happily pick all of these up as \"figures.\" Added a classification step asking the VLM: \"Is this a technical diagram or just a document artifact?\" Simple, but it cleaned up a lot of noise.\n\n**The full-page strategy:** I initially tried cropping individual formulas to save tokens. Docling's format detection models missed about 60% of small formulas in dense pages. So I pivoted — if any formula is detected on a page, send the entire page screenshot to the VLM and let it transcribe everything in reading order. More expensive per page (didn't matter as I deployed on a GPU), but the accuracy difference is massive. In this domain, a missed variable isn't a minor bug.\n\n**On OCR,** I didn't actually need traditional OCR for most of the heavy lifting. The figures, tables, and formulas — which are the hardest parts of these documents — were all handled by the VLM pipeline. OCR was only needed as a fallback for pages where the embedded text layer was missing or corrupted. So the approach became: use native text extraction where available, VLM for all the visual/structured content, and OCR only when truly needed. Disabling forced OCR where it wasn't necessary cut processing time significantly.\n\n# H100 Infrastructure & Scaling\n\nProcessing 10K documents — roughly 657,000+ pages — on a single H100 was its own adventure.\n\n**Where it started:** My first attempt was basically a monolithic script. Every worker loaded the PDF, loaded the model onto the GPU, ran inference, unloaded. Workers were fighting each other for GPU memory, CPU, RAM. Everything was crashing. Back-of-the-napkin math said this approach would take somewhere around 28 days for the full dataset. Obviously not going to work.\n\n**The rewrite:** I moved to a proper service-oriented architecture. Separated the CPU-heavy work (Docling parsing, chunking, text extraction) from the GPU-heavy work (VLM inference). Stateless Celery workers handle the CPU side, feeding requests to a persistent vLLM server that does nothing but inference. Redis as the message broker. Took some inspiration from how production ML systems handle millions of requests with limited compute — keep your inference engine as a persistent service, don't have each worker spin it up and tear it down.\n\nThat alone brought the estimate down to maybe 5-9 days. Still not great.\n\n**Then the tuning started.** FP8 quantization because running standard GGUF/Ollama on an H100 is wasting the hardware — FP8 is specifically optimized for Hopper. Concurrency tuning: tested 6, 8, 9, 10 Docling workers. 9 caused instant OOM. 10 saturated the queue. 6 underutilized the GPU. 8 was the sweet spot. Dynamic image scaling for oversized PDFs — some scans were 170MB, crashing workers during bitmap conversion. VRAM memory leak management — usage would creep up batch after batch until it crashed, so I added explicit garbage collection between cycles.\n\n**End result:** \\~2.5 days, running at about 180 pages per minute. From 28 days to 2.5 days on the same hardware, just by thinking about architecture and resource management. Again, could have done better, but was on a time crunch.\n\n# The Agent & Retrieval Layer\n\nThis part tends to get underestimated. Building the agent wasn't just \"wire up some tools to an LLM and write a system prompt.\" A huge amount of time went into two things: understanding the people who would actually use this system, and shaping how the agent itself thinks.\n\nI spent a lot of time with Claude role-playing as different engineer personas — a cautious senior engineer (\"Sandra\") approaching retirement who's seen things go wrong, a junior engineer who searches too narrowly. I was trying to understand: how does their day actually work? How do they use current traditional systems? What's literally going through their mind when they're investigating a failure mode? What are they worried about that they won't say out loud?\n\nThat process shaped everything about the agent. For example — engineers don't just look for failure cases. They specifically look for *success cases* as counter-evidence to validate risky designs. A standard RAG setup completely misses that nuance. Or the fact that a \"question about a valve failure\" might actually be about defending a design decision in a review meeting next week. The agent needs to understand the situation behind the question.\n\nThat understanding fed directly into how I designed the agent's reasoning. One of the bigger realizations was that spiking domain intuition in the system prompt often outperforms complex retrieval engineering. Instead of hardcoding examples, I focused on making the agent think like a propulsion engineer. It should be low-opinionated and already have hypotheses before it runs a single search. When someone mentions a pressure value, it should have intuition about whether that's nominal or concerning. When it finds a document, it should reason about what it means, not just return it. It's not a search tool — it's a reasoning engine with engineering expertise that uses search as one of its tools. And honestly, this is still just at the system prompt level — keeping it low-opinionated, letting the model lean on its own domain knowledge rather than constraining it — but it brings absolute wonders to how the system behaves.\n\nWhat came out of all that work:\n\nThe agent doesn't just search — it investigates. It maintains a working task list and notes, forms hypotheses based on its domain intuition before it even touches the search tool, and updates its understanding as it learns. When a question branches, it spawns sub-agents for parallel research threads. It can navigate — read adjacent chunks, follow cross-references between documents, pull threads across decades of reports.\n\nWhen the text extraction is uncertain — and on 1950s docs, it will be — the agent can request a screenshot of the actual PDF page region to visually verify what it's reading. That \"visual region\" tool ended up being one of the most important things in the whole system. It's the bridge between \"95% OCR accuracy\" and \"actually trustworthy in aerospace.\"\n\nI also integrated the NASA Thesaurus — 18K aerospace terms filtered down to 3.5K propulsion-relevant concepts — so the system handles query expansion properly. \"LOX\" matches \"Liquid Oxygen,\" \"2000 PSI\" finds results mentioning \"13.9 MPa.\" Without this, you're relying on exact keyword matches in a domain where everyone uses different terminology for the same thing.\n\nAnd time-boxed search — engineers ask things like \"what do we know about cryogenic engine failures between 1970 and 1980?\" Filtering by time period before semantic search cuts the search space dramatically. When I tested this, the agent successfully traced the 50-year evolution of cryogenic systems — from passive insulation in the 1970s to active cryo-coolers in the 2020s — without any deep research mode. Just proper filtering and good retrieval.\n\n# What's Coming Next\n\nI've linked all the YouTube streams in the comments below — 15 streams, some of them are 11+ hours long, so obviously that's a lot to sit through. To make things more digestible and actually useful, I'm going to be posting specific problem/solution breakdowns over the next few days, including how I evaluated the system with 10K docs. Each of these topics was genuinely its own nightmare to solve, and I think the details will be helpful for anyone working on similar problems.\n\nI'm also hoping to open-source the document processing pipeline and infrastructure code on GitHub soon, which I think will be genuinely useful for anyone dealing with large-scale document processing — whether it's aerospace or not.\n\nOne last thing — I genuinely want to thank the team behind Claude Code. Being honest, a project like this would realistically take a team of 3-4 engineers working 3-4 months. The document processing pipeline alone, the infrastructure, the agent design, the frontend, evaluation — each of these is a serious body of work. I did it solo in 2 weeks, live on stream, and that would not have been possible without Claude Code, it was in the loop for pretty much all of it. Seriously, thank you to the engineers behind it.\n\nHappy to answer questions, and if you've dealt with similar problems — legacy docs, domain-specific retrieval, scaling document processing — I'd love to hear what you ran into.",
+      "is_original_content": false,
+      "link_flair_text": "Discussion",
+      "permalink": "https://reddit.com/r/LLMDevs/comments/1qxmeee/i_built_rag_for_10k_nasa_docs_1950spresent_in_2/",
+      "domain": "self.LLMDevs",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "o3xvwcn",
+          "author": "ksk99",
+          "text": "Any evaluation metrixs u used, any subset of data set along with queries and results we can use to recreate/learn",
+          "score": 6,
+          "created_utc": "2026-02-06 18:02:03",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o3xxjlq",
+              "author": "Low_Acanthisitta7686",
+              "text": "Yeah! So in the last stream (Part 14) I went through evaluation. Basically, I loaded co-related full docs into Gemini (1M context window) and had it generate complex questions that tested different aspects of the agent — things like cross-document reasoning, degraded documents, negative/boundary tests, and more.   \n  \nThen I evaluated and tested whether the system could find the right set of docs within the 10K-doc space.   \n  \nI felt like this gave me a solid initial test suite to run, which would probably end up being a pretty strong evaluation as well. Sure, I’ll share the dataset and pipeline with the repo soon.",
+              "score": 4,
+              "created_utc": "2026-02-06 18:09:57",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "o3xniw6",
+          "author": "vladimirxi",
+          "text": "Nuts.  Well done on the documentation!  Crazy project.  Well thought out.",
+          "score": 8,
+          "created_utc": "2026-02-06 17:22:02",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o3xpjs5",
+              "author": "Low_Acanthisitta7686",
+              "text": "Thank you!",
+              "score": 3,
+              "created_utc": "2026-02-06 17:31:43",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "o3xd6ic",
+          "author": "Low_Acanthisitta7686",
+          "text": "Check the live streams here (15 streams, 140+ hours): [https://www.youtube.com/@rajsuthanofficial7585/streams](https://www.youtube.com/@rajsuthanofficial7585/streams)",
+          "score": 6,
+          "created_utc": "2026-02-06 16:33:17",
+          "is_submitter": true,
+          "replies": [
+            {
+              "id": "o3xz1qw",
+              "author": "flaxseedyup",
+              "text": "You absolute gem of a man. I will definitely be looking at this. Thank you so much for sharing!    \n    \nWhere did you learn the majority of the core skills needed for such a project?    \n    \nDo you rate the “The AI Automators” who are on YouTube?",
+              "score": 6,
+              "created_utc": "2026-02-06 18:17:01",
+              "is_submitter": false,
+              "replies": [
+                {
+                  "id": "o3y00x7",
+                  "author": "Low_Acanthisitta7686",
+                  "text": "haha thanks ❤️\n\nI pretty much learned by building stuff. I was working on my startup and also worked with a few enterprises along the way, but mostly just learned by doing random complex projects!",
+                  "score": 1,
+                  "created_utc": "2026-02-06 18:21:35",
+                  "is_submitter": true,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "o3yeh4z",
+          "author": "makinggrace",
+          "text": "This was a beast of a project. Love it.",
+          "score": 2,
+          "created_utc": "2026-02-06 19:30:43",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o3yfh68",
+              "author": "Low_Acanthisitta7686",
+              "text": "for sure.... thanks!",
+              "score": 1,
+              "created_utc": "2026-02-06 19:35:39",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "o3zizu5",
+          "author": "tehsilentwarrior",
+          "text": "Cool stuff. Will be useful in playing Kerbal 😂\n\nNo but, impressive stuff. Hope to see it soon!",
+          "score": 2,
+          "created_utc": "2026-02-06 22:54:55",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o40q0gm",
+              "author": "Low_Acanthisitta7686",
+              "text": "appreciate it mate!",
+              "score": 1,
+              "created_utc": "2026-02-07 03:12:00",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "o3zr9gx",
+          "author": "whyyoudidit",
+          "text": "subbed",
+          "score": 2,
+          "created_utc": "2026-02-06 23:41:55",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o40q9jt",
+              "author": "Low_Acanthisitta7686",
+              "text": "thanks buddy!",
+              "score": 1,
+              "created_utc": "2026-02-07 03:13:37",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "o40685c",
+          "author": "Legitimate-Leek4235",
+          "text": "I wonder if we give this prompt to opus 4.1 and all the agents which built the compiler, will it be able to replicate this",
+          "score": 2,
+          "created_utc": "2026-02-07 01:09:08",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o40qtfh",
+              "author": "Low_Acanthisitta7686",
+              "text": "Nope — not possible at all. There are so many moving pieces and decisions to make, and honestly it takes a ton of thinking, trial, and error to get to this point. Check my YouTube streams — for around 3 days (each 8+ hours) I was banging my head building the infra, and then we completely rewrote the entire thing in a day. So it literally takes a lot of work. Luckily I’m an engineer, so it naturally 100× my potential.",
+              "score": 1,
+              "created_utc": "2026-02-07 03:17:09",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "o40cczw",
+          "author": "OnlyTimeFan",
+          "text": "Thanks for sharing and spreading the knowledge",
+          "score": 2,
+          "created_utc": "2026-02-07 01:47:02",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o40r1c8",
+              "author": "Low_Acanthisitta7686",
+              "text": "always!",
+              "score": 2,
+              "created_utc": "2026-02-07 03:18:34",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "o415khy",
+          "author": "FiddlyDink",
+          "text": "This is incredible work! I’m working on a RAG project to connect an LLM to a Neo4j data store to be able to ask questions about old records and I know how challenging it can be. I’m not trying to solve half the challenges that you had to and yet I’m still struggling. I would love to learn more about this work and will definitely be checking out your streams!",
+          "score": 2,
+          "created_utc": "2026-02-07 04:59:53",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o41c2p0",
+              "author": "Low_Acanthisitta7686",
+              "text": "❤️",
+              "score": 1,
+              "created_utc": "2026-02-07 05:50:53",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "o41t0xh",
+          "author": "Electrical-Paper-323",
+          "text": "Excellent! Looking forward to the GitHub project 😊",
+          "score": 2,
+          "created_utc": "2026-02-07 08:25:07",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "o41ts01",
+          "author": "Neovison_vison",
+          "text": "Can you TLDR us in new since your last write up 4 months ago?",
+          "score": 2,
+          "created_utc": "2026-02-07 08:32:30",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o4258z7",
+              "author": "Low_Acanthisitta7686",
+              "text": "Worked on a couple of projects since then, wrapped up a few, and have a few ongoing. But mostly right now I’m focused on my startup, basically building something similar: on-prem search at scale for regulated enterprises like finance, pharma, ITAR-protected companies, and more. It’s [intraplex.ai](http://intraplex.ai) if you’re interested.",
+              "score": 1,
+              "created_utc": "2026-02-07 10:25:39",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "o42hujq",
+          "author": "redbull-hater",
+          "text": "Good job man",
+          "score": 2,
+          "created_utc": "2026-02-07 12:20:12",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "o42pk2x",
+          "author": "jaykeerti123",
+          "text": "Great stuff. Waiting for the GitHub code.",
+          "score": 2,
+          "created_utc": "2026-02-07 13:16:16",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "o3yvpnv",
+          "author": "No_Wrongdoer41",
+          "text": "Me and a small team are building a platform that can accomplish something comparable in a matter of hours, repeateably, on corpuses of thousands of documents. I'd love your feedback on what we're working in if you don't mind discussing it with me!",
+          "score": 1,
+          "created_utc": "2026-02-06 20:56:32",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o3ywgcm",
+              "author": "Low_Acanthisitta7686",
+              "text": "sure",
+              "score": 1,
+              "created_utc": "2026-02-06 21:00:13",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "o3yhhfr",
+          "author": "satechguy",
+          "text": "Which Ilm wrote such verbose text ;-)",
+          "score": 2,
+          "created_utc": "2026-02-06 19:45:31",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o3yitmx",
+              "author": "Low_Acanthisitta7686",
+              "text": "haha, I wrote it and had claude help polish the english.",
+              "score": 2,
+              "created_utc": "2026-02-06 19:52:08",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "o3zji2u",
+                  "author": "tehsilentwarrior",
+                  "text": "I write a lot too and people these days just think AI did it. \n\nI spent quite a lot of time perfecting my English so when I documented a massive project we have my boss kept asking what AI I used for that .. lol\n\nI just said <my inicials>AI, and he was hilariously confused when he couldn’t find it. I said I trained it myself over the last decades",
+                  "score": 3,
+                  "created_utc": "2026-02-06 22:57:42",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "o3y97qu",
+          "author": "bbahner",
+          "text": "This is awesome! Thanks for sharing. ",
+          "score": 1,
+          "created_utc": "2026-02-06 19:05:07",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o3ybujq",
+              "author": "Low_Acanthisitta7686",
+              "text": "Sure!",
+              "score": 1,
+              "created_utc": "2026-02-06 19:17:55",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "o4241bl",
+          "author": "QuanstScientist",
+          "text": "OMG, what an amazing process documentation. We both went through a very similar process, I’m working on a local RAG for the Epstein archive files, still in development, also using Claude, here at some details, still not in a state for public release https://boltzmannentropy.github.io/Librarius/",
+          "score": 0,
+          "created_utc": "2026-02-07 10:13:49",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "o406bb6",
+          "author": "EditorDisastrous4994",
+          "text": "You should try Reseek. It's an AI second brain that handles semantic search across notes, PDFs, and web content in one place. It might be a good alternative if you want a unified system",
+          "score": -1,
+          "created_utc": "2026-02-07 01:09:40",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o40r0u3",
+              "author": "Low_Acanthisitta7686",
+              "text": "Checked it out, but it doesn’t mention anywhere what scale it can work with, and that’s super important.",
+              "score": 1,
+              "created_utc": "2026-02-07 03:18:29",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        }
+      ]
+    },
     {
       "id": "1qvtrw7",
       "title": "If RAG is dead, what will replace it?",
@@ -15,9 +356,9 @@
       "url": "https://www.reddit.com/r/LLMDevs/comments/1qvtrw7/if_rag_is_dead_what_will_replace_it/",
       "author": "Normal_Sun_8169",
       "created_utc": "2026-02-04 16:50:23",
-      "score": 118,
-      "num_comments": 92,
-      "upvote_ratio": 0.84,
+      "score": 122,
+      "num_comments": 94,
+      "upvote_ratio": 0.85,
       "text": "It seems like everyone who uses RAG eventually gets frustrated with it. You end up with either poor results from semantic search or complex data pipelines.\n\nAlso - searching for knowledge is only part of the problem for agents. I’ve seen some articles and posts on X, Medium, Reddit, etc about agent memory and in a lot of ways it seems like that’s the natural evolution of RAG. You treat knowledge as a form of semantic memory and one piece of a bigger set of memory requirements. \n\nThere was a paper published from Google late last year about self-evolving agents and another one talking about adaptive agents.\n\nIf you had a good solution to memory, it seems like you could get to the point where these ideas come together and you could use a combination of knowledge, episodic memory, user feedback, etc to make agents actually learn.\n\nSeems like that could be the future for solving agent data. Anyone tried to do this? ",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -37,7 +378,7 @@
               "id": "o3luvt1",
               "author": "isthatashark",
               "text": "The challenge with the name \"RAG\" is that so many people use it as a shorthand to describe semantic search over chunked documents in a vector database. I think the days where you can built any sort of meaningful AI application with that approach are behind us.\n\nAs a pattern, retrieving context and using it to augment the LLM's generation is here to stay.",
-              "score": 22,
+              "score": 21,
               "created_utc": "2026-02-04 21:44:35",
               "is_submitter": false,
               "replies": [
@@ -45,7 +386,7 @@
                   "id": "o3obe76",
                   "author": "FiddlyDink",
                   "text": "What is replacing chunked documents in a vector database for semantic search?",
-                  "score": 8,
+                  "score": 9,
                   "created_utc": "2026-02-05 06:33:25",
                   "is_submitter": false,
                   "replies": []
@@ -75,7 +416,7 @@
               "id": "o3l8dww",
               "author": "valuat",
               "text": "Everyone who?",
-              "score": 4,
+              "score": 5,
               "created_utc": "2026-02-04 19:56:59",
               "is_submitter": false,
               "replies": []
@@ -110,7 +451,7 @@
                   "id": "o3l0y0o",
                   "author": "Agreeable-Market-692",
                   "text": "This is a very outdated view of RAG. Hundreds of papers and dozens of models later and things are much improved.",
-                  "score": 10,
+                  "score": 11,
                   "created_utc": "2026-02-04 19:22:01",
                   "is_submitter": false,
                   "replies": []
@@ -132,7 +473,7 @@
           "id": "o3kfb2f",
           "author": "coffee-praxis",
           "text": "Agent memory alone doesn’t cut it. Let’s say you want grounded facts from a document source that’s too big for context window. You can’t just shove it all in “agent memory” unless you retrieve the correct bits of it somehow. Now you’re back to RAG.",
-          "score": 39,
+          "score": 38,
           "created_utc": "2026-02-04 17:44:16",
           "is_submitter": false,
           "replies": [
@@ -157,7 +498,7 @@
                   "id": "o3klea2",
                   "author": "coffee-praxis",
                   "text": "RAG is “**retrieval** augmented generation”. Any DB qualifies.",
-                  "score": 24,
+                  "score": 23,
                   "created_utc": "2026-02-04 18:11:53",
                   "is_submitter": false,
                   "replies": []
@@ -170,7 +511,7 @@
           "id": "o3k9bq3",
           "author": "ethan000024",
           "text": "I’ve been hearing more about agent learning lately too. Agree it’s a promising idea but also mostly hype when I’ve tried to dig into it. The two most interesting projects I’ve seen on this lately are Agent Lightning and Hindsight. Two very different approaches, Agent Lightning relies more on file system. Hindsight is closer to what you described with combining knowledge, episodic memory, etc. Both have learning aspects to it. ",
-          "score": 12,
+          "score": 11,
           "created_utc": "2026-02-04 17:16:30",
           "is_submitter": false,
           "replies": [
@@ -189,7 +530,7 @@
           "id": "o3kcja7",
           "author": "florinandrei",
           "text": "> If RAG is dead, what will replace it?\n\nTATTER\n\nTransformer-Attention Token Tangling for Eventually Rambling",
-          "score": 26,
+          "score": 25,
           "created_utc": "2026-02-04 17:31:27",
           "is_submitter": false,
           "replies": [
@@ -197,7 +538,7 @@
               "id": "o3kielt",
               "author": "Floppy_Muppet",
               "text": "I believe \"token tangling\" is illegal in several states.",
-              "score": 21,
+              "score": 20,
               "created_utc": "2026-02-04 17:58:17",
               "is_submitter": false,
               "replies": []
@@ -208,7 +549,7 @@
           "id": "o3k912z",
           "author": "Emma_4_7",
           "text": "The most annoying thing about agent memory right now is how many “memory” projects on GitHub are basic RAG solutions under the covers. That’s nice you can remember where I work after 10 whole messages.",
-          "score": 19,
+          "score": 18,
           "created_utc": "2026-02-04 17:15:08",
           "is_submitter": false,
           "replies": [
@@ -233,7 +574,7 @@
                   "id": "o3kvyj2",
                   "author": "leonjetski",
                   "text": "“Mapping sturucted outitites and complex relationships between aæðcapta.”",
-                  "score": 13,
+                  "score": 14,
                   "created_utc": "2026-02-04 18:59:11",
                   "is_submitter": false,
                   "replies": []
@@ -341,7 +682,7 @@
           "id": "o3kuy2i",
           "author": "metaphorm",
           "text": "my view is that RAG is still a highly relevant technique and the problems it has with accuracy are the current leading edge of LLM application development. agent memory might be a good approach for some classes of problems. \"deep\" agents might be another approach that works, i.e. an agent that has access to tools that allow it to introspect its own results. ",
-          "score": 6,
+          "score": 5,
           "created_utc": "2026-02-04 18:54:41",
           "is_submitter": false,
           "replies": [
@@ -632,6 +973,24 @@
           "replies": []
         },
         {
+          "id": "o419bcl",
+          "author": "Analytics-Maken",
+          "text": "Naive vectoronly RAG over chunked documents fails to scale as agent memory, producing poor retrieval for complex queries and lacking structure for structured knowledge.​ It happens because embeddings capture semantics but ignore relational structure, metadata, and versioning.\n\nThe fix uses hybrid retrieval FTS/keyword first, then vectors as fallback, merged and reranked with embeddings as versioned artifacts (tied to source hash and model version) to avoid silent drift; layer in structured state from warehouses for granularity and joins, plus episodic logs for agent feedback loops.\n\nThis creates memory surfaces for agents to query without overload. Windsor.ai pipelines normalize data into BigQuery/Snowflake/PostgreSQL, handling schema drift automatically, then expose them via Windsor MCP as tools in Claude/ChatGPT for semantic vs. structured memory access.",
+          "score": 1,
+          "created_utc": "2026-02-07 05:28:33",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "o43falv",
+          "author": "Fresh_Sock8660",
+          "text": "Retrieval augmentation isn't going away anytime soon. Maybe you're thinking of a specific application.",
+          "score": 1,
+          "created_utc": "2026-02-07 15:40:16",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
           "id": "o3l4jqo",
           "author": "Able_Penalty8856",
           "text": "I also got frustrated with RAG. My plan is to study Unsloth to explore fine-tuned models. I'm aware that I'll likely face several challenges.",
@@ -653,219 +1012,48 @@
       ]
     },
     {
-      "id": "1qxmeee",
-      "title": "I built RAG for 10K+ NASA docs (1950s–present) in 2 weeks: VLMs for complex tables, diagrams & formulas, 657K+ pages on a single H100, live-streamed full build.",
+      "id": "1qul18d",
+      "title": "NotebookLM For Teams",
       "subreddit": "LLMDevs",
-      "url": "https://www.reddit.com/r/LLMDevs/comments/1qxmeee/i_built_rag_for_10k_nasa_docs_1950spresent_in_2/",
-      "author": "Low_Acanthisitta7686",
-      "created_utc": "2026-02-06 16:32:09",
-      "score": 73,
-      "num_comments": 21,
-      "upvote_ratio": 0.94,
-      "text": "**TL;DR:** I designed and built a full RAG system over 10,000 NASA technical documents spanning the 1950s to 2025 — we're talking scanned typewriter reports, handwritten notes, propulsion diagrams, mathematical formulas, failure investigations. Off-the-shelf tools broke down fast. I ended up building a custom pipeline using Qwen3-VL-8B to process what traditional OCR and parsers couldn't handle, ran the whole thing on a single H100 (657,000+ pages, \\~180 pages/min), and built an agentic retrieval system that doesn't just search — it investigates like a domain expert. The architecture is designed to scale to 100K+ documents. Everything was live-streamed (140+ hours across 15 streams), and the GitHub repo for the document processing pipeline and infra is coming soon.\n\nHey everyone, I'm Raj. Over the last 2 weeks, I live-streamed building what turned out to be the most technically challenging project I've taken on — and I wanted to share the experience while it's fresh. This is a long one, I tried to keep it short, but there was too much that I think is genuinely useful to cut.\n\n# The Domain\n\nSo here's the scenario I designed for this project — a fictional aerospace consultancy called \"Meridian Aerospace,\" modeled on very real challenges these companies face.\n\n85,000+ documents accumulated over 70+ years — real documents from NASA's Technical Reports Server (NTRS). Propulsion test reports, failure investigations, component specs, regulatory filings. Engineers spending 4-6 hours per project digging through archives. A missed critical failure mode last quarter because the relevant data was buried in a 1997 test report nobody knew existed.\n\nNow here's what makes these documents painful:\n\n* 1950s–1990s scanned reports — photocopied, faxed, re-scanned, degraded quality\n* Dense technical diagrams everywhere: thrust curves, propulsion schematics, thermal analysis charts\n* Mathematical formulas and engineering equations scattered throughout\n* Domain-specific acronyms (Isp, TWR, LOX, MMH, NTO) that are often never expanded in the text\n* Cross-references between documents — failure reports cite original test data, compliance docs reference design specs\n* Tables spanning multiple pages with nested sub-headers\n\nI used 10,000 documents from NASA's Technical Reports Server as the working dataset, with the architecture designed from day one to handle the full 85K+ and beyond.\n\n# What I Built\n\nI'll walk through the three main layers, but I want to be clear — these aren't independent pieces you build one after another. They feed into each other constantly. Decisions in the document processing layer directly shaped how the agent works, and understanding how engineers actually think (the agent layer) changed how I approached extraction. It's all connected.\n\n# The Document Processing Pipeline\n\nThis is where a huge chunk of the work lived, and honestly where most people underestimate the difficulty. The core realization: **you cannot build good retrieval over bad extractions.** If your chunked text is garbage, no embedding model or re-ranker is going to save you.\n\nI used Docling (from IBM, I know it has a ton of issues — I found workarounds and solved them too) for layout detection — figuring out where tables, figures, formulas, and text blocks sit on each page. Then Qwen3-VL-8B to actually interpret what's in those regions.\n\nA few of the harder problems:\n\n**Formula association:** Docling detects formulas fine, but they lose their position in the document flow. So you get a formula floating at the end of a page with no connection to the paragraph it belongs to. I built a system that paints colored bounding boxes with ID numbers directly onto page screenshots, then asks the VLM \"where does Formula 7 belong relative to these numbered paragraphs?\" Sounds weird, works surprisingly well. Gives you reading-order accuracy without re-OCRing anything.\n\n**Complex tables:** These were probably the single most painful thing to solve. We're talking massive grids — 72 columns by 50 rows of stability data — where position determines meaning. Down arrows mean \"carry this value down.\" Brackets group five rows under \"Unstable.\" Zebra lines and grid lines guide the human eye across dense numbers. Standard OCR reads left-to-right, top-to-bottom and has no idea what to do with any of this. Parsers treat the grid lines as noise or lose alignment if the scan is slightly tilted.\n\nI went through a lot of approaches. Standard markdown extraction lost alignment. CV-based heatmaps and projection lines to detect rows — worked about 80% but too brittle for production. JSON output from the VLM broke constantly on large tables (missed closing brackets). Small models (7B) hallucinated numbers and missed columns entirely.\n\nWhat actually worked was treating the table as a photograph of data rather than a stream of text. Use Docling purely for finding the bounding box coordinates, crop the original high-res page image (no downscaling — that destroys data in dense tables), and send the full-resolution crop to a large VLM. You need 72B+ to hold context across a 30-column table without losing track.\n\nTwo tricks that made a real difference. First, for tables with zebra lines or warped scans, I pre-process the image by drawing red horizontal lines onto it before sending to the VLM — basically a \"digital ruler\" that forces the model to keep row alignment. Second, the prompt strategy — instead of asking for just structured output, I ask for markdown (way more robust than JSON for grid data) plus a \"notes\" field where the model captures visual shorthand. \"If there's a down arrow, note the value is carried down. If there's a bracket, note the grouping.\" The model successfully returned \"unstable\" for rows that didn't explicitly have the text but were visually grouped under an \"Unstable\" bracket.\n\nFor the truly dense tables that still needed more work, I have a fallback that generates a detailed description and serves the raw image alongside it — which honestly, in aerospace, engineers prefer anyway over a potentially wrong structured output. But this isn't a dead end. The digital ruler approach and the prompt strategy were working well, and with more time I think there's a solid solution there. I was time-boxed to 2 weeks for this entire project, so I made the pragmatic call to move on. Might revisit this specifically and share if I make a breakthrough.\n\n**Legacy scan quality:** Documents from the 1960s have noise, \"Confidential\" stamps, hole punches, scan artifacts — and models happily pick all of these up as \"figures.\" Added a classification step asking the VLM: \"Is this a technical diagram or just a document artifact?\" Simple, but it cleaned up a lot of noise.\n\n**The full-page strategy:** I initially tried cropping individual formulas to save tokens. Docling's format detection models missed about 60% of small formulas in dense pages. So I pivoted — if any formula is detected on a page, send the entire page screenshot to the VLM and let it transcribe everything in reading order. More expensive per page (didn't matter as I deployed on a GPU), but the accuracy difference is massive. In this domain, a missed variable isn't a minor bug.\n\n**On OCR,** I didn't actually need traditional OCR for most of the heavy lifting. The figures, tables, and formulas — which are the hardest parts of these documents — were all handled by the VLM pipeline. OCR was only needed as a fallback for pages where the embedded text layer was missing or corrupted. So the approach became: use native text extraction where available, VLM for all the visual/structured content, and OCR only when truly needed. Disabling forced OCR where it wasn't necessary cut processing time significantly.\n\n# H100 Infrastructure & Scaling\n\nProcessing 10K documents — roughly 657,000+ pages — on a single H100 was its own adventure.\n\n**Where it started:** My first attempt was basically a monolithic script. Every worker loaded the PDF, loaded the model onto the GPU, ran inference, unloaded. Workers were fighting each other for GPU memory, CPU, RAM. Everything was crashing. Back-of-the-napkin math said this approach would take somewhere around 28 days for the full dataset. Obviously not going to work.\n\n**The rewrite:** I moved to a proper service-oriented architecture. Separated the CPU-heavy work (Docling parsing, chunking, text extraction) from the GPU-heavy work (VLM inference). Stateless Celery workers handle the CPU side, feeding requests to a persistent vLLM server that does nothing but inference. Redis as the message broker. Took some inspiration from how production ML systems handle millions of requests with limited compute — keep your inference engine as a persistent service, don't have each worker spin it up and tear it down.\n\nThat alone brought the estimate down to maybe 5-9 days. Still not great.\n\n**Then the tuning started.** FP8 quantization because running standard GGUF/Ollama on an H100 is wasting the hardware — FP8 is specifically optimized for Hopper. Concurrency tuning: tested 6, 8, 9, 10 Docling workers. 9 caused instant OOM. 10 saturated the queue. 6 underutilized the GPU. 8 was the sweet spot. Dynamic image scaling for oversized PDFs — some scans were 170MB, crashing workers during bitmap conversion. VRAM memory leak management — usage would creep up batch after batch until it crashed, so I added explicit garbage collection between cycles.\n\n**End result:** \\~2.5 days, running at about 180 pages per minute. From 28 days to 2.5 days on the same hardware, just by thinking about architecture and resource management. Again, could have done better, but was on a time crunch.\n\n# The Agent & Retrieval Layer\n\nThis part tends to get underestimated. Building the agent wasn't just \"wire up some tools to an LLM and write a system prompt.\" A huge amount of time went into two things: understanding the people who would actually use this system, and shaping how the agent itself thinks.\n\nI spent a lot of time with Claude role-playing as different engineer personas — a cautious senior engineer (\"Sandra\") approaching retirement who's seen things go wrong, a junior engineer who searches too narrowly. I was trying to understand: how does their day actually work? How do they use current traditional systems? What's literally going through their mind when they're investigating a failure mode? What are they worried about that they won't say out loud?\n\nThat process shaped everything about the agent. For example — engineers don't just look for failure cases. They specifically look for *success cases* as counter-evidence to validate risky designs. A standard RAG setup completely misses that nuance. Or the fact that a \"question about a valve failure\" might actually be about defending a design decision in a review meeting next week. The agent needs to understand the situation behind the question.\n\nThat understanding fed directly into how I designed the agent's reasoning. One of the bigger realizations was that spiking domain intuition in the system prompt often outperforms complex retrieval engineering. Instead of hardcoding examples, I focused on making the agent think like a propulsion engineer. It should be low-opinionated and already have hypotheses before it runs a single search. When someone mentions a pressure value, it should have intuition about whether that's nominal or concerning. When it finds a document, it should reason about what it means, not just return it. It's not a search tool — it's a reasoning engine with engineering expertise that uses search as one of its tools. And honestly, this is still just at the system prompt level — keeping it low-opinionated, letting the model lean on its own domain knowledge rather than constraining it — but it brings absolute wonders to how the system behaves.\n\nWhat came out of all that work:\n\nThe agent doesn't just search — it investigates. It maintains a working task list and notes, forms hypotheses based on its domain intuition before it even touches the search tool, and updates its understanding as it learns. When a question branches, it spawns sub-agents for parallel research threads. It can navigate — read adjacent chunks, follow cross-references between documents, pull threads across decades of reports.\n\nWhen the text extraction is uncertain — and on 1950s docs, it will be — the agent can request a screenshot of the actual PDF page region to visually verify what it's reading. That \"visual region\" tool ended up being one of the most important things in the whole system. It's the bridge between \"95% OCR accuracy\" and \"actually trustworthy in aerospace.\"\n\nI also integrated the NASA Thesaurus — 18K aerospace terms filtered down to 3.5K propulsion-relevant concepts — so the system handles query expansion properly. \"LOX\" matches \"Liquid Oxygen,\" \"2000 PSI\" finds results mentioning \"13.9 MPa.\" Without this, you're relying on exact keyword matches in a domain where everyone uses different terminology for the same thing.\n\nAnd time-boxed search — engineers ask things like \"what do we know about cryogenic engine failures between 1970 and 1980?\" Filtering by time period before semantic search cuts the search space dramatically. When I tested this, the agent successfully traced the 50-year evolution of cryogenic systems — from passive insulation in the 1970s to active cryo-coolers in the 2020s — without any deep research mode. Just proper filtering and good retrieval.\n\n# What's Coming Next\n\nI've linked all the YouTube streams in the comments below — 15 streams, some of them are 11+ hours long, so obviously that's a lot to sit through. To make things more digestible and actually useful, I'm going to be posting specific problem/solution breakdowns over the next few days, including how I evaluated the system with 10K docs. Each of these topics was genuinely its own nightmare to solve, and I think the details will be helpful for anyone working on similar problems.\n\nI'm also hoping to open-source the document processing pipeline and infrastructure code on GitHub soon, which I think will be genuinely useful for anyone dealing with large-scale document processing — whether it's aerospace or not.\n\nOne last thing — I genuinely want to thank the team behind Claude Code. Being honest, a project like this would realistically take a team of 3-4 engineers working 3-4 months. The document processing pipeline alone, the infrastructure, the agent design, the frontend, evaluation — each of these is a serious body of work. I did it solo in 2 weeks, live on stream, and that would not have been possible without Claude Code, it was in the loop for pretty much all of it. Seriously, thank you to the engineers behind it.\n\nHappy to answer questions, and if you've dealt with similar problems — legacy docs, domain-specific retrieval, scaling document processing — I'd love to hear what you ran into.",
+      "url": "https://v.redd.it/b85n399898hg1",
+      "author": "Uiqueblhats",
+      "created_utc": "2026-02-03 06:56:00",
+      "score": 42,
+      "num_comments": 3,
+      "upvote_ratio": 0.98,
+      "text": "[External Link]",
       "is_original_content": false,
-      "link_flair_text": "Discussion",
-      "permalink": "https://reddit.com/r/LLMDevs/comments/1qxmeee/i_built_rag_for_10k_nasa_docs_1950spresent_in_2/",
-      "domain": "self.LLMDevs",
-      "is_self": true,
+      "link_flair_text": "Resource",
+      "permalink": "https://reddit.com/r/LLMDevs/comments/1qul18d/notebooklm_for_teams/",
+      "domain": "v.redd.it",
+      "is_self": false,
       "comments": [
         {
-          "id": "o3xniw6",
-          "author": "vladimirxi",
-          "text": "Nuts.  Well done on the documentation!  Crazy project.  Well thought out.",
-          "score": 6,
-          "created_utc": "2026-02-06 17:22:02",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o3xpjs5",
-              "author": "Low_Acanthisitta7686",
-              "text": "Thank you!",
-              "score": 3,
-              "created_utc": "2026-02-06 17:31:43",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "o3xvwcn",
-          "author": "ksk99",
-          "text": "Any evaluation metrixs u used, any subset of data set along with queries and results we can use to recreate/learn",
+          "id": "o3axdaf",
+          "author": "Otherwise_Wave9374",
+          "text": "This looks like a great niche community. The \"agents that act, not just chat\" framing is exactly the right line to draw.\n\nIf you end up pinning a starter guide, I would include basics like tool permissioning, memory vs no-memory defaults, and how to keep agent loops bounded so people do not burn tokens endlessly.\n\nI have a few writeups on agent guardrails and patterns here: https://www.agentixlabs.com/blog/",
           "score": 3,
-          "created_utc": "2026-02-06 18:02:03",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o3xxjlq",
-              "author": "Low_Acanthisitta7686",
-              "text": "Yeah! So in the last stream (Part 14) I went through evaluation. Basically, I loaded co-related full docs into Gemini (1M context window) and had it generate complex questions that tested different aspects of the agent — things like cross-document reasoning, degraded documents, negative/boundary tests, and more.   \n  \nThen I evaluated and tested whether the system could find the right set of docs within the 10K-doc space.   \n  \nI felt like this gave me a solid initial test suite to run, which would probably end up being a pretty strong evaluation as well. Sure, I’ll share the dataset and pipeline with the repo soon.",
-              "score": 2,
-              "created_utc": "2026-02-06 18:09:57",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "o3xd6ic",
-          "author": "Low_Acanthisitta7686",
-          "text": "Check the live streams here (15 streams, 140+ hours): [https://www.youtube.com/@rajsuthanofficial7585/streams](https://www.youtube.com/@rajsuthanofficial7585/streams)",
-          "score": 3,
-          "created_utc": "2026-02-06 16:33:17",
-          "is_submitter": true,
-          "replies": [
-            {
-              "id": "o3xz1qw",
-              "author": "flaxseedyup",
-              "text": "You absolute gem of a man. I will definitely be looking at this. Thank you so much for sharing!    \n    \nWhere did you learn the majority of the core skills needed for such a project?    \n    \nDo you rate the “The AI Automators” who are on YouTube?",
-              "score": 5,
-              "created_utc": "2026-02-06 18:17:01",
-              "is_submitter": false,
-              "replies": [
-                {
-                  "id": "o3y00x7",
-                  "author": "Low_Acanthisitta7686",
-                  "text": "haha thanks ❤️\n\nI pretty much learned by building stuff. I was working on my startup and also worked with a few enterprises along the way, but mostly just learned by doing random complex projects!",
-                  "score": 1,
-                  "created_utc": "2026-02-06 18:21:35",
-                  "is_submitter": true,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "o3yeh4z",
-          "author": "makinggrace",
-          "text": "This was a beast of a project. Love it.",
-          "score": 2,
-          "created_utc": "2026-02-06 19:30:43",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o3yfh68",
-              "author": "Low_Acanthisitta7686",
-              "text": "for sure.... thanks!",
-              "score": 1,
-              "created_utc": "2026-02-06 19:35:39",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "o3zizu5",
-          "author": "tehsilentwarrior",
-          "text": "Cool stuff. Will be useful in playing Kerbal 😂\n\nNo but, impressive stuff. Hope to see it soon!",
-          "score": 2,
-          "created_utc": "2026-02-06 22:54:55",
+          "created_utc": "2026-02-03 07:07:29",
           "is_submitter": false,
           "replies": []
         },
         {
-          "id": "o40cczw",
-          "author": "OnlyTimeFan",
-          "text": "Thanks for sharing and spreading the knowledge",
-          "score": 2,
-          "created_utc": "2026-02-07 01:47:02",
+          "id": "o3jnqad",
+          "author": "tsquig",
+          "text": "Similar flexibility here with uploading / source inputs, but a few more options to generate outputs. [NotebookLM but for business](https://implicit.cloud).",
+          "score": 1,
+          "created_utc": "2026-02-04 15:37:15",
           "is_submitter": false,
           "replies": []
         },
         {
-          "id": "o3yvpnv",
-          "author": "No_Wrongdoer41",
-          "text": "Me and a small team are building a platform that can accomplish something comparable in a matter of hours, repeateably, on corpuses of thousands of documents. I'd love your feedback on what we're working in if you don't mind discussing it with me!",
+          "id": "o3gwyij",
+          "author": "DAlmighty",
+          "text": "They have also been doing crazy advertising on Reddit. You’d think that they would just pay the platform for the opportunity already.",
           "score": 1,
-          "created_utc": "2026-02-06 20:56:32",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o3ywgcm",
-              "author": "Low_Acanthisitta7686",
-              "text": "sure",
-              "score": 1,
-              "created_utc": "2026-02-06 21:00:13",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "o3zr9gx",
-          "author": "whyyoudidit",
-          "text": "subbed",
-          "score": 1,
-          "created_utc": "2026-02-06 23:41:55",
+          "created_utc": "2026-02-04 03:45:22",
           "is_submitter": false,
           "replies": []
-        },
-        {
-          "id": "o40685c",
-          "author": "Legitimate-Leek4235",
-          "text": "I wonder if we give this prompt to opus 4.1 and all the agents which built the compiler, will it be able to replicate this",
-          "score": 1,
-          "created_utc": "2026-02-07 01:09:08",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o406bb6",
-          "author": "EditorDisastrous4994",
-          "text": "You should try Reseek. It's an AI second brain that handles semantic search across notes, PDFs, and web content in one place. It might be a good alternative if you want a unified system",
-          "score": 1,
-          "created_utc": "2026-02-07 01:09:40",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o3yhhfr",
-          "author": "satechguy",
-          "text": "Which Ilm wrote such verbose text ;-)",
-          "score": 0,
-          "created_utc": "2026-02-06 19:45:31",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o3yitmx",
-              "author": "Low_Acanthisitta7686",
-              "text": "haha, I wrote it and had claude help polish the english.",
-              "score": 2,
-              "created_utc": "2026-02-06 19:52:08",
-              "is_submitter": true,
-              "replies": [
-                {
-                  "id": "o3zji2u",
-                  "author": "tehsilentwarrior",
-                  "text": "I write a lot too and people these days just think AI did it. \n\nI spent quite a lot of time perfecting my English so when I documented a massive project we have my boss kept asking what AI I used for that .. lol\n\nI just said <my inicials>AI, and he was hilariously confused when he couldn’t find it. I said I trained it myself over the last decades",
-                  "score": 1,
-                  "created_utc": "2026-02-06 22:57:42",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "o3y97qu",
-          "author": "bbahner",
-          "text": "This is awesome! Thanks for sharing. ",
-          "score": 1,
-          "created_utc": "2026-02-06 19:05:07",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o3ybujq",
-              "author": "Low_Acanthisitta7686",
-              "text": "Sure!",
-              "score": 1,
-              "created_utc": "2026-02-06 19:17:55",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
         }
       ]
     },
@@ -876,7 +1064,7 @@
       "url": "https://i.redd.it/glett1s5dvgg1.png",
       "author": "alvinunreal",
       "created_utc": "2026-02-01 11:35:03",
-      "score": 42,
+      "score": 40,
       "num_comments": 7,
       "upvote_ratio": 0.86,
       "text": "[External Link]",
@@ -890,7 +1078,7 @@
           "id": "o2yj0zt",
           "author": "brightheaded",
           "text": "A crumb of context sir",
-          "score": 10,
+          "score": 9,
           "created_utc": "2026-02-01 12:16:29",
           "is_submitter": false,
           "replies": [
@@ -955,52 +1143,6 @@
       ]
     },
     {
-      "id": "1qul18d",
-      "title": "NotebookLM For Teams",
-      "subreddit": "LLMDevs",
-      "url": "https://v.redd.it/b85n399898hg1",
-      "author": "Uiqueblhats",
-      "created_utc": "2026-02-03 06:56:00",
-      "score": 41,
-      "num_comments": 3,
-      "upvote_ratio": 0.98,
-      "text": "[External Link]",
-      "is_original_content": false,
-      "link_flair_text": "Resource",
-      "permalink": "https://reddit.com/r/LLMDevs/comments/1qul18d/notebooklm_for_teams/",
-      "domain": "v.redd.it",
-      "is_self": false,
-      "comments": [
-        {
-          "id": "o3axdaf",
-          "author": "Otherwise_Wave9374",
-          "text": "This looks like a great niche community. The \"agents that act, not just chat\" framing is exactly the right line to draw.\n\nIf you end up pinning a starter guide, I would include basics like tool permissioning, memory vs no-memory defaults, and how to keep agent loops bounded so people do not burn tokens endlessly.\n\nI have a few writeups on agent guardrails and patterns here: https://www.agentixlabs.com/blog/",
-          "score": 3,
-          "created_utc": "2026-02-03 07:07:29",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o3jnqad",
-          "author": "tsquig",
-          "text": "Similar flexibility here with uploading / source inputs, but a few more options to generate outputs. [NotebookLM but for business](https://implicit.cloud).",
-          "score": 1,
-          "created_utc": "2026-02-04 15:37:15",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o3gwyij",
-          "author": "DAlmighty",
-          "text": "They have also been doing crazy advertising on Reddit. You’d think that they would just pay the platform for the opportunity already.",
-          "score": 1,
-          "created_utc": "2026-02-04 03:45:22",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
       "id": "1quxgq9",
       "title": "8 Ways OpenClaw Reduces Context Loss in Long-Running Agents",
       "subreddit": "LLMDevs",
@@ -1029,15 +1171,43 @@
       ]
     },
     {
+      "id": "1qxa658",
+      "title": "Built a Website Crawler + RAG (fixed it last night 😅)",
+      "subreddit": "LLMDevs",
+      "url": "https://www.reddit.com/r/LLMDevs/comments/1qxa658/built_a_website_crawler_rag_fixed_it_last_night/",
+      "author": "Cod3Conjurer",
+      "created_utc": "2026-02-06 06:28:18",
+      "score": 12,
+      "num_comments": 1,
+      "upvote_ratio": 1.0,
+      "text": "I’m **new to RAG** and learning by building projects.  \nAlmost **2 months ago** I made a very simple RAG, but the **crawler & ingestion were hallucinating**, so the answers were bad.\n\nYesterday night (after office stuff 💻), I thought:  \nEveryone is feeding PDFs… **why not try something that’s not PDF ingestion?**\n\nSo I focused on fixing the **real problem — crawling quality**.\n\n🔗 GitHub: [https://github.com/AnkitNayak-eth/CrawlAI-RAG](https://github.com/AnkitNayak-eth/CrawlAI-RAG)\n\n**What’s better now:**\n\n* Playwright-based crawler (handles JS websites)\n* Clean content extraction (no navbar/footer noise)\n* Smarter chunking + deduplication\n* RAG over **entire websites**, not just PDFs\n\nBad crawling = bad RAG.\n\nIf you all want, **I can make this live / online** as well 👀  \nFeedback, suggestions, and ⭐s are welcome!",
+      "is_original_content": false,
+      "link_flair_text": "Discussion",
+      "permalink": "https://reddit.com/r/LLMDevs/comments/1qxa658/built_a_website_crawler_rag_fixed_it_last_night/",
+      "domain": "self.LLMDevs",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "o42m8nd",
+          "author": "dezastrologu",
+          "text": "AI slop post\n\nBut the tool sounds cool. Vibe coded?",
+          "score": 1,
+          "created_utc": "2026-02-07 12:54:00",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
       "id": "1qxbr2z",
       "title": "today's task",
       "subreddit": "LLMDevs",
       "url": "https://i.redd.it/ggk43gavzthg1.jpeg",
       "author": "carsa81",
       "created_utc": "2026-02-06 08:02:13",
-      "score": 13,
-      "num_comments": 2,
-      "upvote_ratio": 0.85,
+      "score": 11,
+      "num_comments": 3,
+      "upvote_ratio": 0.76,
       "text": "[External Link]",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -1049,8 +1219,17 @@
           "id": "o3vayfa",
           "author": "West_Struggle2530",
           "text": "Opus 4.6",
-          "score": 5,
+          "score": 4,
           "created_utc": "2026-02-06 08:27:02",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "o410o0h",
+          "author": "mosquitosarenotcool",
+          "text": "Kimi 2.5",
+          "score": 1,
+          "created_utc": "2026-02-07 04:24:01",
           "is_submitter": false,
           "replies": []
         },
@@ -1058,7 +1237,7 @@
           "id": "o3ziioq",
           "author": "Clean_Moose6832",
           "text": "Codex 5.3 is superior. ",
-          "score": 0,
+          "score": 1,
           "created_utc": "2026-02-06 22:52:20",
           "is_submitter": false,
           "replies": []
@@ -1072,9 +1251,9 @@
       "url": "https://www.reddit.com/r/LLMDevs/comments/1qviqlh/how_to_become_an_ai_engineer_in_2026_what/",
       "author": "DarfleChorf",
       "created_utc": "2026-02-04 08:05:16",
-      "score": 10,
+      "score": 11,
       "num_comments": 13,
-      "upvote_ratio": 0.92,
+      "upvote_ratio": 1.0,
       "text": "Trying to map out a realistic path into AI engineering and getting overwhelmed by contradictory advice.\n\nPython is still non-negotiable, but the \"just build a chatbot\" project approach doesn't cut it anymore. The market looks brutal for entry-level while senior roles are paying crazy money. Prompt engineering as a dedicated job seems dead, but the skill still matters. RAG, agentic AI, and MLOps seem to be where the growth is.\n\nThe part confusing me is traditional ML (sklearn, training models) vs pure LLM/API integration. Some say you need fundamentals, others say most jobs are just orchestrating existing models. With tools like Claude Code changing what coding even means, I'm not sure what skills are actually durable.\n\nFor people who've done this or are hiring:\n\n- What actually separated you from other candidates when you got in?\n- How much traditional ML do you use day-to-day vs LLM orchestration?\n- Best resources that actually helped you, not just ones you heard were good?\n- What does this role even look like in 2027 when agents do more of the work?\n\nNot looking for a generic roadmap. Looking for what's actually working right now.",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -1094,7 +1273,7 @@
               "id": "o3mrjp9",
               "author": "bbahner",
               "text": "Can you be more specific? <grin>",
-              "score": 5,
+              "score": 4,
               "created_utc": "2026-02-05 00:36:52",
               "is_submitter": false,
               "replies": [
@@ -1205,7 +1384,7 @@
       "url": "https://v.redd.it/v0sqp0rh8phg1",
       "author": "MatchSuccessful1253",
       "created_utc": "2026-02-05 16:09:10",
-      "score": 10,
+      "score": 11,
       "num_comments": 1,
       "upvote_ratio": 0.92,
       "text": "[External Link]",
@@ -1233,9 +1412,9 @@
       "url": "https://v.redd.it/y5lvd0tznqhg1",
       "author": "Useful-Process9033",
       "created_utc": "2026-02-05 20:53:02",
-      "score": 10,
+      "score": 9,
       "num_comments": 9,
-      "upvote_ratio": 1.0,
+      "upvote_ratio": 0.91,
       "text": "[External Link]",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -1303,24 +1482,6 @@
       ]
     },
     {
-      "id": "1qxa658",
-      "title": "Built a Website Crawler + RAG (fixed it last night 😅)",
-      "subreddit": "LLMDevs",
-      "url": "https://www.reddit.com/r/LLMDevs/comments/1qxa658/built_a_website_crawler_rag_fixed_it_last_night/",
-      "author": "Cod3Conjurer",
-      "created_utc": "2026-02-06 06:28:18",
-      "score": 10,
-      "num_comments": 0,
-      "upvote_ratio": 0.92,
-      "text": "I’m **new to RAG** and learning by building projects.  \nAlmost **2 months ago** I made a very simple RAG, but the **crawler & ingestion were hallucinating**, so the answers were bad.\n\nYesterday night (after office stuff 💻), I thought:  \nEveryone is feeding PDFs… **why not try something that’s not PDF ingestion?**\n\nSo I focused on fixing the **real problem — crawling quality**.\n\n🔗 GitHub: [https://github.com/AnkitNayak-eth/CrawlAI-RAG](https://github.com/AnkitNayak-eth/CrawlAI-RAG)\n\n**What’s better now:**\n\n* Playwright-based crawler (handles JS websites)\n* Clean content extraction (no navbar/footer noise)\n* Smarter chunking + deduplication\n* RAG over **entire websites**, not just PDFs\n\nBad crawling = bad RAG.\n\nIf you all want, **I can make this live / online** as well 👀  \nFeedback, suggestions, and ⭐s are welcome!",
-      "is_original_content": false,
-      "link_flair_text": "Discussion",
-      "permalink": "https://reddit.com/r/LLMDevs/comments/1qxa658/built_a_website_crawler_rag_fixed_it_last_night/",
-      "domain": "self.LLMDevs",
-      "is_self": true,
-      "comments": []
-    },
-    {
       "id": "1qtgszg",
       "title": "Drowning in 70k+ papers/year. Built an open-source pipeline to find the signal. Feedback wanted.",
       "subreddit": "LLMDevs",
@@ -1329,7 +1490,7 @@
       "created_utc": "2026-02-02 01:08:40",
       "score": 9,
       "num_comments": 5,
-      "upvote_ratio": 0.91,
+      "upvote_ratio": 0.99,
       "text": "Like many of you, I'm struggling to keep up. With over 80k AI papers published last year on arXiv alone, my RSS feeds and keyword alerts are just noise. I was spending more time filtering lists than reading actual research.\n\nTo solve this for myself, a few of us hacked together an open-source pipeline (\"Research Agent\") to automate the pruning process. We're hoping to get feedback from this community on the ranking logic to make it actually useful for researchers.\n\n**How we're currently filtering:**\n\n* **Source:** Fetches recent arXiv papers (CS.AI, CS.ML, etc.).\n* **Semantic Filter:** Uses embeddings to match papers against a specific natural language research brief (not just keywords).\n* **Classification:** An LLM classifies papers as \"In-Scope,\" \"Adjacent,\" or \"Out.\"\n* **\"Moneyball\" Ranking:** Ranks the shortlist based on author citation velocity (via Semantic Scholar) + abstract novelty.\n* **Output:** Generates plain English summaries for the top hits.\n\n**Current Limitations (It's not perfect):**\n\n* Summaries can hallucinate (LLM randomness).\n* Predicting \"influence\" is incredibly hard and noisy.\n* Category coverage is currently limited to CS.\n\n**I need your help:**\n\n1. If you had to rank papers automatically, what signals would *you* trust? (Author history? Institution? Twitter velocity?)\n2. What is the biggest failure mode of current discovery tools for you?\n3. Would you trust an \"agent\" to pre-read for you, or do you only trust your own skimming?\n\nThe tool is hosted here if you want to break it: [https://research-aiagent.streamlit.app/](https://research-aiagent.streamlit.app/)\n\nCode is open source if anyone wants to contribute or fork it.",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -1384,9 +1545,9 @@
       "url": "https://www.reddit.com/r/LLMDevs/comments/1qv6w28/im_building_an_opensource_local_ai_agent_in_go/",
       "author": "iagomussel",
       "created_utc": "2026-02-03 22:46:21",
-      "score": 8,
+      "score": 9,
       "num_comments": 3,
-      "upvote_ratio": 0.9,
+      "upvote_ratio": 0.91,
       "text": "Hey everyone,\n\nI’ve been working on an open-source project called **IRon**: a local-first AI assistant focused on automation, not chat.\n\nThe main idea is:\n\nInstead of using LLMs to “think” and generate long text, IRon translates user input into a small structured format (IR – Intermediate Representation) and executes real tools.\n\nSo most tasks don’t need heavy models.\n\n# What it does\n\nIRon works mainly through Telegram and runs locally.\n\nPipeline:\n\nUser → Router → (optional LLM) → IR (JSON) → Tools → Result\n\nFeatures:\n\n* Deterministic router for common tasks (notes, lists, commands, etc.)\n* Dual output: short human reply + machine IR\n* Tool system (shell, docker, http, code exec, notes, scheduler, addons)\n* Cron-based scheduler\n* Codex/Ollama support for complex reasoning\n* Session isolation per chat\n* Addon system for external tools/adapters\n\n# Why I built it\n\nMost “AI assistants” today:\n\n* Burn tokens on simple things\n* Re-explain everything\n* Don’t integrate well with real systems\n* Lose context easily\n\nI wanted something closer to:\n\n“Natural language → compact instruction → real execution”\n\nLike a mix of:\n\n* cron\n* Makefile\n* shell\n* and LLMs\n\nBut with safety and structure.\n\n# Example\n\nUser:  \n“Remind me to pay rent tomorrow at 9”\n\nIRon:\n\n* Generates IR\n* Schedules cron\n* Uses scheduler tool\n* Confirms in one line\n\nNo long explanation. No wasted tokens.\n\n# Tech stack\n\n* Go\n* Telegram Bot API\n* Codex CLI / Ollama (future)\n* JSON-based IR\n* robfig/cron\n* Plugin system\n\nCurrent status\n\nIt’s usable and evolving.  \nMain focus now:\n\n* DSL for tasks\n* Better scheduling\n* Memory without huge context\n* More deterministic routing\n\n**It's in progress, so there are bugs yet, let me know if you can help.**\n\n# Repo\n\n[https://github.com/iagomussel/IRon](https://github.com/iagomussel/IRon?utm_source=chatgpt.com)\n\n# Looking for feedback\n\nI’m interested in feedback on:\n\n* Architecture\n* IR format\n* DSL ideas\n* Similar projects\n* Security concerns\n\nIf you’re into local AI, automation, or agent systems, I’d love your thoughts.\n\nThanks 🙌",
       "is_original_content": false,
       "link_flair_text": "News",
@@ -1430,9 +1591,9 @@
       "url": "https://www.reddit.com/r/LLMDevs/comments/1qsyhfi/operating_an_llm_as_a_constrained_decision_layer/",
       "author": "NationalIncome1706",
       "created_utc": "2026-02-01 13:29:29",
-      "score": 6,
+      "score": 7,
       "num_comments": 19,
-      "upvote_ratio": 0.75,
+      "upvote_ratio": 0.82,
       "text": "I’m an engineer by background (14+ years in aerospace systems),  \nand recently I’ve been running a **24/7 always-on production system** that uses an LLM as a *constrained decision-making component*.\n\nThe specific application happens to be automated crypto trading,  \nbut this post is **not** about strategies, alpha, or performance.\n\nIt’s about a more general systems problem:\n\n>\n\n# System context (high-level)\n\n* **Runtime:** always-on, unattended, 24/7\n* **Environment:** small edge device (no autoscaling, no human in the loop)\n* **Decision model:** discrete, time-gated decisions\n* **Failure tolerance:** low — incorrect actions have real cost\n\nThe system must continue operating safely even when:\n\n* external APIs are unreliable\n* the LLM produces malformed or inconsistent outputs\n* partial data or timing mismatches occur\n\n# How the LLM is used (and how it is not)\n\nThe LLM is **not** used for prediction, regression, or forecasting.\n\nIt is treated as a **bounded decision layer**:\n\n* It receives only *preprocessed, closed-interval data*\n* It must output exactly one of:\n   * `ENTRY`\n   * `HOLD`\n   * `CLOSE`\n\nThere are no confidence scores, probabilities, or free-form reasoning  \nthat directly affect execution.\n\nIf the response cannot be parsed, times out, or violates the expected format  \n→ **the system defaults to doing nothing**.\n\n# Core design principles\n\n# 1. Decisions only occur at explicit, closed boundaries\n\nThe system never acts on streaming or unfinished data.\n\nAll decisions are gated on **closed time windows**.  \nThis eliminated several classes of failure:\n\n* phantom actions caused by transient states\n* rapid oscillation near thresholds\n* overlapping execution paths\n\nIf the boundary is not closed, the system refuses to act.\n\n# 2. “Do nothing” is the safest default\n\nThe system is intentionally biased toward inaction.\n\n* API error → HOLD\n* LLM timeout → HOLD\n* Partial or inconsistent data → HOLD\n* Conflicting signals → HOLD\n\nIn ambiguous situations, *not acting* is considered the safest outcome.\n\n# 3. Strict separation of concerns\n\nThe system is split into independent layers:\n\n* data preparation\n* LLM-based decision\n* execution\n* logging and notification\n* post-action accounting\n\nEach layer can fail independently without cascading into repeated actions  \nor runaway behavior.\n\nFor example, notifications react only to **confirmed state changes**,  \nnot to intended or predicted actions.\n\n# 4. Features that were intentionally removed\n\nSeveral ideas were tested and then removed after increasing operational risk:\n\n* adaptive or performance-based scaling\n* averaging down / martingale behavior\n* intra-window predictions\n* confidence-weighted LLM actions\n* automatic restart into uncertain internal states\n\nThe system became *more stable* by explicitly **not doing these things**.\n\n# Why I’m sharing this\n\nI’m sharing this to **organize and reflect on lessons learned** from operating  \na non-deterministic LLM component in a live system.\n\nThe feedback here is for personal learning and refinement of system design.  \nAny future write-up would be technical and experience-based,  \nnot monetized and not promotional.\n\n# Looking for discussion\n\nI’d appreciate perspectives from people who have:\n\n* deployed LLMs or ML components in always-on systems\n* dealt with non-determinism and failure modes in production\n* strong opinions on fail-safe vs fail-open design\n\nIf this kind of operational discussion is useful (or not), I’d like to know.\n\n\n\nhttps://preview.redd.it/79npeu8hxvgg1.jpg?width=2048&format=pjpg&auto=webp&s=0be3702d0694e3f1ff0f73c9d8b8e4b8fbf3b548\n\n\n\n*Not selling anything here. Just sharing an operational experience.*",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -1444,7 +1605,7 @@
           "id": "o30gf9h",
           "author": "chris_thoughtcatch",
           "text": "Why use the LLM over a heuristic? Or use the LLM to determine the heuristic?",
-          "score": 3,
+          "score": 5,
           "created_utc": "2026-02-01 18:20:30",
           "is_submitter": false,
           "replies": [
@@ -1605,99 +1766,6 @@
       "comments": []
     },
     {
-      "id": "1qv6z6k",
-      "title": "Natural Language to shell commands tool. Fully local, Ollama powered.",
-      "subreddit": "LLMDevs",
-      "url": "https://www.reddit.com/r/LLMDevs/comments/1qv6z6k/natural_language_to_shell_commands_tool_fully/",
-      "author": "ykushch",
-      "created_utc": "2026-02-03 22:49:38",
-      "score": 6,
-      "num_comments": 2,
-      "upvote_ratio": 1.0,
-      "text": "[ask - natural language to shell commands](https://i.redd.it/vzpbvx06zchg1.gif)\n\nI built a CLI tool that turns natural language into shell commands using Ollama. It runs locally (no API keys, no data egress) and includes safety checks so you don't accidentally `rm -rf` your system.\n\nRepo: [https://github.com/ykushch/ask](https://github.com/ykushch/ask)",
-      "is_original_content": false,
-      "link_flair_text": "Tools",
-      "permalink": "https://reddit.com/r/LLMDevs/comments/1qv6z6k/natural_language_to_shell_commands_tool_fully/",
-      "domain": "self.LLMDevs",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "o3jo2dk",
-          "author": "konmik-android",
-          "text": "I often ask Claude to do that, but having an offline version would be much better. Remembering and typing all parameters of all commands is something I left in 1990x.",
-          "score": 2,
-          "created_utc": "2026-02-04 15:38:47",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o3g2dog",
-          "author": "DataCentricExpert",
-          "text": "Curious if anyone has tried running it with a local dev environment that enforces data masking and auditability?",
-          "score": 1,
-          "created_utc": "2026-02-04 00:50:44",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
-      "id": "1qtm1r7",
-      "title": "How do you debug multi-step agent workflows",
-      "subreddit": "LLMDevs",
-      "url": "https://www.reddit.com/r/LLMDevs/comments/1qtm1r7/how_do_you_debug_multistep_agent_workflows/",
-      "author": "CreditOk5063",
-      "created_utc": "2026-02-02 05:10:21",
-      "score": 6,
-      "num_comments": 5,
-      "upvote_ratio": 1.0,
-      "text": "I've been working on a customer support agent that routes queries to different tools depending on intent. I am essentially building a state-machine style agent using LangGraph, and the state transitions are where the logic keeps drifting. The flow is: classify intent → retrieve relevant docs → generate response → validate output format. Each node works fine in isolation but when the graph runs end to end the failure modes exhibit non-linear behaviors that are hard to replicate. Sometimes the classifier output schema breaks the retriever input, sometimes the context window gets bloated by step 3.\n\nMy current debugging approach is pretty manual. I added verbose logging at each node, dump intermediate state to JSON, and trace back from failures. But the hard part is not finding where it broke, it is understanding why a certain prompt phrasing caused a downstream node to behave differently. LLM outputs are not deterministic so reproducing issues is painful. So I started using Pydantic models for structured output at each step, and let Claude and Beyz coding assistant to help me do sanity check. But it still feels inefficient though. I'm curious how do you test nodes in isolation first or go straight to end-to-end runs? How do you handle the non-determinism problem when debugging state transitions? Is anyone using Pydantic strictly for node-to-node contracts or does the validation overhead add too much latency and retries for production pipelines? ",
-      "is_original_content": false,
-      "link_flair_text": "Discussion",
-      "permalink": "https://reddit.com/r/LLMDevs/comments/1qtm1r7/how_do_you_debug_multistep_agent_workflows/",
-      "domain": "self.LLMDevs",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "o34jm5w",
-          "author": "Zeikos",
-          "text": "> \"Each node works fine in isolation\"\n\nThat phrasing is a bit of a red flag for me.  \nHow do you define \"fine\"?  \n\nA process of 5 steps where each has a 90% success rate is terrible, it'll fail extremely often.  \n\nBe a lot more strict about the reliability of each node.  \nGoing from 90% to 95% is noticeable, going from 95% to 98% is *more* noticeable.  \n90% -> 95% is a 50% improvement, 95% -> 98% is a 60% improvement.  \n\nWhen you have maxed that out then you want to look at each pairs of nodes.  \nWhat nodes produce bad output when they had good input? Why?  \nYou don't care about a bigger scope than the two connections, the other nodes can stay as a black box.  \n\nBe careful to attribute the failure correctly.  \nWhen something fails at step n then you don't care about steps > n (except eventual error-recovery steps).",
-          "score": 3,
-          "created_utc": "2026-02-02 08:55:42",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o33vuq6",
-          "author": "plarkin",
-          "text": "The golden rule: If you can't reproduce it, you can't debug it. Make everything observable, cacheable, and replayable! \n\nAsk your favorite LLM about it ;)",
-          "score": 2,
-          "created_utc": "2026-02-02 05:26:17",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o3413tb",
-          "author": "InvestigatorAlert832",
-          "text": "The current standard approach to address the reproducibility issue is to use an observability platform like langfuse to capture detailed logs, then clean&save them to datasets, then setup evaluators, and finally you can run evals on the dataset to gauge the quality of your node/program.\nIn terms of interfacing between LLM nodes, I personally prefer strongly typed enforcement. There are frameworks built specifically focusing on this - pydantic-ai, instructor.",
-          "score": 1,
-          "created_utc": "2026-02-02 06:07:56",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o341p8f",
-              "author": "InvestigatorAlert832",
-              "text": "I do think the observability platforms on the market are painful to use for the debug & iterate scenario though, and I'm actually working on a tool for this myself. Feel free to DM me if you are interested in being my beta tester :)",
-              "score": 1,
-              "created_utc": "2026-02-02 06:12:53",
-              "is_submitter": false,
-              "replies": []
-            }
-          ]
-        }
-      ]
-    },
-    {
       "id": "1qwmbq0",
       "title": "glm 4.7 swe-bench 73.8% - tested claims on real refactoring tasks, improvement over previous models measurable",
       "subreddit": "LLMDevs",
@@ -1754,37 +1822,92 @@
       ]
     },
     {
-      "id": "1qvvajn",
-      "title": "Build a self-updating wiki from codebases (open source, Apache 2.0)",
+      "id": "1qv6z6k",
+      "title": "Natural Language to shell commands tool. Fully local, Ollama powered.",
       "subreddit": "LLMDevs",
-      "url": "https://www.reddit.com/r/LLMDevs/comments/1qvvajn/build_a_selfupdating_wiki_from_codebases_open/",
-      "author": "Whole-Assignment6240",
-      "created_utc": "2026-02-04 17:44:19",
-      "score": 4,
+      "url": "https://www.reddit.com/r/LLMDevs/comments/1qv6z6k/natural_language_to_shell_commands_tool_fully/",
+      "author": "ykushch",
+      "created_utc": "2026-02-03 22:49:38",
+      "score": 5,
       "num_comments": 2,
-      "upvote_ratio": 0.84,
-      "text": "I recently have been working on a new project to build a self-updating wiki from codebases.\n\nYour code is the source of truth, and documentations out of sync is such a common pain especially in larger teams. Someone refactors a module, and the wiki is already wrong. Nobody updates it until a new engineer asks a question about it.\n\nThis open source project scans your codebases, extracts structured information with LLMs, and generates Markdown documentation with Mermaid diagrams — using CocoIndex + Instructor + Pydantic.\n\nWhat's cool about this example:\n\n• 𝐈𝐧𝐜𝐫𝐞𝐦𝐞𝐧𝐭𝐚𝐥 𝐩𝐫𝐨𝐜𝐞𝐬𝐬𝐢𝐧𝐠 — Only changed files get reprocessed. If you have 20+ projects but only touch one file, CocoIndex only re-analyzes that file — saving 90%+ of LLM cost and compute.\n\n• 𝐒𝐭𝐫𝐮𝐜𝐭𝐮𝐫𝐞𝐝 𝐞𝐱𝐭𝐫𝐚𝐜𝐭𝐢𝐨𝐧 𝐰𝐢𝐭𝐡 𝐋𝐋𝐌𝐬 — We use Pydantic models as the schema with Instructor, so the LLM returns real typed objects — classes, functions, signatures, relationships — not brittle free text you have to regex parse.\n\n• 𝐀𝐬𝐲𝐧𝐜 𝐟𝐢𝐥𝐞 𝐩𝐫𝐨𝐜𝐞𝐬𝐬𝐢𝐧𝐠 — All files in a project get extracted concurrently with asyncio.gather().\n\n• 𝐌𝐞𝐫𝐦𝐚𝐢𝐝 𝐝𝐢𝐚𝐠𝐫𝐚𝐦𝐬 — Auto-generated pipeline visualizations showing how your functions connect across the project.\n\n• 𝐇𝐢𝐞𝐫𝐚𝐫𝐜𝐡𝐢𝐜𝐚𝐥 𝐚𝐠𝐠𝐫𝐞𝐠𝐚𝐭𝐢𝐨𝐧 — Extracts at file level, then aggregates into a unified project summary. Single-file projects skip the aggregation LLM call entirely.\n\nThink: target\\_state = transformation(source\\_state)\n\nThis pattern hooks naturally into PR flows — run it on every merge and your docs stay current without anyone thinking about it.\n\nIf you want to explore the full example (fully open source, with code, APACHE 2.0), it's here:\n\n👉 [https://cocoindex.io/examples-v1/multi-codebase-summarization](https://cocoindex.io/examples-v1/multi-codebase-summarization)\n\nNo locked features behind a paywall / commercial / \"pro\" license\n\nIf you find CocoIndex useful, a star on Github means a lot :)\n\n⭐ [https://github.com/cocoindex-io/cocoindex](https://github.com/cocoindex-io/cocoindex)",
+      "upvote_ratio": 0.86,
+      "text": "[ask - natural language to shell commands](https://i.redd.it/vzpbvx06zchg1.gif)\n\nI built a CLI tool that turns natural language into shell commands using Ollama. It runs locally (no API keys, no data egress) and includes safety checks so you don't accidentally `rm -rf` your system.\n\nRepo: [https://github.com/ykushch/ask](https://github.com/ykushch/ask)",
       "is_original_content": false,
-      "link_flair_text": "Great Resource 🚀",
-      "permalink": "https://reddit.com/r/LLMDevs/comments/1qvvajn/build_a_selfupdating_wiki_from_codebases_open/",
+      "link_flair_text": "Tools",
+      "permalink": "https://reddit.com/r/LLMDevs/comments/1qv6z6k/natural_language_to_shell_commands_tool_fully/",
       "domain": "self.LLMDevs",
       "is_self": true,
       "comments": [
         {
-          "id": "o3l14pb",
-          "author": "Specialist-Echo-7494",
-          "text": "Love it! I think this pipeline is one feature away from industrial-grade... the example is already doing the hard parts (incremental + memoized extraction + structured).\n\nMaybe treat each generated page as a verifiable artifact? - not just Markdown... emit a tiny manifest.json + claims.jsonl sidecar where each sentence / Mermaid edge is a typed claim w/ stable ID + tight provenance (file + symbol + line / col span) + fingerprints (input hashes + model / config + prompt hash).\n\nThen a PR bot / UI can show a “docket” (claims count + manifest hash + receipt links) and fail the check if claims ↔ sources don’t line up.\n\nAlso: maybe sort project / file iteration + render Mermaid from a canonical typed graph to avoid that diff jitter from traversal / format variance?",
+          "id": "o3jo2dk",
+          "author": "konmik-android",
+          "text": "I often ask Claude to do that, but having an offline version would be much better. Remembering and typing all parameters of all commands is something I left in 1990x.",
           "score": 2,
-          "created_utc": "2026-02-04 19:22:54",
+          "created_utc": "2026-02-04 15:38:47",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "o3g2dog",
+          "author": "DataCentricExpert",
+          "text": "Curious if anyone has tried running it with a local dev environment that enforces data masking and auditability?",
+          "score": 1,
+          "created_utc": "2026-02-04 00:50:44",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1qtm1r7",
+      "title": "How do you debug multi-step agent workflows",
+      "subreddit": "LLMDevs",
+      "url": "https://www.reddit.com/r/LLMDevs/comments/1qtm1r7/how_do_you_debug_multistep_agent_workflows/",
+      "author": "CreditOk5063",
+      "created_utc": "2026-02-02 05:10:21",
+      "score": 5,
+      "num_comments": 5,
+      "upvote_ratio": 1.0,
+      "text": "I've been working on a customer support agent that routes queries to different tools depending on intent. I am essentially building a state-machine style agent using LangGraph, and the state transitions are where the logic keeps drifting. The flow is: classify intent → retrieve relevant docs → generate response → validate output format. Each node works fine in isolation but when the graph runs end to end the failure modes exhibit non-linear behaviors that are hard to replicate. Sometimes the classifier output schema breaks the retriever input, sometimes the context window gets bloated by step 3.\n\nMy current debugging approach is pretty manual. I added verbose logging at each node, dump intermediate state to JSON, and trace back from failures. But the hard part is not finding where it broke, it is understanding why a certain prompt phrasing caused a downstream node to behave differently. LLM outputs are not deterministic so reproducing issues is painful. So I started using Pydantic models for structured output at each step, and let Claude and Beyz coding assistant to help me do sanity check. But it still feels inefficient though. I'm curious how do you test nodes in isolation first or go straight to end-to-end runs? How do you handle the non-determinism problem when debugging state transitions? Is anyone using Pydantic strictly for node-to-node contracts or does the validation overhead add too much latency and retries for production pipelines? ",
+      "is_original_content": false,
+      "link_flair_text": "Discussion",
+      "permalink": "https://reddit.com/r/LLMDevs/comments/1qtm1r7/how_do_you_debug_multistep_agent_workflows/",
+      "domain": "self.LLMDevs",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "o34jm5w",
+          "author": "Zeikos",
+          "text": "> \"Each node works fine in isolation\"\n\nThat phrasing is a bit of a red flag for me.  \nHow do you define \"fine\"?  \n\nA process of 5 steps where each has a 90% success rate is terrible, it'll fail extremely often.  \n\nBe a lot more strict about the reliability of each node.  \nGoing from 90% to 95% is noticeable, going from 95% to 98% is *more* noticeable.  \n90% -> 95% is a 50% improvement, 95% -> 98% is a 60% improvement.  \n\nWhen you have maxed that out then you want to look at each pairs of nodes.  \nWhat nodes produce bad output when they had good input? Why?  \nYou don't care about a bigger scope than the two connections, the other nodes can stay as a black box.  \n\nBe careful to attribute the failure correctly.  \nWhen something fails at step n then you don't care about steps > n (except eventual error-recovery steps).",
+          "score": 3,
+          "created_utc": "2026-02-02 08:55:42",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "o33vuq6",
+          "author": "plarkin",
+          "text": "The golden rule: If you can't reproduce it, you can't debug it. Make everything observable, cacheable, and replayable! \n\nAsk your favorite LLM about it ;)",
+          "score": 2,
+          "created_utc": "2026-02-02 05:26:17",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "o3413tb",
+          "author": "InvestigatorAlert832",
+          "text": "The current standard approach to address the reproducibility issue is to use an observability platform like langfuse to capture detailed logs, then clean&save them to datasets, then setup evaluators, and finally you can run evals on the dataset to gauge the quality of your node/program.\nIn terms of interfacing between LLM nodes, I personally prefer strongly typed enforcement. There are frameworks built specifically focusing on this - pydantic-ai, instructor.",
+          "score": 1,
+          "created_utc": "2026-02-02 06:07:56",
           "is_submitter": false,
           "replies": [
             {
-              "id": "o3lsqls",
-              "author": "Whole-Assignment6240",
-              "text": "super cool!! thanks a lot for your suggestions!",
-              "score": 2,
-              "created_utc": "2026-02-04 21:34:23",
-              "is_submitter": true,
+              "id": "o341p8f",
+              "author": "InvestigatorAlert832",
+              "text": "I do think the observability platforms on the market are painful to use for the debug & iterate scenario though, and I'm actually working on a tool for this myself. Feel free to DM me if you are interested in being my beta tester :)",
+              "score": 1,
+              "created_utc": "2026-02-02 06:12:53",
+              "is_submitter": false,
               "replies": []
             }
           ]
@@ -1798,9 +1921,9 @@
       "url": "https://www.reddit.com/r/LLMDevs/comments/1qwf2bh/built_this_because_i_was_tired_of_redoing_ai/",
       "author": "Most_Cardiologist313",
       "created_utc": "2026-02-05 07:39:49",
-      "score": 4,
+      "score": 5,
       "num_comments": 5,
-      "upvote_ratio": 0.75,
+      "upvote_ratio": 0.86,
       "text": "Every Al project I build ends up repeating the same setup: agent reasoning loop, tool calling, API wrapper, bot integration, deployment configs. After doing this too many times, I built a small internal framework to standardize this stuff for myself.\n\nIt handles things like ReACT-style agents, tool execution, API mode, Discord integration, and edge-friendly deployment patterns.\n\nBefore I invest more time into polishing it, I'm curious how are you handling this today? Are you using LangChain/LangGraph, rolling your own, or something else? What parts feel the most painful to maintain?",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -1863,9 +1986,9 @@
       "url": "https://thehackernews.com/2026/01/researchers-find-175000-publicly.html",
       "author": "codes_astro",
       "created_utc": "2026-02-02 19:22:28",
-      "score": 4,
+      "score": 5,
       "num_comments": 0,
-      "upvote_ratio": 0.75,
+      "upvote_ratio": 0.78,
       "text": "[External Link]",
       "is_original_content": false,
       "link_flair_text": "News",
@@ -1873,6 +1996,44 @@
       "domain": "thehackernews.com",
       "is_self": false,
       "comments": []
+    },
+    {
+      "id": "1qvvajn",
+      "title": "Build a self-updating wiki from codebases (open source, Apache 2.0)",
+      "subreddit": "LLMDevs",
+      "url": "https://www.reddit.com/r/LLMDevs/comments/1qvvajn/build_a_selfupdating_wiki_from_codebases_open/",
+      "author": "Whole-Assignment6240",
+      "created_utc": "2026-02-04 17:44:19",
+      "score": 4,
+      "num_comments": 2,
+      "upvote_ratio": 0.84,
+      "text": "I recently have been working on a new project to build a self-updating wiki from codebases.\n\nYour code is the source of truth, and documentations out of sync is such a common pain especially in larger teams. Someone refactors a module, and the wiki is already wrong. Nobody updates it until a new engineer asks a question about it.\n\nThis open source project scans your codebases, extracts structured information with LLMs, and generates Markdown documentation with Mermaid diagrams — using CocoIndex + Instructor + Pydantic.\n\nWhat's cool about this example:\n\n• 𝐈𝐧𝐜𝐫𝐞𝐦𝐞𝐧𝐭𝐚𝐥 𝐩𝐫𝐨𝐜𝐞𝐬𝐬𝐢𝐧𝐠 — Only changed files get reprocessed. If you have 20+ projects but only touch one file, CocoIndex only re-analyzes that file — saving 90%+ of LLM cost and compute.\n\n• 𝐒𝐭𝐫𝐮𝐜𝐭𝐮𝐫𝐞𝐝 𝐞𝐱𝐭𝐫𝐚𝐜𝐭𝐢𝐨𝐧 𝐰𝐢𝐭𝐡 𝐋𝐋𝐌𝐬 — We use Pydantic models as the schema with Instructor, so the LLM returns real typed objects — classes, functions, signatures, relationships — not brittle free text you have to regex parse.\n\n• 𝐀𝐬𝐲𝐧𝐜 𝐟𝐢𝐥𝐞 𝐩𝐫𝐨𝐜𝐞𝐬𝐬𝐢𝐧𝐠 — All files in a project get extracted concurrently with asyncio.gather().\n\n• 𝐌𝐞𝐫𝐦𝐚𝐢𝐝 𝐝𝐢𝐚𝐠𝐫𝐚𝐦𝐬 — Auto-generated pipeline visualizations showing how your functions connect across the project.\n\n• 𝐇𝐢𝐞𝐫𝐚𝐫𝐜𝐡𝐢𝐜𝐚𝐥 𝐚𝐠𝐠𝐫𝐞𝐠𝐚𝐭𝐢𝐨𝐧 — Extracts at file level, then aggregates into a unified project summary. Single-file projects skip the aggregation LLM call entirely.\n\nThink: target\\_state = transformation(source\\_state)\n\nThis pattern hooks naturally into PR flows — run it on every merge and your docs stay current without anyone thinking about it.\n\nIf you want to explore the full example (fully open source, with code, APACHE 2.0), it's here:\n\n👉 [https://cocoindex.io/examples-v1/multi-codebase-summarization](https://cocoindex.io/examples-v1/multi-codebase-summarization)\n\nNo locked features behind a paywall / commercial / \"pro\" license\n\nIf you find CocoIndex useful, a star on Github means a lot :)\n\n⭐ [https://github.com/cocoindex-io/cocoindex](https://github.com/cocoindex-io/cocoindex)",
+      "is_original_content": false,
+      "link_flair_text": "Great Resource 🚀",
+      "permalink": "https://reddit.com/r/LLMDevs/comments/1qvvajn/build_a_selfupdating_wiki_from_codebases_open/",
+      "domain": "self.LLMDevs",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "o3l14pb",
+          "author": "Specialist-Echo-7494",
+          "text": "Love it! I think this pipeline is one feature away from industrial-grade... the example is already doing the hard parts (incremental + memoized extraction + structured).\n\nMaybe treat each generated page as a verifiable artifact? - not just Markdown... emit a tiny manifest.json + claims.jsonl sidecar where each sentence / Mermaid edge is a typed claim w/ stable ID + tight provenance (file + symbol + line / col span) + fingerprints (input hashes + model / config + prompt hash).\n\nThen a PR bot / UI can show a “docket” (claims count + manifest hash + receipt links) and fail the check if claims ↔ sources don’t line up.\n\nAlso: maybe sort project / file iteration + render Mermaid from a canonical typed graph to avoid that diff jitter from traversal / format variance?",
+          "score": 2,
+          "created_utc": "2026-02-04 19:22:54",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o3lsqls",
+              "author": "Whole-Assignment6240",
+              "text": "super cool!! thanks a lot for your suggestions!",
+              "score": 2,
+              "created_utc": "2026-02-04 21:34:23",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        }
+      ]
     }
   ]
 }
