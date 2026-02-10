@@ -1,11 +1,11 @@
 {
   "metadata": {
-    "last_updated": "2026-02-09 09:19:59",
+    "last_updated": "2026-02-10 09:19:59",
     "time_filter": "week",
     "subreddit": "LLMDevs",
     "total_items": 20,
-    "total_comments": 103,
-    "file_size_bytes": 124829
+    "total_comments": 108,
+    "file_size_bytes": 136569
   },
   "items": [
     {
@@ -15,8 +15,8 @@
       "url": "https://www.reddit.com/r/LLMDevs/comments/1qxmeee/i_built_rag_for_10k_nasa_docs_1950spresent_in_2/",
       "author": "Low_Acanthisitta7686",
       "created_utc": "2026-02-06 16:32:09",
-      "score": 223,
-      "num_comments": 37,
+      "score": 239,
+      "num_comments": 39,
       "upvote_ratio": 0.94,
       "text": "**TL;DR:** I designed and built a full RAG system over 10,000 NASA technical documents spanning the 1950s to 2025 — we're talking scanned typewriter reports, handwritten notes, propulsion diagrams, mathematical formulas, failure investigations. Off-the-shelf tools broke down fast. I ended up building a custom pipeline using Qwen3-VL-8B to process what traditional OCR and parsers couldn't handle, ran the whole thing on a single H100 (657,000+ pages, \\~180 pages/min), and built an agentic retrieval system that doesn't just search — it investigates like a domain expert. The architecture is designed to scale to 100K+ documents. Everything was live-streamed (140+ hours across 15 streams), and the GitHub repo for the document processing pipeline and infra is coming soon.\n\nHey everyone, I'm Raj. Over the last 2 weeks, I live-streamed building what turned out to be the most technically challenging project I've taken on — and I wanted to share the experience while it's fresh. This is a long one, I tried to keep it short, but there was too much that I think is genuinely useful to cut.\n\n# The Domain\n\nSo here's the scenario I designed for this project — a fictional aerospace consultancy called \"Meridian Aerospace,\" modeled on very real challenges these companies face.\n\n85,000+ documents accumulated over 70+ years — real documents from NASA's Technical Reports Server (NTRS). Propulsion test reports, failure investigations, component specs, regulatory filings. Engineers spending 4-6 hours per project digging through archives. A missed critical failure mode last quarter because the relevant data was buried in a 1997 test report nobody knew existed.\n\nNow here's what makes these documents painful:\n\n* 1950s–1990s scanned reports — photocopied, faxed, re-scanned, degraded quality\n* Dense technical diagrams everywhere: thrust curves, propulsion schematics, thermal analysis charts\n* Mathematical formulas and engineering equations scattered throughout\n* Domain-specific acronyms (Isp, TWR, LOX, MMH, NTO) that are often never expanded in the text\n* Cross-references between documents — failure reports cite original test data, compliance docs reference design specs\n* Tables spanning multiple pages with nested sub-headers\n\nI used 10,000 documents from NASA's Technical Reports Server as the working dataset, with the architecture designed from day one to handle the full 85K+ and beyond.\n\n# What I Built\n\nI'll walk through the three main layers, but I want to be clear — these aren't independent pieces you build one after another. They feed into each other constantly. Decisions in the document processing layer directly shaped how the agent works, and understanding how engineers actually think (the agent layer) changed how I approached extraction. It's all connected.\n\n# The Document Processing Pipeline\n\nThis is where a huge chunk of the work lived, and honestly where most people underestimate the difficulty. The core realization: **you cannot build good retrieval over bad extractions.** If your chunked text is garbage, no embedding model or re-ranker is going to save you.\n\nI used Docling (from IBM, I know it has a ton of issues — I found workarounds and solved them too) for layout detection — figuring out where tables, figures, formulas, and text blocks sit on each page. Then Qwen3-VL-8B to actually interpret what's in those regions.\n\nA few of the harder problems:\n\n**Formula association:** Docling detects formulas fine, but they lose their position in the document flow. So you get a formula floating at the end of a page with no connection to the paragraph it belongs to. I built a system that paints colored bounding boxes with ID numbers directly onto page screenshots, then asks the VLM \"where does Formula 7 belong relative to these numbered paragraphs?\" Sounds weird, works surprisingly well. Gives you reading-order accuracy without re-OCRing anything.\n\n**Complex tables:** These were probably the single most painful thing to solve. We're talking massive grids — 72 columns by 50 rows of stability data — where position determines meaning. Down arrows mean \"carry this value down.\" Brackets group five rows under \"Unstable.\" Zebra lines and grid lines guide the human eye across dense numbers. Standard OCR reads left-to-right, top-to-bottom and has no idea what to do with any of this. Parsers treat the grid lines as noise or lose alignment if the scan is slightly tilted.\n\nI went through a lot of approaches. Standard markdown extraction lost alignment. CV-based heatmaps and projection lines to detect rows — worked about 80% but too brittle for production. JSON output from the VLM broke constantly on large tables (missed closing brackets). Small models (7B) hallucinated numbers and missed columns entirely.\n\nWhat actually worked was treating the table as a photograph of data rather than a stream of text. Use Docling purely for finding the bounding box coordinates, crop the original high-res page image (no downscaling — that destroys data in dense tables), and send the full-resolution crop to a large VLM. You need 72B+ to hold context across a 30-column table without losing track.\n\nTwo tricks that made a real difference. First, for tables with zebra lines or warped scans, I pre-process the image by drawing red horizontal lines onto it before sending to the VLM — basically a \"digital ruler\" that forces the model to keep row alignment. Second, the prompt strategy — instead of asking for just structured output, I ask for markdown (way more robust than JSON for grid data) plus a \"notes\" field where the model captures visual shorthand. \"If there's a down arrow, note the value is carried down. If there's a bracket, note the grouping.\" The model successfully returned \"unstable\" for rows that didn't explicitly have the text but were visually grouped under an \"Unstable\" bracket.\n\nFor the truly dense tables that still needed more work, I have a fallback that generates a detailed description and serves the raw image alongside it — which honestly, in aerospace, engineers prefer anyway over a potentially wrong structured output. But this isn't a dead end. The digital ruler approach and the prompt strategy were working well, and with more time I think there's a solid solution there. I was time-boxed to 2 weeks for this entire project, so I made the pragmatic call to move on. Might revisit this specifically and share if I make a breakthrough.\n\n**Legacy scan quality:** Documents from the 1960s have noise, \"Confidential\" stamps, hole punches, scan artifacts — and models happily pick all of these up as \"figures.\" Added a classification step asking the VLM: \"Is this a technical diagram or just a document artifact?\" Simple, but it cleaned up a lot of noise.\n\n**The full-page strategy:** I initially tried cropping individual formulas to save tokens. Docling's format detection models missed about 60% of small formulas in dense pages. So I pivoted — if any formula is detected on a page, send the entire page screenshot to the VLM and let it transcribe everything in reading order. More expensive per page (didn't matter as I deployed on a GPU), but the accuracy difference is massive. In this domain, a missed variable isn't a minor bug.\n\n**On OCR,** I didn't actually need traditional OCR for most of the heavy lifting. The figures, tables, and formulas — which are the hardest parts of these documents — were all handled by the VLM pipeline. OCR was only needed as a fallback for pages where the embedded text layer was missing or corrupted. So the approach became: use native text extraction where available, VLM for all the visual/structured content, and OCR only when truly needed. Disabling forced OCR where it wasn't necessary cut processing time significantly.\n\n# H100 Infrastructure & Scaling\n\nProcessing 10K documents — roughly 657,000+ pages — on a single H100 was its own adventure.\n\n**Where it started:** My first attempt was basically a monolithic script. Every worker loaded the PDF, loaded the model onto the GPU, ran inference, unloaded. Workers were fighting each other for GPU memory, CPU, RAM. Everything was crashing. Back-of-the-napkin math said this approach would take somewhere around 28 days for the full dataset. Obviously not going to work.\n\n**The rewrite:** I moved to a proper service-oriented architecture. Separated the CPU-heavy work (Docling parsing, chunking, text extraction) from the GPU-heavy work (VLM inference). Stateless Celery workers handle the CPU side, feeding requests to a persistent vLLM server that does nothing but inference. Redis as the message broker. Took some inspiration from how production ML systems handle millions of requests with limited compute — keep your inference engine as a persistent service, don't have each worker spin it up and tear it down.\n\nThat alone brought the estimate down to maybe 5-9 days. Still not great.\n\n**Then the tuning started.** FP8 quantization because running standard GGUF/Ollama on an H100 is wasting the hardware — FP8 is specifically optimized for Hopper. Concurrency tuning: tested 6, 8, 9, 10 Docling workers. 9 caused instant OOM. 10 saturated the queue. 6 underutilized the GPU. 8 was the sweet spot. Dynamic image scaling for oversized PDFs — some scans were 170MB, crashing workers during bitmap conversion. VRAM memory leak management — usage would creep up batch after batch until it crashed, so I added explicit garbage collection between cycles.\n\n**End result:** \\~2.5 days, running at about 180 pages per minute. From 28 days to 2.5 days on the same hardware, just by thinking about architecture and resource management. Again, could have done better, but was on a time crunch.\n\n# The Agent & Retrieval Layer\n\nThis part tends to get underestimated. Building the agent wasn't just \"wire up some tools to an LLM and write a system prompt.\" A huge amount of time went into two things: understanding the people who would actually use this system, and shaping how the agent itself thinks.\n\nI spent a lot of time with Claude role-playing as different engineer personas — a cautious senior engineer (\"Sandra\") approaching retirement who's seen things go wrong, a junior engineer who searches too narrowly. I was trying to understand: how does their day actually work? How do they use current traditional systems? What's literally going through their mind when they're investigating a failure mode? What are they worried about that they won't say out loud?\n\nThat process shaped everything about the agent. For example — engineers don't just look for failure cases. They specifically look for *success cases* as counter-evidence to validate risky designs. A standard RAG setup completely misses that nuance. Or the fact that a \"question about a valve failure\" might actually be about defending a design decision in a review meeting next week. The agent needs to understand the situation behind the question.\n\nThat understanding fed directly into how I designed the agent's reasoning. One of the bigger realizations was that spiking domain intuition in the system prompt often outperforms complex retrieval engineering. Instead of hardcoding examples, I focused on making the agent think like a propulsion engineer. It should be low-opinionated and already have hypotheses before it runs a single search. When someone mentions a pressure value, it should have intuition about whether that's nominal or concerning. When it finds a document, it should reason about what it means, not just return it. It's not a search tool — it's a reasoning engine with engineering expertise that uses search as one of its tools. And honestly, this is still just at the system prompt level — keeping it low-opinionated, letting the model lean on its own domain knowledge rather than constraining it — but it brings absolute wonders to how the system behaves.\n\nWhat came out of all that work:\n\nThe agent doesn't just search — it investigates. It maintains a working task list and notes, forms hypotheses based on its domain intuition before it even touches the search tool, and updates its understanding as it learns. When a question branches, it spawns sub-agents for parallel research threads. It can navigate — read adjacent chunks, follow cross-references between documents, pull threads across decades of reports.\n\nWhen the text extraction is uncertain — and on 1950s docs, it will be — the agent can request a screenshot of the actual PDF page region to visually verify what it's reading. That \"visual region\" tool ended up being one of the most important things in the whole system. It's the bridge between \"95% OCR accuracy\" and \"actually trustworthy in aerospace.\"\n\nI also integrated the NASA Thesaurus — 18K aerospace terms filtered down to 3.5K propulsion-relevant concepts — so the system handles query expansion properly. \"LOX\" matches \"Liquid Oxygen,\" \"2000 PSI\" finds results mentioning \"13.9 MPa.\" Without this, you're relying on exact keyword matches in a domain where everyone uses different terminology for the same thing.\n\nAnd time-boxed search — engineers ask things like \"what do we know about cryogenic engine failures between 1970 and 1980?\" Filtering by time period before semantic search cuts the search space dramatically. When I tested this, the agent successfully traced the 50-year evolution of cryogenic systems — from passive insulation in the 1970s to active cryo-coolers in the 2020s — without any deep research mode. Just proper filtering and good retrieval.\n\n# What's Coming Next\n\nI've linked all the YouTube streams in the comments below — 15 streams, some of them are 11+ hours long, so obviously that's a lot to sit through. To make things more digestible and actually useful, I'm going to be posting specific problem/solution breakdowns over the next few days, including how I evaluated the system with 10K docs. Each of these topics was genuinely its own nightmare to solve, and I think the details will be helpful for anyone working on similar problems.\n\nI'm also hoping to open-source the document processing pipeline and infrastructure code on GitHub soon, which I think will be genuinely useful for anyone dealing with large-scale document processing — whether it's aerospace or not.\n\nOne last thing — I genuinely want to thank the team behind Claude Code. Being honest, a project like this would realistically take a team of 3-4 engineers working 3-4 months. The document processing pipeline alone, the infrastructure, the agent design, the frontend, evaluation — each of these is a serious body of work. I did it solo in 2 weeks, live on stream, and that would not have been possible without Claude Code, it was in the loop for pretty much all of it. Seriously, thank you to the engineers behind it.\n\nHappy to answer questions, and if you've dealt with similar problems — legacy docs, domain-specific retrieval, scaling document processing — I'd love to hear what you ran into.",
       "is_original_content": false,
@@ -37,7 +37,7 @@
               "id": "o3xxjlq",
               "author": "Low_Acanthisitta7686",
               "text": "Yeah! So in the last stream (Part 14) I went through evaluation. Basically, I loaded co-related full docs into Gemini (1M context window) and had it generate complex questions that tested different aspects of the agent — things like cross-document reasoning, degraded documents, negative/boundary tests, and more.   \n  \nThen I evaluated and tested whether the system could find the right set of docs within the 10K-doc space.   \n  \nI felt like this gave me a solid initial test suite to run, which would probably end up being a pretty strong evaluation as well. Sure, I’ll share the dataset and pipeline with the repo soon.",
-              "score": 3,
+              "score": 4,
               "created_utc": "2026-02-06 18:09:57",
               "is_submitter": true,
               "replies": []
@@ -48,7 +48,7 @@
           "id": "o3xniw6",
           "author": "vladimirxi",
           "text": "Nuts.  Well done on the documentation!  Crazy project.  Well thought out.",
-          "score": 9,
+          "score": 10,
           "created_utc": "2026-02-06 17:22:02",
           "is_submitter": false,
           "replies": [
@@ -56,7 +56,7 @@
               "id": "o3xpjs5",
               "author": "Low_Acanthisitta7686",
               "text": "Thank you!",
-              "score": 3,
+              "score": 4,
               "created_utc": "2026-02-06 17:31:43",
               "is_submitter": true,
               "replies": []
@@ -67,7 +67,7 @@
           "id": "o3xd6ic",
           "author": "Low_Acanthisitta7686",
           "text": "Check the live streams here (15 streams, 140+ hours): [https://www.youtube.com/@rajsuthanofficial7585/streams](https://www.youtube.com/@rajsuthanofficial7585/streams)",
-          "score": 7,
+          "score": 8,
           "created_utc": "2026-02-06 16:33:17",
           "is_submitter": true,
           "replies": [
@@ -75,7 +75,7 @@
               "id": "o3xz1qw",
               "author": "flaxseedyup",
               "text": "You absolute gem of a man. I will definitely be looking at this. Thank you so much for sharing!    \n    \nWhere did you learn the majority of the core skills needed for such a project?    \n    \nDo you rate the “The AI Automators” who are on YouTube?",
-              "score": 4,
+              "score": 5,
               "created_utc": "2026-02-06 18:17:01",
               "is_submitter": false,
               "replies": [
@@ -253,6 +253,44 @@
           "replies": []
         },
         {
+          "id": "o4bwsxb",
+          "author": "Rockingtits",
+          "text": "Super cool!",
+          "score": 2,
+          "created_utc": "2026-02-08 22:24:00",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o4fuhpt",
+              "author": "Low_Acanthisitta7686",
+              "text": "thanks buddy!",
+              "score": 1,
+              "created_utc": "2026-02-09 14:45:55",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "o4di4d3",
+          "author": "JackfruitVivid180",
+          "text": "how can I get started into this ?\n\n",
+          "score": 2,
+          "created_utc": "2026-02-09 03:42:39",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o4furqr",
+              "author": "Low_Acanthisitta7686",
+              "text": "I did a post on this a couple of months back, might be helpful for you - [https://www.reddit.com/r/LLMDevs/comments/1nl9oxo/i\\_built\\_rag\\_systems\\_for\\_enterprises\\_20k\\_docs/](https://www.reddit.com/r/LLMDevs/comments/1nl9oxo/i_built_rag_systems_for_enterprises_20k_docs/)",
+              "score": 2,
+              "created_utc": "2026-02-09 14:47:23",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
           "id": "o3yvpnv",
           "author": "No_Wrongdoer41",
           "text": "Me and a small team are building a platform that can accomplish something comparable in a matter of hours, repeateably, on corpuses of thousands of documents. I'd love your feedback on what we're working in if you don't mind discussing it with me!",
@@ -277,24 +315,6 @@
           "text": "wanted to do the same for my company, but,  i was afraid for legal reasons about hallucinations,  how did you get around that?   i'm also in aviation fyi\n\n",
           "score": 1,
           "created_utc": "2026-02-08 12:51:33",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o4bwsxb",
-          "author": "Rockingtits",
-          "text": "Super cool!",
-          "score": 1,
-          "created_utc": "2026-02-08 22:24:00",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o4di4d3",
-          "author": "JackfruitVivid180",
-          "text": "how can I get started into this ?\n\n",
-          "score": 1,
-          "created_utc": "2026-02-09 03:42:39",
           "is_submitter": false,
           "replies": []
         },
@@ -397,7 +417,7 @@
           "id": "o3kg4v0",
           "author": "qa_anaaq",
           "text": "RAG isn’t dead. It’s perfectly fine and just needs to be used well. Everyone believes context graphs are the next trillion dollar industry. Context graph management at runtime is another flavor of RAG. \n\nRemember that RAG isn’t a narrow term. If something is pulled from somewhere to augment generation, it’s RAG.",
-          "score": 165,
+          "score": 164,
           "created_utc": "2026-02-04 17:48:01",
           "is_submitter": false,
           "replies": [
@@ -405,7 +425,7 @@
               "id": "o3luvt1",
               "author": "isthatashark",
               "text": "The challenge with the name \"RAG\" is that so many people use it as a shorthand to describe semantic search over chunked documents in a vector database. I think the days where you can built any sort of meaningful AI application with that approach are behind us.\n\nAs a pattern, retrieving context and using it to augment the LLM's generation is here to stay.",
-              "score": 23,
+              "score": 25,
               "created_utc": "2026-02-04 21:44:35",
               "is_submitter": false,
               "replies": [
@@ -413,7 +433,7 @@
                   "id": "o3obe76",
                   "author": "FiddlyDink",
                   "text": "What is replacing chunked documents in a vector database for semantic search?",
-                  "score": 10,
+                  "score": 11,
                   "created_utc": "2026-02-05 06:33:25",
                   "is_submitter": false,
                   "replies": []
@@ -443,7 +463,7 @@
               "id": "o3l8dww",
               "author": "valuat",
               "text": "Everyone who?",
-              "score": 4,
+              "score": 5,
               "created_utc": "2026-02-04 19:56:59",
               "is_submitter": false,
               "replies": []
@@ -478,7 +498,7 @@
                   "id": "o3l0y0o",
                   "author": "Agreeable-Market-692",
                   "text": "This is a very outdated view of RAG. Hundreds of papers and dozens of models later and things are much improved.",
-                  "score": 11,
+                  "score": 12,
                   "created_utc": "2026-02-04 19:22:01",
                   "is_submitter": false,
                   "replies": []
@@ -500,7 +520,7 @@
           "id": "o3kfb2f",
           "author": "coffee-praxis",
           "text": "Agent memory alone doesn’t cut it. Let’s say you want grounded facts from a document source that’s too big for context window. You can’t just shove it all in “agent memory” unless you retrieve the correct bits of it somehow. Now you’re back to RAG.",
-          "score": 39,
+          "score": 38,
           "created_utc": "2026-02-04 17:44:16",
           "is_submitter": false,
           "replies": [
@@ -508,7 +528,7 @@
               "id": "o3ltfuv",
               "author": "isthatashark",
               "text": "I hear more people talking about this as semantic memory and thinking of it as one requirement in a bigger set of agent memory requirements rather than just RAG.",
-              "score": 4,
+              "score": 3,
               "created_utc": "2026-02-04 21:37:43",
               "is_submitter": false,
               "replies": []
@@ -525,7 +545,7 @@
                   "id": "o3klea2",
                   "author": "coffee-praxis",
                   "text": "RAG is “**retrieval** augmented generation”. Any DB qualifies.",
-                  "score": 25,
+                  "score": 24,
                   "created_utc": "2026-02-04 18:11:53",
                   "is_submitter": false,
                   "replies": []
@@ -538,7 +558,7 @@
           "id": "o3k9bq3",
           "author": "ethan000024",
           "text": "I’ve been hearing more about agent learning lately too. Agree it’s a promising idea but also mostly hype when I’ve tried to dig into it. The two most interesting projects I’ve seen on this lately are Agent Lightning and Hindsight. Two very different approaches, Agent Lightning relies more on file system. Hindsight is closer to what you described with combining knowledge, episodic memory, etc. Both have learning aspects to it. ",
-          "score": 12,
+          "score": 13,
           "created_utc": "2026-02-04 17:16:30",
           "is_submitter": false,
           "replies": [
@@ -557,7 +577,7 @@
           "id": "o3kcja7",
           "author": "florinandrei",
           "text": "> If RAG is dead, what will replace it?\n\nTATTER\n\nTransformer-Attention Token Tangling for Eventually Rambling",
-          "score": 25,
+          "score": 24,
           "created_utc": "2026-02-04 17:31:27",
           "is_submitter": false,
           "replies": [
@@ -565,7 +585,7 @@
               "id": "o3kielt",
               "author": "Floppy_Muppet",
               "text": "I believe \"token tangling\" is illegal in several states.",
-              "score": 22,
+              "score": 20,
               "created_utc": "2026-02-04 17:58:17",
               "is_submitter": false,
               "replies": []
@@ -601,7 +621,7 @@
                   "id": "o3kvyj2",
                   "author": "leonjetski",
                   "text": "“Mapping sturucted outitites and complex relationships between aæðcapta.”",
-                  "score": 15,
+                  "score": 13,
                   "created_utc": "2026-02-04 18:59:11",
                   "is_submitter": false,
                   "replies": []
@@ -661,7 +681,7 @@
           "id": "o3mtaif",
           "author": "Ok-Owl-7515",
           "text": "I don’t think RAG is dead. Vector-only semantic search is what usually disappoints. What’s replacing it (for me) is hybrid retrieval + memory architecture: FTS/keyword first, then vectors only as fallback, union + rerank, and always return retrieval diagnostics (which backend, hit counts, scores, latency).\n\nThe biggest unlock is in considering embeddings/indexes as versioned, reproducible derived artifacts (model/version + source hash), and controlling changes via a small golden set to prevent silent changes to results. Retrieval is just one “memory surface,” alongside structured state/ledgers and episodic logs.",
-          "score": 3,
+          "score": 4,
           "created_utc": "2026-02-05 00:46:20",
           "is_submitter": false,
           "replies": [
@@ -709,7 +729,7 @@
           "id": "o3kuy2i",
           "author": "metaphorm",
           "text": "my view is that RAG is still a highly relevant technique and the problems it has with accuracy are the current leading edge of LLM application development. agent memory might be a good approach for some classes of problems. \"deep\" agents might be another approach that works, i.e. an agent that has access to tools that allow it to introspect its own results. ",
-          "score": 6,
+          "score": 7,
           "created_utc": "2026-02-04 18:54:41",
           "is_submitter": false,
           "replies": [
@@ -821,7 +841,7 @@
           "id": "o3kz4oq",
           "author": "fabkosta",
           "text": "Downvoted. We had enough \"RAG is dead\" posts here. It's getting silly.",
-          "score": 5,
+          "score": 4,
           "created_utc": "2026-02-04 19:13:36",
           "is_submitter": false,
           "replies": []
@@ -1084,61 +1104,15 @@
       ]
     },
     {
-      "id": "1qul18d",
-      "title": "NotebookLM For Teams",
-      "subreddit": "LLMDevs",
-      "url": "https://v.redd.it/b85n399898hg1",
-      "author": "Uiqueblhats",
-      "created_utc": "2026-02-03 06:56:00",
-      "score": 42,
-      "num_comments": 3,
-      "upvote_ratio": 0.97,
-      "text": "[External Link]",
-      "is_original_content": false,
-      "link_flair_text": "Resource",
-      "permalink": "https://reddit.com/r/LLMDevs/comments/1qul18d/notebooklm_for_teams/",
-      "domain": "v.redd.it",
-      "is_self": false,
-      "comments": [
-        {
-          "id": "o3axdaf",
-          "author": "Otherwise_Wave9374",
-          "text": "This looks like a great niche community. The \"agents that act, not just chat\" framing is exactly the right line to draw.\n\nIf you end up pinning a starter guide, I would include basics like tool permissioning, memory vs no-memory defaults, and how to keep agent loops bounded so people do not burn tokens endlessly.\n\nI have a few writeups on agent guardrails and patterns here: https://www.agentixlabs.com/blog/",
-          "score": 3,
-          "created_utc": "2026-02-03 07:07:29",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o3jnqad",
-          "author": "tsquig",
-          "text": "Similar flexibility here with uploading / source inputs, but a few more options to generate outputs. [NotebookLM but for business](https://implicit.cloud).",
-          "score": 1,
-          "created_utc": "2026-02-04 15:37:15",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o3gwyij",
-          "author": "DAlmighty",
-          "text": "They have also been doing crazy advertising on Reddit. You’d think that they would just pay the platform for the opportunity already.",
-          "score": 1,
-          "created_utc": "2026-02-04 03:45:22",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
       "id": "1quxgq9",
       "title": "8 Ways OpenClaw Reduces Context Loss in Long-Running Agents",
       "subreddit": "LLMDevs",
       "url": "https://codepointer.substack.com/p/openclaw-stop-losing-context-8-techniques",
       "author": "noninertialframe96",
       "created_utc": "2026-02-03 17:01:02",
-      "score": 19,
+      "score": 18,
       "num_comments": 1,
-      "upvote_ratio": 0.83,
+      "upvote_ratio": 0.82,
       "text": "[External Link]",
       "is_original_content": false,
       "link_flair_text": "Resource",
@@ -1152,6 +1126,81 @@
           "text": "Interesting",
           "score": 1,
           "created_utc": "2026-02-04 07:45:01",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1r04wed",
+      "title": "Observations From Using GPT-5.3 Codex and Claude Opus 4.6",
+      "subreddit": "LLMDevs",
+      "url": "https://www.reddit.com/r/LLMDevs/comments/1r04wed/observations_from_using_gpt53_codex_and_claude/",
+      "author": "Arindam_200",
+      "created_utc": "2026-02-09 13:58:50",
+      "score": 16,
+      "num_comments": 6,
+      "upvote_ratio": 0.86,
+      "text": "I tested GPT-5.3 Codex and Claude Opus 4.6 shortly after release to see what actually happens once you stop prompting and start expecting results. Benchmarks are easy to read. Real execution is harder to fake.\n\nBoth models were given the same prompts and left alone to work. The difference showed up fast.\n\nCodex doesn’t hesitate. It commits early, makes reasonable calls on its own, and keeps moving until something usable exists. You don’t feel like you’re co-writing every step. You kick it off, check back, and review what came out. That’s convenient, but it also means you sometimes get decisions you didn’t explicitly ask for.\n\nOpus behaves almost the opposite way. It slows things down, checks its own reasoning, and tries to keep everything internally tidy. That extra caution shows up in the output. Things line up better, explanations make more sense, and fewer surprises appear at the end. The tradeoff is time.\n\nA few things stood out pretty clearly:\n\n* Codex optimizes for momentum, not elegance\n* Opus optimizes for coherence, not speed\n* Codex assumes you’ll iterate anyway\n* Opus assumes you care about getting it right the first time\n\nThe interaction style changes because of that. Codex feels closer to delegating work. Opus feels closer to collaborating on it.\n\nNeither model felt “smarter” than the other. They just burn time in different places. Codex burns it after delivery. Opus burns it before.\n\nIf you care about moving fast and fixing things later, Codex fits that mindset. If you care about clean reasoning and fewer corrections, Opus makes more sense.\n\nI wrote a longer breakdown [here](https://www.tensorlake.ai/blog/claude-opus-4-6-vs-gpt-5-3-codex) with screenshots and timing details in the full post for anyone who wants the deeper context.",
+      "is_original_content": false,
+      "link_flair_text": "Discussion",
+      "permalink": "https://reddit.com/r/LLMDevs/comments/1r04wed/observations_from_using_gpt53_codex_and_claude/",
+      "domain": "self.LLMDevs",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "o4fmz12",
+          "author": "swarmed100",
+          "text": "Opus 4.6 reasons a lot longer than opus 4.5. One negative side I noticed from this is that it is \"better\" at finding delusional logic to explain why a set of facts that are clearly impossible \"make sense\", instead of concluding that some of the assumptions or inputs must be wrong since the set of facts are just impossible together.",
+          "score": 4,
+          "created_utc": "2026-02-09 14:03:48",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o4gbcxu",
+              "author": "External-Yak-371",
+              "text": "As a pro plan user I agree, but it also means my piddly allowance can nearly be consumed in one good planning session",
+              "score": 3,
+              "created_utc": "2026-02-09 16:10:11",
+              "is_submitter": false,
+              "replies": [
+                {
+                  "id": "o4hrtb3",
+                  "author": "Manfluencer10kultra",
+                  "text": "u/External-Yak-371 One git commit request for small refactors in many files (similar refactors) was enough for 48%.  It did notice I missed 5 items that needed to be refactored then used like 20k tokens to fix it, and then it was absolutely perfect.\n\nToo bad it was 50% of my 5h allowance (you get about 9 x 5h on pro at 11% of weekly ...).  In that sense, it was absolutely worthless spending my tokens on it.  \nBut what if I used Sonnet for it? it would have been maybe worse.  \nAnd these are the things that you don't want to do yourself, and want to hand over to AI. You close off your session after a long day, forget to commit all those refactors, but still want a sensible commit instead of \"lots of fixes\".  \nEh this is where AI tooling should come in to save the day, but nope..",
+                  "score": 1,
+                  "created_utc": "2026-02-09 20:21:31",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            },
+            {
+              "id": "o4gcjpr",
+              "author": "cmndr_spanky",
+              "text": "This is pretty worrying but makes sense. More reasoning doesn’t mean better results and often just causes useless “thought loops” that at best just wastes more open credits, at worst fills up context causing it to loose touch with the original request details.\n\nThat said, I’ve never been impressed with any of openAI’s models as coding agents, so I’d suspect opus is still better despite the flaws. We’ll see I guess",
+              "score": 2,
+              "created_utc": "2026-02-09 16:15:52",
+              "is_submitter": false,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "o4gfqe5",
+          "author": "kubrador",
+          "text": "so basically one model is a startup founder and the other is an engineering lead pretending to care about code review",
+          "score": 2,
+          "created_utc": "2026-02-09 16:31:01",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "o4hrdaq",
+          "author": "Manfluencer10kultra",
+          "text": "Bruh, I switched to Codex (Free) and getting incredible usage just on Free and GPT-5.2-Codex High, not even 5.3 and it's just night and day.  Claude put me in a depressive mood, and now I'm back enjoying engineering again.",
+          "score": 2,
+          "created_utc": "2026-02-09 20:19:16",
           "is_submitter": false,
           "replies": []
         }
@@ -1202,9 +1251,9 @@
       "url": "https://i.redd.it/ggk43gavzthg1.jpeg",
       "author": "carsa81",
       "created_utc": "2026-02-06 08:02:13",
-      "score": 13,
+      "score": 15,
       "num_comments": 3,
-      "upvote_ratio": 0.79,
+      "upvote_ratio": 0.83,
       "text": "[External Link]",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -1216,7 +1265,7 @@
           "id": "o3vayfa",
           "author": "West_Struggle2530",
           "text": "Opus 4.6",
-          "score": 5,
+          "score": 6,
           "created_utc": "2026-02-06 08:27:02",
           "is_submitter": false,
           "replies": []
@@ -1236,6 +1285,52 @@
           "text": "Codex 5.3 is superior. ",
           "score": 0,
           "created_utc": "2026-02-06 22:52:20",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1qwdhwq",
+      "title": "I made a Transformer 3x faster by making 75% of tokens \"lazy\". It beats the standard baseline on loss in fixed-time training.",
+      "subreddit": "LLMDevs",
+      "url": "https://www.reddit.com/r/LLMDevs/comments/1qwdhwq/i_made_a_transformer_3x_faster_by_making_75_of/",
+      "author": "Morph2026",
+      "created_utc": "2026-02-05 06:09:15",
+      "score": 12,
+      "num_comments": 3,
+      "upvote_ratio": 1.0,
+      "text": "Hi everyone,\n\nI don't have the compute to train on 100B tokens or write a formal paper right now, so I'm dropping this here for the community to play with.\n\n**The Idea: \"WorkerTransformer\"**\n\nStandard Transformers are inefficient because every single token performs expensive Attention ($O(T^(2)$)) and FFN ($O(T)$) updates. But does every token really need to \"think\" deeply?\n\nI built a sparse-update architecture based on a simple intuition:\n\n1. **Divide & Conquer**: Split tokens into **Workers** (every 4th token) and **Memory** (the rest).\n2. **Workers**: Do the heavy lifting (Full Attention + FFN).\n3. **Memory**: Only do a cheap depthwise conv1d to capture local context (like Mamba/ConvNets) but **skip** the heavy Transformer block.\n4. **In-place Update**: Everything happens in-place. No extra tokens added, no sequence inflation.\n\n**The Result (on T=1024 sequence length):**\n\nI ran a \"battle\" between a Standard Transformer and my WorkerTransformer (same params, layers, dim) on a fixed 5-minute training budget.\n\n* **Standard Transformer**: 3.2 steps/s | Reached Val Loss **1.44**\n* **WorkerTransformer**: 8.0 steps/s (**2.5x speedup**) | Reached Val Loss **1.30**\n\nThe \"lazy\" model didn't just run faster; because it ran 2.5x more steps in the same timeframe, it actually learned **more** and achieved a significantly lower loss. It seems the trade-off of \"sparse compute vs. more iterations\" heavily favors sparse compute here.\n\n**Why I'm sharing this:**\n\nI suspect this could scale. The architecture is **pure PyTorch** (no custom CUDA kernels needed), making it dead simple to modify.\n\nIf you have spare A100s or are looking for a weekend project, I'd love to see someone scale this up to WikiText-103 or RedPajama.\n\n**Code & Benchmarks:** [https://github.com/SuiltaPico/WorkerTransformer](https://github.com/SuiltaPico/WorkerTransformer)\n\nLet me know if you find any flaws in my reasoning or if you manage to break it!",
+      "is_original_content": false,
+      "link_flair_text": "Discussion",
+      "permalink": "https://reddit.com/r/LLMDevs/comments/1qwdhwq/i_made_a_transformer_3x_faster_by_making_75_of/",
+      "domain": "self.LLMDevs",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "o44tfs6",
+          "author": "techperson1234",
+          "text": "Huh. Super interesting!",
+          "score": 1,
+          "created_utc": "2026-02-07 19:49:07",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "o47mb91",
+          "author": "Dangerous-Sale3243",
+          "text": "Interesting. I dont know enough to comment technically, since i am mostly just a user than a creator. The idea seems obvious, or at least an obvious next step facing a problem of optimizing runtime. So my assumption is that this was considered and rejected by a bunch of smart guys at some point in the past few years, for reasons beyond my knowledge.",
+          "score": 1,
+          "created_utc": "2026-02-08 06:19:04",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "o4dsf7h",
+          "author": "Foreign_Skill_6628",
+          "text": "I think you need to do a lot more testing. Do this on some Wikipedia/Shakespeare datasets, and use multiple validation samples using different sampling methodologies. Prove it isn’t a fluke.\n\nYou also need to do holdout testing (benchmarking). How well does it generalize on unseen data compared to traditional transformers?",
+          "score": 1,
+          "created_utc": "2026-02-09 04:50:44",
           "is_submitter": false,
           "replies": []
         }
@@ -1262,7 +1357,7 @@
           "id": "o3kxegl",
           "author": "Number4extraDip",
           "text": "What matters. Solving a specific problem. Being very specific and not just doing what everyone else is doing",
-          "score": 5,
+          "score": 7,
           "created_utc": "2026-02-04 19:05:44",
           "is_submitter": false,
           "replies": [
@@ -1457,9 +1552,9 @@
       "url": "https://v.redd.it/v0sqp0rh8phg1",
       "author": "MatchSuccessful1253",
       "created_utc": "2026-02-05 16:09:10",
-      "score": 9,
+      "score": 10,
       "num_comments": 1,
-      "upvote_ratio": 0.85,
+      "upvote_ratio": 0.92,
       "text": "[External Link]",
       "is_original_content": false,
       "link_flair_text": "Resource",
@@ -1486,8 +1581,8 @@
       "author": "mr_ocotopus",
       "created_utc": "2026-02-08 06:10:48",
       "score": 9,
-      "num_comments": 6,
-      "upvote_ratio": 1.0,
+      "num_comments": 8,
+      "upvote_ratio": 0.92,
       "text": "[External Link]",
       "is_original_content": false,
       "link_flair_text": "News",
@@ -1523,75 +1618,92 @@
               ]
             }
           ]
-        }
-      ]
-    },
-    {
-      "id": "1qzi6ot",
-      "title": "Moltbook - No Human Captcha allows only LLMs post",
-      "subreddit": "LLMDevs",
-      "url": "https://i.redd.it/85cc0i50nbig1.png",
-      "author": "hasmcp",
-      "created_utc": "2026-02-08 19:25:50",
-      "score": 9,
-      "num_comments": 5,
-      "upvote_ratio": 0.74,
-      "text": "[External Link]",
-      "is_original_content": false,
-      "link_flair_text": "Discussion",
-      "permalink": "https://reddit.com/r/LLMDevs/comments/1qzi6ot/moltbook_no_human_captcha_allows_only_llms_post/",
-      "domain": "i.redd.it",
-      "is_self": false,
-      "comments": [
-        {
-          "id": "o4ckqbm",
-          "author": "dezastrologu",
-          "text": "Why do we still care about moltbook",
-          "score": 2,
-          "created_utc": "2026-02-09 00:40:22",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o4d8oco",
-              "author": "hasmcp",
-              "text": "My interest on the brilliant idea came for dealing with the spams and/or unwanted inputs. I found it clever. The developers are trying innovative ways and enjoying the moment.",
-              "score": 3,
-              "created_utc": "2026-02-09 02:50:29",
-              "is_submitter": true,
-              "replies": [
-                {
-                  "id": "o4e5tbx",
-                  "author": "HumanDrone8721",
-                  "text": "So soon to verify that you're no robot you'll have to use a robot?",
-                  "score": 2,
-                  "created_utc": "2026-02-09 06:36:39",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
         },
         {
-          "id": "o4b61ea",
-          "author": "Moliri-Eremitis",
-          "text": "Interesting. How long was the verification window?",
+          "id": "o4frssh",
+          "author": "mr-KSA",
+          "text": "This is truly valuable data. However, I feel that benchmarks and other metrics are unfortunately no longer providing anything beyond a general overview. The situation has become so multifaceted that it is becoming quite frustrating. To clarify: a 4B model specifically designed for translation can outperform an 80B model. Furthermore, the quality between different levels of quantization is, regrettably, inconsistent. I also suspect that many current models are being specifically fine-tuned to inflate these benchmark scores.\n\nIn my view, empirical experience is paramount. For instance, I have observed significant performance gaps between Q8 and Q4 quantization, particularly in MoE models. While a model like GPT-OSS 20B might be too 'clumsy' for my specific workflows, another user might prefer it over GPT-4. It ultimately depends on your specific use case. Because I utilize long, complex system prompts that require strict adherence to sequential instructions, models like GLM-4.7 or Granite 4 yield better results for me than Qwen 80B. For others, the opposite may be true.\n\nThe difference between Q4 and Q8 becomes especially pronounced in extended tasks where a structured 'flow' isn't utilized; a single logical error can lead to an irreversible divergence in the output. However, if a multi-model flow is implemented where each model is assigned a single task, Q4 is often sufficient. That said, I have encountered cases where a Qwen 30B (A3B) at Q8 provided answers that even a Qwen 80B at Q4 could not. I realize, of course, that many might disagree with this assessment.",
           "score": 1,
-          "created_utc": "2026-02-08 20:09:14",
+          "created_utc": "2026-02-09 14:31:02",
           "is_submitter": false,
           "replies": [
             {
-              "id": "o4bh7z1",
-              "author": "_tony_lewis",
-              "text": "Seems to be 30s and if you are incorrect it locks, one of my agents made a formatting mistake so list a post",
-              "score": 2,
-              "created_utc": "2026-02-08 21:05:21",
-              "is_submitter": false,
+              "id": "o4gtwta",
+              "author": "mr_ocotopus",
+              "text": "Hey, I agree to what you are saying.   \nAs LLM's get deployed on more and more systems there will be many \"right kind\" of ways to use it.   \nLike you have observed in your case it could be Q4 or Q8.   \nWhat compressGPT is trying to do is, provide a high level API to build the right kind of model that you would need. And if this particular flow does not workout you can itterate with other models/experiments faster - But since fine-tuning and quantising is a powerful tool it will be helpful to check weather a model passed down this pipeline will work or not. \n\nTLDR;   \nModels are \"correct model\" for a specific task, compressGPT offers one way of building \"right model\"",
+              "score": 1,
+              "created_utc": "2026-02-09 17:38:21",
+              "is_submitter": true,
               "replies": []
             }
           ]
         }
       ]
+    },
+    {
+      "id": "1qygq2b",
+      "title": "We have developed a different architecture for LLM that does not work on transformers but works on the principles of reservoir computing and energy modelling. It remains constant on vRAM as we scale context unlike transformers.",
+      "subreddit": "LLMDevs",
+      "url": "https://i.redd.it/3830vd8tc3ig1.jpeg",
+      "author": "Dry_Oil2597",
+      "created_utc": "2026-02-07 15:30:45",
+      "score": 9,
+      "num_comments": 3,
+      "upvote_ratio": 1.0,
+      "text": "[External Link]",
+      "is_original_content": false,
+      "link_flair_text": "Discussion",
+      "permalink": "https://reddit.com/r/LLMDevs/comments/1qygq2b/we_have_developed_a_different_architecture_for/",
+      "domain": "i.redd.it",
+      "is_self": false,
+      "comments": [
+        {
+          "id": "o43s4zy",
+          "author": "HumanDrone8721",
+          "text": "That's lovely, now publish it, open source it and let us train models based on it with opensource data sets, like the ones from Olmo series, and this way we can compare the efficiency and accuracy of the new method. I think I still have $200 on thinker.ai so I could do a test run for you if you publish the pipeline for training and inference.",
+          "score": 10,
+          "created_utc": "2026-02-07 16:43:12",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "o4ezthp",
+          "author": "Noddybear",
+          "text": "What perplexity?",
+          "score": 1,
+          "created_utc": "2026-02-09 11:23:18",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o4f049r",
+              "author": "Dry_Oil2597",
+              "text": "For average over 10k msmarco docs its 18",
+              "score": 1,
+              "created_utc": "2026-02-09 11:25:57",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "1r0lbvd",
+      "title": "Mixture-of-Models routing beats single LLMs on SWE-Bench via task specialization",
+      "subreddit": "LLMDevs",
+      "url": "https://www.reddit.com/r/LLMDevs/comments/1r0lbvd/mixtureofmodels_routing_beats_single_llms_on/",
+      "author": "botirkhaltaev",
+      "created_utc": "2026-02-10 00:10:22",
+      "score": 9,
+      "num_comments": 0,
+      "upvote_ratio": 1.0,
+      "text": "I’ve been looking at per-task results on SWE-Bench Verified and noticed something that leaderboard averages hide: different models consistently solve *different* subsets of tasks.\n\nEven the top overall model on the leaderboard fails a non-trivial number of tasks that other models reliably solve, and the reverse is also true. This suggests strong task-level specialization rather than one model being strictly better.\n\nTo test this, I built a **Mixture-of-Models architecture**, which is different from traditional routing that just defaults to the strongest aggregate model most of the time. The goal isn’t to route to a single model as often as possible, but to exploit complementary strengths between models.\n\nConcretely:\n\n* The problem description is embedded\n* It’s assigned to a semantic cluster (learned from general coding data, not SWE-Bench)\n* Each cluster has learned per-model success statistics\n* The task is routed to the historically strongest model for that *type* of problem\n\nImportantly, this does **not** route the top aggregate model for the majority of tasks. Several clusters consistently route to other models where they outperform it, even though it has the highest overall score.\n\nThere’s no new foundation model, no test-time search, and no repo execution, just a lightweight gating mechanism over multiple models.\n\nUsing this Mixture-of-Models setup, the system reaches 75.6% on SWE-Bench, exceeding single-model baselines (\\~74%). The takeaway isn’t the absolute number, but the mechanism: leaderboard aggregates hide complementary strengths, and mixture architectures can capture a higher ceiling than any single model.\n\nBlog with details and methodology here: [https://nordlyslabs.com/blog/hypernova](https://nordlyslabs.com/blog/hypernova)\n\nGithub: the framework is open source ! [https://github.com/Nordlys-Labs/nordlys](https://github.com/Nordlys-Labs/nordlys)\n\nML/AI Research Community Discord: [https://discord.gg/dqW7BBrq](https://discord.gg/dqW7BBrq)",
+      "is_original_content": false,
+      "link_flair_text": "News",
+      "permalink": "https://reddit.com/r/LLMDevs/comments/1r0lbvd/mixtureofmodels_routing_beats_single_llms_on/",
+      "domain": "self.LLMDevs",
+      "is_self": true,
+      "comments": []
     },
     {
       "id": "1qv6w28",
@@ -1640,30 +1752,69 @@
       ]
     },
     {
-      "id": "1qygq2b",
-      "title": "We have developed a different architecture for LLM that does not work on transformers but works on the principles of reservoir computing and energy modelling. It remains constant on vRAM as we scale context unlike transformers.",
+      "id": "1qzi6ot",
+      "title": "Moltbook - No Human Captcha allows only LLMs post",
       "subreddit": "LLMDevs",
-      "url": "https://i.redd.it/3830vd8tc3ig1.jpeg",
-      "author": "Dry_Oil2597",
-      "created_utc": "2026-02-07 15:30:45",
+      "url": "https://i.redd.it/85cc0i50nbig1.png",
+      "author": "hasmcp",
+      "created_utc": "2026-02-08 19:25:50",
       "score": 7,
-      "num_comments": 1,
-      "upvote_ratio": 0.9,
+      "num_comments": 6,
+      "upvote_ratio": 0.64,
       "text": "[External Link]",
       "is_original_content": false,
       "link_flair_text": "Discussion",
-      "permalink": "https://reddit.com/r/LLMDevs/comments/1qygq2b/we_have_developed_a_different_architecture_for/",
+      "permalink": "https://reddit.com/r/LLMDevs/comments/1qzi6ot/moltbook_no_human_captcha_allows_only_llms_post/",
       "domain": "i.redd.it",
       "is_self": false,
       "comments": [
         {
-          "id": "o43s4zy",
-          "author": "HumanDrone8721",
-          "text": "That's lovely, now publish it, open source it and let us train models based on it with opensource data sets, like the ones from Olmo series, and this way we can compare the efficiency and accuracy of the new method. I think I still have $200 on thinker.ai so I could do a test run for you if you publish the pipeline for training and inference.",
-          "score": 8,
-          "created_utc": "2026-02-07 16:43:12",
+          "id": "o4ckqbm",
+          "author": "dezastrologu",
+          "text": "Why do we still care about moltbook",
+          "score": 1,
+          "created_utc": "2026-02-09 00:40:22",
           "is_submitter": false,
-          "replies": []
+          "replies": [
+            {
+              "id": "o4d8oco",
+              "author": "hasmcp",
+              "text": "My interest on the brilliant idea came for dealing with the spams and/or unwanted inputs. I found it clever. The developers are trying innovative ways and enjoying the moment.",
+              "score": 3,
+              "created_utc": "2026-02-09 02:50:29",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "o4e5tbx",
+                  "author": "HumanDrone8721",
+                  "text": "So soon to verify that you're no robot you'll have to use a robot?",
+                  "score": 3,
+                  "created_utc": "2026-02-09 06:36:39",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "o4b61ea",
+          "author": "Moliri-Eremitis",
+          "text": "Interesting. How long was the verification window?",
+          "score": 1,
+          "created_utc": "2026-02-08 20:09:14",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o4bh7z1",
+              "author": "_tony_lewis",
+              "text": "Seems to be 30s and if you are incorrect it locks, one of my agents made a formatting mistake so list a post",
+              "score": 2,
+              "created_utc": "2026-02-08 21:05:21",
+              "is_submitter": false,
+              "replies": []
+            }
+          ]
         }
       ]
     },
@@ -1676,7 +1827,7 @@
       "created_utc": "2026-02-07 16:45:11",
       "score": 7,
       "num_comments": 0,
-      "upvote_ratio": 0.71,
+      "upvote_ratio": 0.73,
       "text": "[External Link]",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -1693,8 +1844,8 @@
       "author": "Ok-Satisfaction945",
       "created_utc": "2026-02-08 07:14:07",
       "score": 7,
-      "num_comments": 16,
-      "upvote_ratio": 0.9,
+      "num_comments": 19,
+      "upvote_ratio": 1.0,
       "text": "Why python over golang? Current on my first year of mechatronics looking to expand and get ahead. I just bought a Jetson Orin nano I would like to start tinkering with. I understand python is the right now but from research I done I feel like golang really got more potential overall. Would love to hear from people in this space.",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -1807,6 +1958,24 @@
           "replies": []
         },
         {
+          "id": "o4g4xhm",
+          "author": "BidWestern1056",
+          "text": "most science researchers in ml/RL/AI use python so it is the most natural to use for any adjacent spaces because there will not be as many custom libraries in golang for specific scientific/matrix/tensor operations so for these you will have to pass to python or an equivalent in another language if it exists anyway so easier just to do it all in python. ",
+          "score": 1,
+          "created_utc": "2026-02-09 15:39:28",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "o4gdd59",
+          "author": "soopazoupy",
+          "text": "python because nearly every AI stack assumes python first e.g. PyTorch, TensorFlow, ROS2 tooling, OpenCV, CUDA bindings, and most example repos you’ll find are python native. small bonus with python is that it got libraries like pydantic to make it easy to structure inputs/outputs cleanly and newer tooling around it fits nicely when you start building ai powered or sensor-heavy pipelines. go is excellent for building reliable infrastructure, but the robotics/ML ecosystem around it is thinner so you’ll fight the tooling more often. that doesn’t mean go is less potential tho but just that it's in a different lane",
+          "score": 1,
+          "created_utc": "2026-02-09 16:19:47",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
           "id": "o486z4n",
           "author": "Novel_Leading_7541",
           "text": "You don’t need to choose—learn both lightly; with vibe coding and AI tools now, the language matters way less than understanding the problem 🙂",
@@ -1821,6 +1990,15 @@
               "score": 1,
               "created_utc": "2026-02-08 11:55:02",
               "is_submitter": true,
+              "replies": []
+            },
+            {
+              "id": "o4fl0y9",
+              "author": "m98789",
+              "text": "Not entirely true.\n\nThough the spirit of what you saying is true, in practice, you do need to select a language (and library ecosystem) that LLMs have a lot of training data on.",
+              "score": 1,
+              "created_utc": "2026-02-09 13:52:33",
+              "is_submitter": false,
               "replies": []
             }
           ]
@@ -1950,93 +2128,48 @@
       ]
     },
     {
-      "id": "1qulg4u",
-      "title": "n8n vs gumloop",
+      "id": "1qy8ptz",
+      "title": "Your agent's 100% pass rate on 10 runs is statistically compatible with 72% true reliability. Here's the math and a way to fix your CI.",
       "subreddit": "LLMDevs",
-      "url": "https://www.reddit.com/r/LLMDevs/comments/1qulg4u/n8n_vs_gumloop/",
-      "author": "OkWestern5",
-      "created_utc": "2026-02-03 07:19:52",
-      "score": 6,
-      "num_comments": 0,
-      "upvote_ratio": 1.0,
-      "text": "If you’re looking into n8n vs Gumloop, you’re probably not trying to find the “best” tool in general. You’re trying to understand which workflow automation platforms actually fit how your team works day to day. That’s where this comparison comes from. I also looked at a [broader comparison table](https://docs.google.com/spreadsheets/d/1zQr6iThp2fR-TLNMvSYHgx2ghSrzbYIduO4vX_jlHig/edit?gid=1301024975#gid=1301024975) of workflow automation platforms where n8n is listed, which helped set some baseline context.\n\n# High-level difference\n\n* **Gumloop** is built for business teams that want to automate workflows without involving engineering.\n* **n8n** is built for developer-first teams that want full control, even if that means more setup and maintenance.\n\nThis difference shows up across the product, from the editor to pricing and integrations.\n\n# Ease of use\n\n**Gumloop**  \nGumloop lets you focus on the business problem rather than implementation.\n\n* Visual, easy-to-follow canvas\n* Pre-built actions for common business tools\n* AI features included by default\n* Custom steps without deep technical knowledge\n\nMost teams can get useful workflows running quickly.\n\n**n8n**  \nn8n prioritizes flexibility over simplicity.\n\n* Node-by-node configuration\n* Direct access to APIs, JSON, and JavaScript\n\nYou gain more control, but also more responsibility for building and maintaining workflows.\n\n# Integrations and flexibility\n\nBoth platforms support tools like Google Workspace, Slack, Salesforce, and Notion.\n\n* **n8n** offers broader coverage via community-built nodes, but requires manual setup and upkeep.\n* **Gumloop** focuses on the integrations business teams actually use, with AI-assisted ways to extend them when needed.\n\nIn the **n8n vs Gumloop** comparison, this is often where teams weigh flexibility against effort.\n\n# Pricing and ownership\n\n* **Gumloop** bundles AI models, scraping, enrichment, and data sources into its plans.\n* **n8n** charges per execution, with AI and data services managed and billed separately.\n\nNeither approach is better by default - it depends on whether you prefer bundled convenience or modular control.\n\n# Final thoughts\n\nThe real distinction in n8n vs Gumloop is how much work you want around your automation. Gumloop minimizes it early on, while n8n gives you more room later if you’re willing to manage it.\n\nWhich side do you lean toward - simplicity or control?",
-      "is_original_content": false,
-      "link_flair_text": "Discussion",
-      "permalink": "https://reddit.com/r/LLMDevs/comments/1qulg4u/n8n_vs_gumloop/",
-      "domain": "self.LLMDevs",
-      "is_self": true,
-      "comments": []
-    },
-    {
-      "id": "1qwdhwq",
-      "title": "I made a Transformer 3x faster by making 75% of tokens \"lazy\". It beats the standard baseline on loss in fixed-time training.",
-      "subreddit": "LLMDevs",
-      "url": "https://www.reddit.com/r/LLMDevs/comments/1qwdhwq/i_made_a_transformer_3x_faster_by_making_75_of/",
-      "author": "Morph2026",
-      "created_utc": "2026-02-05 06:09:15",
+      "url": "https://www.reddit.com/r/LLMDevs/comments/1qy8ptz/your_agents_100_pass_rate_on_10_runs_is/",
+      "author": "Better_Accident8064",
+      "created_utc": "2026-02-07 08:39:48",
       "score": 6,
       "num_comments": 3,
-      "upvote_ratio": 0.88,
-      "text": "Hi everyone,\n\nI don't have the compute to train on 100B tokens or write a formal paper right now, so I'm dropping this here for the community to play with.\n\n**The Idea: \"WorkerTransformer\"**\n\nStandard Transformers are inefficient because every single token performs expensive Attention ($O(T^(2)$)) and FFN ($O(T)$) updates. But does every token really need to \"think\" deeply?\n\nI built a sparse-update architecture based on a simple intuition:\n\n1. **Divide & Conquer**: Split tokens into **Workers** (every 4th token) and **Memory** (the rest).\n2. **Workers**: Do the heavy lifting (Full Attention + FFN).\n3. **Memory**: Only do a cheap depthwise conv1d to capture local context (like Mamba/ConvNets) but **skip** the heavy Transformer block.\n4. **In-place Update**: Everything happens in-place. No extra tokens added, no sequence inflation.\n\n**The Result (on T=1024 sequence length):**\n\nI ran a \"battle\" between a Standard Transformer and my WorkerTransformer (same params, layers, dim) on a fixed 5-minute training budget.\n\n* **Standard Transformer**: 3.2 steps/s | Reached Val Loss **1.44**\n* **WorkerTransformer**: 8.0 steps/s (**2.5x speedup**) | Reached Val Loss **1.30**\n\nThe \"lazy\" model didn't just run faster; because it ran 2.5x more steps in the same timeframe, it actually learned **more** and achieved a significantly lower loss. It seems the trade-off of \"sparse compute vs. more iterations\" heavily favors sparse compute here.\n\n**Why I'm sharing this:**\n\nI suspect this could scale. The architecture is **pure PyTorch** (no custom CUDA kernels needed), making it dead simple to modify.\n\nIf you have spare A100s or are looking for a weekend project, I'd love to see someone scale this up to WikiText-103 or RedPajama.\n\n**Code & Benchmarks:** [https://github.com/SuiltaPico/WorkerTransformer](https://github.com/SuiltaPico/WorkerTransformer)\n\nLet me know if you find any flaws in my reasoning or if you manage to break it!",
-      "is_original_content": false,
-      "link_flair_text": "Discussion",
-      "permalink": "https://reddit.com/r/LLMDevs/comments/1qwdhwq/i_made_a_transformer_3x_faster_by_making_75_of/",
-      "domain": "self.LLMDevs",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "o44tfs6",
-          "author": "techperson1234",
-          "text": "Huh. Super interesting!",
-          "score": 1,
-          "created_utc": "2026-02-07 19:49:07",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o47mb91",
-          "author": "Dangerous-Sale3243",
-          "text": "Interesting. I dont know enough to comment technically, since i am mostly just a user than a creator. The idea seems obvious, or at least an obvious next step facing a problem of optimizing runtime. So my assumption is that this was considered and rejected by a bunch of smart guys at some point in the past few years, for reasons beyond my knowledge.",
-          "score": 1,
-          "created_utc": "2026-02-08 06:19:04",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o4dsf7h",
-          "author": "Foreign_Skill_6628",
-          "text": "I think you need to do a lot more testing. Do this on some Wikipedia/Shakespeare datasets, and use multiple validation samples using different sampling methodologies. Prove it isn’t a fluke.\n\nYou also need to do holdout testing (benchmarking). How well does it generalize on unseen data compared to traditional transformers?",
-          "score": 1,
-          "created_utc": "2026-02-09 04:50:44",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
-      "id": "1qzm5bo",
-      "title": "Skill Seekers v3.0.0 - Universal doc preprocessor for AI systems",
-      "subreddit": "LLMDevs",
-      "url": "https://www.reddit.com/r/LLMDevs/comments/1qzm5bo/skill_seekers_v300_universal_doc_preprocessor_for/",
-      "author": "Critical-Pea-8782",
-      "created_utc": "2026-02-08 21:56:24",
-      "score": 5,
-      "num_comments": 1,
-      "upvote_ratio": 0.86,
-      "text": "TL;DR: One command converts docs into any AI format.\n\n  The Problem: Every AI project needs documentation preprocessing:\n\n  • RAG pipelines need clean, chunked text\n  • AI coding tools need structured knowledge\n  • Claude/GPT need formatted skills\n\n  Everyone rebuilds the same scrapers.\n\n  The Solution:\n\n  pip install skill-seekers\n  skill-seekers scrape --config react.json\n\n  16 Output Formats:\n\n   RAG/Vectors: LangChain, LlamaIndex, Chroma, FAISS, Haystack, Qdrant, Weaviate\n\n   AI Coding: Cursor, Windsurf, Cline, Continue.dev\n\n   AI Platforms: Claude, Gemini, OpenAI\n\n   Generic: Markdown\n\n  26 MCP Tools: Your AI agent can now prepare its own knowledge:\n\n  • scrape_docs, scrape_github, scrape_pdf\n  • package_skill, install_skill\n  • And 21 more...\n\n  Stats:\n\n  • 58,512 lines of Python\n  • 1,852 tests\n  • 100 test files\n  • 12 example projects\n  • 18 integration guides\n\n  Cloud & CI/CD:\n\n  # Upload to S3\n  skill-seekers cloud upload output/ --provider s3 --bucket my-bucket\n\n  # GitHub Action available\n\n  Links:\n\n  • GitHub: https://github.com/yusufkaraaslan/Skill_Seekers\n  • Website: https://skillseekersweb.com\n  • PyPI: pip install skill-seekers\n\n  Just launched v3.0.0 today. Happy to answer any questions!\n",
+      "upvote_ratio": 0.8,
+      "text": "I ran a LangGraph agent with Claude 3.5 Haiku on a trivial task (\"What is 15 * 37?\") across 100 trials. Pass rate: 70%. Not 95%, not 99%. Seventy percent on a calculator task.\n\nThe interesting part isn't that agents fail — everyone here knows that. It's that **single-run evals can't detect it.** If you run 10 trials and get 10/10, Wilson score CI at 95% confidence gives you [0.722, 1.000]. Your \"perfect\" result is statistically compatible with a system that fails 28% of the time.\n\nThis matters for CI/CD. Most teams either skip agent evals in their pipeline or run each test once and assert pass/fail. Both approaches have the same problem: they can't distinguish a 95%-reliable agent from a 70%-reliable one unless you run enough trials.\n\n**What actually works for catching regressions:**\n\nRun each test case N times (N >= 20 makes a real difference). Compute Wilson CI on the pass rate. Compare against your baseline using Fisher exact test instead of naive diff. Use Benjamini-Hochberg correction if you're testing multiple cases simultaneously — otherwise you'll get false alarms.\n\nFor failure attribution: group trials into pass/fail, compare tool call distributions at each step, pick the step with the lowest Fisher p-value. This gives you \"step 2 tool selection is the bottleneck\" instead of \"test failed.\"\n\nI open-sourced the framework I built for this: [agentrial](https://github.com/alepot55/agentrial). It wraps any Python callable and has adapters for LangGraph, CrewAI, AutoGen, Pydantic AI, OpenAI Agents SDK, and smolagents. YAML config, runs in CI, exit code 1 on statistically significant regression.\n\n```\nbasic-math      20/20  CI=[0.839, 1.000]  PASS\nmulti-step      14/20  CI=[0.480, 0.862]  FAIL\n  → Step 2: tool selection diverges (p=0.003)\n```\n\nCurious how others are handling this. Are you running multi-trial evals in CI? Using soft thresholds? Something else entirely?\n",
       "is_original_content": false,
       "link_flair_text": "Tools",
-      "permalink": "https://reddit.com/r/LLMDevs/comments/1qzm5bo/skill_seekers_v300_universal_doc_preprocessor_for/",
+      "permalink": "https://reddit.com/r/LLMDevs/comments/1qy8ptz/your_agents_100_pass_rate_on_10_runs_is/",
       "domain": "self.LLMDevs",
       "is_self": true,
       "comments": [
         {
-          "id": "o4bzwzh",
-          "author": "Critical-Pea-8782",
-          "text": "hi please feel free to leave a any feedback you want and lets talk about it :) ",
+          "id": "o41ydxz",
+          "author": "Thick-Protection-458",
+          "text": "\\> Your agent's 100% pass rate\n\nWell, isn't it clear?\n\nI mean that's fucking heuristic rather than predictable algorithm. With additional sampling randomness.\n\nYou can never have 100% working solution in such a case. You can have (unknown to you yet) distribution of test results you can't reliably distinguish from 100%.",
+          "score": 5,
+          "created_utc": "2026-02-07 09:17:22",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o420e97",
+              "author": "Better_Accident8064",
+              "text": "Exactly. You can't distinguish true 100% from a sample that happened to look like 100%. But you can quantify it.\n\n20/20 passes gives a Wilson 95% CI of \\[0.839, 1.000\\], so your \"perfect\" score is compatible with 84% true reliability. agentrial just makes this math explicit and wires it into CI/CD.",
+              "score": 1,
+              "created_utc": "2026-02-07 09:37:38",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "o43me85",
+          "author": "lionmeetsviking",
+          "text": "I use this: https://github.com/madviking/pydantic-llm-tester",
           "score": 1,
-          "created_utc": "2026-02-08 22:40:44",
-          "is_submitter": true,
+          "created_utc": "2026-02-07 16:15:01",
+          "is_submitter": false,
           "replies": []
         }
       ]
