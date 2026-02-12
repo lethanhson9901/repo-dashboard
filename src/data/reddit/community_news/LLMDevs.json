@@ -1,11 +1,11 @@
 {
   "metadata": {
-    "last_updated": "2026-02-11 17:29:57",
+    "last_updated": "2026-02-12 17:15:22",
     "time_filter": "week",
     "subreddit": "LLMDevs",
     "total_items": 20,
-    "total_comments": 72,
-    "file_size_bytes": 111020
+    "total_comments": 76,
+    "file_size_bytes": 118661
   },
   "items": [
     {
@@ -15,7 +15,7 @@
       "url": "https://www.reddit.com/r/LLMDevs/comments/1qxmeee/i_built_rag_for_10k_nasa_docs_1950spresent_in_2/",
       "author": "Low_Acanthisitta7686",
       "created_utc": "2026-02-06 16:32:09",
-      "score": 252,
+      "score": 254,
       "num_comments": 44,
       "upvote_ratio": 0.95,
       "text": "**TL;DR:** I designed and built a full RAG system over 10,000 NASA technical documents spanning the 1950s to 2025 — we're talking scanned typewriter reports, handwritten notes, propulsion diagrams, mathematical formulas, failure investigations. Off-the-shelf tools broke down fast. I ended up building a custom pipeline using Qwen3-VL-8B to process what traditional OCR and parsers couldn't handle, ran the whole thing on a single H100 (657,000+ pages, \\~180 pages/min), and built an agentic retrieval system that doesn't just search — it investigates like a domain expert. The architecture is designed to scale to 100K+ documents. Everything was live-streamed (140+ hours across 15 streams), and the GitHub repo for the document processing pipeline and infra is coming soon.\n\nHey everyone, I'm Raj. Over the last 2 weeks, I live-streamed building what turned out to be the most technically challenging project I've taken on — and I wanted to share the experience while it's fresh. This is a long one, I tried to keep it short, but there was too much that I think is genuinely useful to cut.\n\n# The Domain\n\nSo here's the scenario I designed for this project — a fictional aerospace consultancy called \"Meridian Aerospace,\" modeled on very real challenges these companies face.\n\n85,000+ documents accumulated over 70+ years — real documents from NASA's Technical Reports Server (NTRS). Propulsion test reports, failure investigations, component specs, regulatory filings. Engineers spending 4-6 hours per project digging through archives. A missed critical failure mode last quarter because the relevant data was buried in a 1997 test report nobody knew existed.\n\nNow here's what makes these documents painful:\n\n* 1950s–1990s scanned reports — photocopied, faxed, re-scanned, degraded quality\n* Dense technical diagrams everywhere: thrust curves, propulsion schematics, thermal analysis charts\n* Mathematical formulas and engineering equations scattered throughout\n* Domain-specific acronyms (Isp, TWR, LOX, MMH, NTO) that are often never expanded in the text\n* Cross-references between documents — failure reports cite original test data, compliance docs reference design specs\n* Tables spanning multiple pages with nested sub-headers\n\nI used 10,000 documents from NASA's Technical Reports Server as the working dataset, with the architecture designed from day one to handle the full 85K+ and beyond.\n\n# What I Built\n\nI'll walk through the three main layers, but I want to be clear — these aren't independent pieces you build one after another. They feed into each other constantly. Decisions in the document processing layer directly shaped how the agent works, and understanding how engineers actually think (the agent layer) changed how I approached extraction. It's all connected.\n\n# The Document Processing Pipeline\n\nThis is where a huge chunk of the work lived, and honestly where most people underestimate the difficulty. The core realization: **you cannot build good retrieval over bad extractions.** If your chunked text is garbage, no embedding model or re-ranker is going to save you.\n\nI used Docling (from IBM, I know it has a ton of issues — I found workarounds and solved them too) for layout detection — figuring out where tables, figures, formulas, and text blocks sit on each page. Then Qwen3-VL-8B to actually interpret what's in those regions.\n\nA few of the harder problems:\n\n**Formula association:** Docling detects formulas fine, but they lose their position in the document flow. So you get a formula floating at the end of a page with no connection to the paragraph it belongs to. I built a system that paints colored bounding boxes with ID numbers directly onto page screenshots, then asks the VLM \"where does Formula 7 belong relative to these numbered paragraphs?\" Sounds weird, works surprisingly well. Gives you reading-order accuracy without re-OCRing anything.\n\n**Complex tables:** These were probably the single most painful thing to solve. We're talking massive grids — 72 columns by 50 rows of stability data — where position determines meaning. Down arrows mean \"carry this value down.\" Brackets group five rows under \"Unstable.\" Zebra lines and grid lines guide the human eye across dense numbers. Standard OCR reads left-to-right, top-to-bottom and has no idea what to do with any of this. Parsers treat the grid lines as noise or lose alignment if the scan is slightly tilted.\n\nI went through a lot of approaches. Standard markdown extraction lost alignment. CV-based heatmaps and projection lines to detect rows — worked about 80% but too brittle for production. JSON output from the VLM broke constantly on large tables (missed closing brackets). Small models (7B) hallucinated numbers and missed columns entirely.\n\nWhat actually worked was treating the table as a photograph of data rather than a stream of text. Use Docling purely for finding the bounding box coordinates, crop the original high-res page image (no downscaling — that destroys data in dense tables), and send the full-resolution crop to a large VLM. You need 72B+ to hold context across a 30-column table without losing track.\n\nTwo tricks that made a real difference. First, for tables with zebra lines or warped scans, I pre-process the image by drawing red horizontal lines onto it before sending to the VLM — basically a \"digital ruler\" that forces the model to keep row alignment. Second, the prompt strategy — instead of asking for just structured output, I ask for markdown (way more robust than JSON for grid data) plus a \"notes\" field where the model captures visual shorthand. \"If there's a down arrow, note the value is carried down. If there's a bracket, note the grouping.\" The model successfully returned \"unstable\" for rows that didn't explicitly have the text but were visually grouped under an \"Unstable\" bracket.\n\nFor the truly dense tables that still needed more work, I have a fallback that generates a detailed description and serves the raw image alongside it — which honestly, in aerospace, engineers prefer anyway over a potentially wrong structured output. But this isn't a dead end. The digital ruler approach and the prompt strategy were working well, and with more time I think there's a solid solution there. I was time-boxed to 2 weeks for this entire project, so I made the pragmatic call to move on. Might revisit this specifically and share if I make a breakthrough.\n\n**Legacy scan quality:** Documents from the 1960s have noise, \"Confidential\" stamps, hole punches, scan artifacts — and models happily pick all of these up as \"figures.\" Added a classification step asking the VLM: \"Is this a technical diagram or just a document artifact?\" Simple, but it cleaned up a lot of noise.\n\n**The full-page strategy:** I initially tried cropping individual formulas to save tokens. Docling's format detection models missed about 60% of small formulas in dense pages. So I pivoted — if any formula is detected on a page, send the entire page screenshot to the VLM and let it transcribe everything in reading order. More expensive per page (didn't matter as I deployed on a GPU), but the accuracy difference is massive. In this domain, a missed variable isn't a minor bug.\n\n**On OCR,** I didn't actually need traditional OCR for most of the heavy lifting. The figures, tables, and formulas — which are the hardest parts of these documents — were all handled by the VLM pipeline. OCR was only needed as a fallback for pages where the embedded text layer was missing or corrupted. So the approach became: use native text extraction where available, VLM for all the visual/structured content, and OCR only when truly needed. Disabling forced OCR where it wasn't necessary cut processing time significantly.\n\n# H100 Infrastructure & Scaling\n\nProcessing 10K documents — roughly 657,000+ pages — on a single H100 was its own adventure.\n\n**Where it started:** My first attempt was basically a monolithic script. Every worker loaded the PDF, loaded the model onto the GPU, ran inference, unloaded. Workers were fighting each other for GPU memory, CPU, RAM. Everything was crashing. Back-of-the-napkin math said this approach would take somewhere around 28 days for the full dataset. Obviously not going to work.\n\n**The rewrite:** I moved to a proper service-oriented architecture. Separated the CPU-heavy work (Docling parsing, chunking, text extraction) from the GPU-heavy work (VLM inference). Stateless Celery workers handle the CPU side, feeding requests to a persistent vLLM server that does nothing but inference. Redis as the message broker. Took some inspiration from how production ML systems handle millions of requests with limited compute — keep your inference engine as a persistent service, don't have each worker spin it up and tear it down.\n\nThat alone brought the estimate down to maybe 5-9 days. Still not great.\n\n**Then the tuning started.** FP8 quantization because running standard GGUF/Ollama on an H100 is wasting the hardware — FP8 is specifically optimized for Hopper. Concurrency tuning: tested 6, 8, 9, 10 Docling workers. 9 caused instant OOM. 10 saturated the queue. 6 underutilized the GPU. 8 was the sweet spot. Dynamic image scaling for oversized PDFs — some scans were 170MB, crashing workers during bitmap conversion. VRAM memory leak management — usage would creep up batch after batch until it crashed, so I added explicit garbage collection between cycles.\n\n**End result:** \\~2.5 days, running at about 180 pages per minute. From 28 days to 2.5 days on the same hardware, just by thinking about architecture and resource management. Again, could have done better, but was on a time crunch.\n\n# The Agent & Retrieval Layer\n\nThis part tends to get underestimated. Building the agent wasn't just \"wire up some tools to an LLM and write a system prompt.\" A huge amount of time went into two things: understanding the people who would actually use this system, and shaping how the agent itself thinks.\n\nI spent a lot of time with Claude role-playing as different engineer personas — a cautious senior engineer (\"Sandra\") approaching retirement who's seen things go wrong, a junior engineer who searches too narrowly. I was trying to understand: how does their day actually work? How do they use current traditional systems? What's literally going through their mind when they're investigating a failure mode? What are they worried about that they won't say out loud?\n\nThat process shaped everything about the agent. For example — engineers don't just look for failure cases. They specifically look for *success cases* as counter-evidence to validate risky designs. A standard RAG setup completely misses that nuance. Or the fact that a \"question about a valve failure\" might actually be about defending a design decision in a review meeting next week. The agent needs to understand the situation behind the question.\n\nThat understanding fed directly into how I designed the agent's reasoning. One of the bigger realizations was that spiking domain intuition in the system prompt often outperforms complex retrieval engineering. Instead of hardcoding examples, I focused on making the agent think like a propulsion engineer. It should be low-opinionated and already have hypotheses before it runs a single search. When someone mentions a pressure value, it should have intuition about whether that's nominal or concerning. When it finds a document, it should reason about what it means, not just return it. It's not a search tool — it's a reasoning engine with engineering expertise that uses search as one of its tools. And honestly, this is still just at the system prompt level — keeping it low-opinionated, letting the model lean on its own domain knowledge rather than constraining it — but it brings absolute wonders to how the system behaves.\n\nWhat came out of all that work:\n\nThe agent doesn't just search — it investigates. It maintains a working task list and notes, forms hypotheses based on its domain intuition before it even touches the search tool, and updates its understanding as it learns. When a question branches, it spawns sub-agents for parallel research threads. It can navigate — read adjacent chunks, follow cross-references between documents, pull threads across decades of reports.\n\nWhen the text extraction is uncertain — and on 1950s docs, it will be — the agent can request a screenshot of the actual PDF page region to visually verify what it's reading. That \"visual region\" tool ended up being one of the most important things in the whole system. It's the bridge between \"95% OCR accuracy\" and \"actually trustworthy in aerospace.\"\n\nI also integrated the NASA Thesaurus — 18K aerospace terms filtered down to 3.5K propulsion-relevant concepts — so the system handles query expansion properly. \"LOX\" matches \"Liquid Oxygen,\" \"2000 PSI\" finds results mentioning \"13.9 MPa.\" Without this, you're relying on exact keyword matches in a domain where everyone uses different terminology for the same thing.\n\nAnd time-boxed search — engineers ask things like \"what do we know about cryogenic engine failures between 1970 and 1980?\" Filtering by time period before semantic search cuts the search space dramatically. When I tested this, the agent successfully traced the 50-year evolution of cryogenic systems — from passive insulation in the 1970s to active cryo-coolers in the 2020s — without any deep research mode. Just proper filtering and good retrieval.\n\n# What's Coming Next\n\nI've linked all the YouTube streams in the comments below — 15 streams, some of them are 11+ hours long, so obviously that's a lot to sit through. To make things more digestible and actually useful, I'm going to be posting specific problem/solution breakdowns over the next few days, including how I evaluated the system with 10K docs. Each of these topics was genuinely its own nightmare to solve, and I think the details will be helpful for anyone working on similar problems.\n\nI'm also hoping to open-source the document processing pipeline and infrastructure code on GitHub soon, which I think will be genuinely useful for anyone dealing with large-scale document processing — whether it's aerospace or not.\n\nOne last thing — I genuinely want to thank the team behind Claude Code. Being honest, a project like this would realistically take a team of 3-4 engineers working 3-4 months. The document processing pipeline alone, the infrastructure, the agent design, the frontend, evaluation — each of these is a serious body of work. I did it solo in 2 weeks, live on stream, and that would not have been possible without Claude Code, it was in the loop for pretty much all of it. Seriously, thank you to the engineers behind it.\n\nHappy to answer questions, and if you've dealt with similar problems — legacy docs, domain-specific retrieval, scaling document processing — I'd love to hear what you ran into.",
@@ -56,7 +56,7 @@
               "id": "o3xpjs5",
               "author": "Low_Acanthisitta7686",
               "text": "Thank you!",
-              "score": 4,
+              "score": 5,
               "created_utc": "2026-02-06 17:31:43",
               "is_submitter": true,
               "replies": []
@@ -451,9 +451,9 @@
       "url": "https://www.reddit.com/r/LLMDevs/comments/1r1oa4i/epsteinfilesrag_building_a_rag_pipeline_on_2m/",
       "author": "Cod3Conjurer",
       "created_utc": "2026-02-11 05:01:53",
-      "score": 49,
-      "num_comments": 18,
-      "upvote_ratio": 0.88,
+      "score": 162,
+      "num_comments": 29,
+      "upvote_ratio": 0.92,
       "text": "I love playing around with RAG and AI, optimizing every layer to squeeze out better performance. Last night I thought: why not tackle something massive?\n\nTook the Epstein Files dataset from Hugging Face (teyler/epstein-files-20k) – 2 million+ pages of trending news and documents. The cleaning, chunking, and optimization challenges are exactly what excites me.\n\nWhat I built:\n\n\\- Full RAG pipeline with optimized data processing\n\n\\- Processed 2M+ pages (cleaning, chunking, vectorization)\n\n\\- Semantic search & Q&A over massive dataset\n\n\\- Constantly tweaking for better retrieval & performance\n\n\\- Python, MIT Licensed, open source\n\nWhy I built this:\n\nIt’s trending, real-world data at scale, the perfect playground.\n\nWhen you operate at scale, every optimization matters. This project lets me experiment with RAG architectures, data pipelines, and AI performance tuning on real-world workloads.\n\nRepo: [https://github.com/AnkitNayak-eth/EpsteinFiles-RAG](https://github.com/AnkitNayak-eth/EpsteinFiles-RAG)\n\nOpen to ideas, optimizations, and technical discussions!",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -462,10 +462,77 @@
       "is_self": true,
       "comments": [
         {
+          "id": "o4s8hek",
+          "author": "TylerDurdenFan",
+          "text": ">The cleaning, chunking, and optimization challenges are exactly what excites me\n\nJust try to not get too excited around that material, mkay?",
+          "score": 22,
+          "created_utc": "2026-02-11 11:48:06",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o4sctpa",
+              "author": "Cod3Conjurer",
+              "text": "He he 😂",
+              "score": -12,
+              "created_utc": "2026-02-11 12:20:13",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "o4xu1u2",
+                  "author": "kexxty",
+                  "text": "Bro...this is not a laughing matter",
+                  "score": 2,
+                  "created_utc": "2026-02-12 06:27:23",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "o4tf78a",
+          "author": "Significant-Crow-974",
+          "text": "It would be marvellous to run this over the full set of unredacted files.\nI am hoping that the FBI who have illegally redacted information do not now delete that hoard of documents.\nI hope that when they finally manage to charge Trump and the Epstein class that they will be able to utilise a tool such as this to make their prosecutions more effective.\nWell done and Thank you!",
+          "score": 7,
+          "created_utc": "2026-02-11 15:52:18",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o4tgqt7",
+              "author": "Cod3Conjurer",
+              "text": "The goal here is purely technical, building better retrieval over large unstructured datasets.  \nAt the end of the day, it’s an engineering experiment, not a legal authority.  \n",
+              "score": 2,
+              "created_utc": "2026-02-11 15:59:29",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "o4tqxae",
+                  "author": "Significant-Crow-974",
+                  "text": "Yes. Fully appreciate that. Actually, I created a similar RAG for the first tranche of documents. Just as an exercise to see how a RAG could cope with so many documents.\nI would say that it was a partial success. Great insight.",
+                  "score": 2,
+                  "created_utc": "2026-02-11 16:46:46",
+                  "is_submitter": false,
+                  "replies": []
+                },
+                {
+                  "id": "o4wndcx",
+                  "author": "Klutzy_Celebration80",
+                  "text": "Might be interesting to see if you could have it un-redact the documents",
+                  "score": 1,
+                  "created_utc": "2026-02-12 01:33:02",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
           "id": "o4r00lr",
           "author": "[deleted]",
           "text": "[deleted]",
-          "score": 7,
+          "score": 6,
           "created_utc": "2026-02-11 05:12:38",
           "is_submitter": false,
           "replies": [
@@ -490,75 +557,8 @@
                   "id": "o4sf4yp",
                   "author": "[deleted]",
                   "text": "[deleted]",
-                  "score": -7,
+                  "score": -6,
                   "created_utc": "2026-02-11 12:36:23",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "o4s8hek",
-          "author": "TylerDurdenFan",
-          "text": ">The cleaning, chunking, and optimization challenges are exactly what excites me\n\nJust try to not get too excited around that material, mkay?",
-          "score": 7,
-          "created_utc": "2026-02-11 11:48:06",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o4sctpa",
-              "author": "Cod3Conjurer",
-              "text": "He he 😂",
-              "score": -2,
-              "created_utc": "2026-02-11 12:20:13",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "o4reucl",
-          "author": "kondasamy",
-          "text": "I think you should checkout - [https://jmail.world/jemini](https://jmail.world/jemini)",
-          "score": 5,
-          "created_utc": "2026-02-11 07:17:33",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o4rf5lj",
-              "author": "Cod3Conjurer",
-              "text": "Yeeha i have seen that \nBut it is currently broken",
-              "score": -1,
-              "created_utc": "2026-02-11 07:20:23",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "o4tf78a",
-          "author": "Significant-Crow-974",
-          "text": "It would be marvellous to run this over the full set of unredacted files.\nI am hoping that the FBI who have illegally redacted information do not now delete that hoard of documents.\nI hope that when they finally manage to charge Trump and the Epstein class that they will be able to utilise a tool such as this to make their prosecutions more effective.\nWell done and Thank you!",
-          "score": 2,
-          "created_utc": "2026-02-11 15:52:18",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o4tgqt7",
-              "author": "Cod3Conjurer",
-              "text": "The goal here is purely technical, building better retrieval over large unstructured datasets.  \nAt the end of the day, it’s an engineering experiment, not a legal authority.  \n",
-              "score": 2,
-              "created_utc": "2026-02-11 15:59:29",
-              "is_submitter": true,
-              "replies": [
-                {
-                  "id": "o4tqxae",
-                  "author": "Significant-Crow-974",
-                  "text": "Yes. Fully appreciate that. Actually, I created a similar RAG for the first tranche of documents. Just as an exercise to see how a RAG could cope with so many documents.\nI would say that it was a partial success. Great insight.",
-                  "score": 1,
-                  "created_utc": "2026-02-11 16:46:46",
                   "is_submitter": false,
                   "replies": []
                 }
@@ -570,7 +570,7 @@
           "id": "o4tfnfq",
           "author": "DaRandomStoner",
           "text": "I was hoping you had the newly released documents in this... until we get these new documents processed through an OCR and into an organized data structure, we can't really go through them properly. \n\nIt would cost a good amount to process all the new documents so that we can include them in databases like this... it's all just compute costs though. DeepSeek's OCR is open-source and can run on most PCs. If a bunch of people got together we could expand databases like this to include all the newly released docs...",
-          "score": 1,
+          "score": 5,
           "created_utc": "2026-02-11 15:54:22",
           "is_submitter": false,
           "replies": [
@@ -578,8 +578,94 @@
               "id": "o4th0by",
               "author": "Cod3Conjurer",
               "text": "Yeah, this version doesn’t include the newly released documents yet. If those are raw scans, they’d need OCR + structured parsing before indexing.  \nThe main cost is compute and storage, not complexity.  \nA collaborative effort could definitely speed that up, especially for batching OCR and preprocessing at scale.",
-              "score": 1,
+              "score": 2,
               "created_utc": "2026-02-11 16:00:42",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "o4reucl",
+          "author": "kondasamy",
+          "text": "I think you should checkout - [https://jmail.world/jemini](https://jmail.world/jemini)",
+          "score": 6,
+          "created_utc": "2026-02-11 07:17:33",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o4rf5lj",
+              "author": "Cod3Conjurer",
+              "text": "Yeeha i have seen that \nBut it is currently broken",
+              "score": 0,
+              "created_utc": "2026-02-11 07:20:23",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "o4x1h4q",
+          "author": "jdsweet653",
+          "text": "Great app! What did your ingestion py look like for the db?",
+          "score": 2,
+          "created_utc": "2026-02-12 02:57:32",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o4xjmq3",
+              "author": "Cod3Conjurer",
+              "text": "The ingestion was pretty simple, I loaded the cleaned JSON, chunked it (400 size, 80 overlap), deduped chunks using SHA-256 hashing, generated MiniLM embeddings, and upserted everything into ChromaDB with source metadata.",
+              "score": 1,
+              "created_utc": "2026-02-12 05:01:16",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "o4yp6ur",
+                  "author": "DanRan88",
+                  "text": "Any idea on the size of the DB? ",
+                  "score": 2,
+                  "created_utc": "2026-02-12 11:22:44",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "o4xgy3s",
+          "author": "Big3gg",
+          "text": "See if it knows how to make jerky",
+          "score": 2,
+          "created_utc": "2026-02-12 04:41:10",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o4xj134",
+              "author": "Cod3Conjurer",
+              "text": "he he 🤣",
+              "score": 0,
+              "created_utc": "2026-02-12 04:56:42",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "o4y92qs",
+          "author": "DarKresnik",
+          "text": "Amazing job. Now we need someone to \"find\" those 3m missing documents.",
+          "score": 2,
+          "created_utc": "2026-02-12 08:49:34",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o4zqs1i",
+              "author": "Cod3Conjurer",
+              "text": "Guess I’ll have to OCR the entire publicly available dataset myself now, joking🤣",
+              "score": 1,
+              "created_utc": "2026-02-12 15:14:11",
               "is_submitter": true,
               "replies": []
             }
@@ -589,15 +675,15 @@
           "id": "o4t10wl",
           "author": "StackSmashRepeat",
           "text": "So, have you come to terms with RAG being a dead end as far as real recall of memory works? Or are you just chunking and overlapping to a ridiculous point? I really don't think this is a sensible use of RAG. The LLM will at some point start hallucinating missing pieces from thin air, making this tool fairly unreliable for accuracy. \n\nPeople looking into these files need absolute accuracy.",
-          "score": 1,
+          "score": 3,
           "created_utc": "2026-02-11 14:42:24",
           "is_submitter": false,
           "replies": [
             {
               "id": "o4tfjmw",
               "author": "Cod3Conjurer",
-              "text": "You’re right that absolute accuracy matters.  \nYou’re right that absolute accuracy matters. That’s why this should be treated as an assistive search layer, not a final source of truth.\n\nAt the end of the day, it’s an engineering experiment, not a legal authority.",
-              "score": 2,
+              "text": "You’re right that absolute accuracy matters. That’s why this should be treated as an assistive search layer, not a final source of truth.\n\nAt the end of the day, it’s an engineering experiment, not a legal authority.",
+              "score": 3,
               "created_utc": "2026-02-11 15:53:54",
               "is_submitter": true,
               "replies": [
@@ -605,7 +691,7 @@
                   "id": "o4tikha",
                   "author": "StackSmashRepeat",
                   "text": "Make it do an online search after it retrieves data from rag and provide a link directly to an online source. End users are dumb and some will believe anything the llm tells them.",
-                  "score": 1,
+                  "score": 0,
                   "created_utc": "2026-02-11 16:08:01",
                   "is_submitter": false,
                   "replies": []
@@ -617,90 +703,15 @@
       ]
     },
     {
-      "id": "1r04wed",
-      "title": "Observations From Using GPT-5.3 Codex and Claude Opus 4.6",
-      "subreddit": "LLMDevs",
-      "url": "https://www.reddit.com/r/LLMDevs/comments/1r04wed/observations_from_using_gpt53_codex_and_claude/",
-      "author": "Arindam_200",
-      "created_utc": "2026-02-09 13:58:50",
-      "score": 18,
-      "num_comments": 6,
-      "upvote_ratio": 0.85,
-      "text": "I tested GPT-5.3 Codex and Claude Opus 4.6 shortly after release to see what actually happens once you stop prompting and start expecting results. Benchmarks are easy to read. Real execution is harder to fake.\n\nBoth models were given the same prompts and left alone to work. The difference showed up fast.\n\nCodex doesn’t hesitate. It commits early, makes reasonable calls on its own, and keeps moving until something usable exists. You don’t feel like you’re co-writing every step. You kick it off, check back, and review what came out. That’s convenient, but it also means you sometimes get decisions you didn’t explicitly ask for.\n\nOpus behaves almost the opposite way. It slows things down, checks its own reasoning, and tries to keep everything internally tidy. That extra caution shows up in the output. Things line up better, explanations make more sense, and fewer surprises appear at the end. The tradeoff is time.\n\nA few things stood out pretty clearly:\n\n* Codex optimizes for momentum, not elegance\n* Opus optimizes for coherence, not speed\n* Codex assumes you’ll iterate anyway\n* Opus assumes you care about getting it right the first time\n\nThe interaction style changes because of that. Codex feels closer to delegating work. Opus feels closer to collaborating on it.\n\nNeither model felt “smarter” than the other. They just burn time in different places. Codex burns it after delivery. Opus burns it before.\n\nIf you care about moving fast and fixing things later, Codex fits that mindset. If you care about clean reasoning and fewer corrections, Opus makes more sense.\n\nI wrote a longer breakdown [here](https://www.tensorlake.ai/blog/claude-opus-4-6-vs-gpt-5-3-codex) with screenshots and timing details in the full post for anyone who wants the deeper context.",
-      "is_original_content": false,
-      "link_flair_text": "Discussion",
-      "permalink": "https://reddit.com/r/LLMDevs/comments/1r04wed/observations_from_using_gpt53_codex_and_claude/",
-      "domain": "self.LLMDevs",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "o4fmz12",
-          "author": "swarmed100",
-          "text": "Opus 4.6 reasons a lot longer than opus 4.5. One negative side I noticed from this is that it is \"better\" at finding delusional logic to explain why a set of facts that are clearly impossible \"make sense\", instead of concluding that some of the assumptions or inputs must be wrong since the set of facts are just impossible together.",
-          "score": 7,
-          "created_utc": "2026-02-09 14:03:48",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o4gbcxu",
-              "author": "External-Yak-371",
-              "text": "As a pro plan user I agree, but it also means my piddly allowance can nearly be consumed in one good planning session",
-              "score": 3,
-              "created_utc": "2026-02-09 16:10:11",
-              "is_submitter": false,
-              "replies": [
-                {
-                  "id": "o4hrtb3",
-                  "author": "Manfluencer10kultra",
-                  "text": "u/External-Yak-371 One git commit request for small refactors in many files (similar refactors) was enough for 48%.  It did notice I missed 5 items that needed to be refactored then used like 20k tokens to fix it, and then it was absolutely perfect.\n\nToo bad it was 50% of my 5h allowance (you get about 9 x 5h on pro at 11% of weekly ...).  In that sense, it was absolutely worthless spending my tokens on it.  \nBut what if I used Sonnet for it? it would have been maybe worse.  \nAnd these are the things that you don't want to do yourself, and want to hand over to AI. You close off your session after a long day, forget to commit all those refactors, but still want a sensible commit instead of \"lots of fixes\".  \nEh this is where AI tooling should come in to save the day, but nope..",
-                  "score": 1,
-                  "created_utc": "2026-02-09 20:21:31",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            },
-            {
-              "id": "o4gcjpr",
-              "author": "cmndr_spanky",
-              "text": "This is pretty worrying but makes sense. More reasoning doesn’t mean better results and often just causes useless “thought loops” that at best just wastes more open credits, at worst fills up context causing it to loose touch with the original request details.\n\nThat said, I’ve never been impressed with any of openAI’s models as coding agents, so I’d suspect opus is still better despite the flaws. We’ll see I guess",
-              "score": 2,
-              "created_utc": "2026-02-09 16:15:52",
-              "is_submitter": false,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "o4gfqe5",
-          "author": "kubrador",
-          "text": "so basically one model is a startup founder and the other is an engineering lead pretending to care about code review",
-          "score": 2,
-          "created_utc": "2026-02-09 16:31:01",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o4hrdaq",
-          "author": "Manfluencer10kultra",
-          "text": "Bruh, I switched to Codex (Free) and getting incredible usage just on Free and GPT-5.2-Codex High, not even 5.3 and it's just night and day.  Claude put me in a depressive mood, and now I'm back enjoying engineering again.",
-          "score": 2,
-          "created_utc": "2026-02-09 20:19:16",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
       "id": "1r1jr22",
       "title": "I'm super unemployed and have too much time so I built an open source SDK to build event-driven, distributed agents on Kafka",
       "subreddit": "LLMDevs",
       "url": "https://www.reddit.com/r/LLMDevs/comments/1r1jr22/im_super_unemployed_and_have_too_much_time_so_i/",
       "author": "orange-cola",
       "created_utc": "2026-02-11 01:30:26",
-      "score": 17,
-      "num_comments": 9,
-      "upvote_ratio": 0.7,
+      "score": 19,
+      "num_comments": 11,
+      "upvote_ratio": 0.72,
       "text": "I finally got around to building this SDK for event-driven agents. It's an idea I've been sitting on for a while. I finally started working on it and it's been super fun to develop.\n\nI made the SDK in order to decompose agents into independent, separate microservices (LLM inference, tools, and routing) that communicate asynchronously through Kafka. This way, agents, tool services, and downstream consumers all communicate asynchronously and can be deployed, adapted, and scaled completely independently.\n\nThe event-driven structure also makes connecting up and orchestrating multi-agent teams trivial. Although this functionality isn't yet implemented, I'll probably develop it soon (assuming I stay unemployed and continue to have free time on my hands).\n\nCheck it out and throw me a star if you found the project interesting! [https://github.com/calf-ai/calfkit-sdk](https://github.com/calf-ai/calfkit-sdk)",
       "is_original_content": false,
       "link_flair_text": "Tools",
@@ -712,7 +723,7 @@
           "id": "o4q4hbc",
           "author": "qa_anaaq",
           "text": "Ah this is cool. I was obsessed with the idea of the event-driven approach to agents last year but never had to time to explore it. I’ll be diving in. I always thought it’s a solid approach.",
-          "score": 3,
+          "score": 4,
           "created_utc": "2026-02-11 01:47:28",
           "is_submitter": false,
           "replies": [
@@ -793,6 +804,90 @@
               "replies": []
             }
           ]
+        },
+        {
+          "id": "o4ynvo1",
+          "author": "UseMoreBandwith",
+          "text": "interesting. but what could the use-cases for something like that?  (other than hacking/ddos etc)",
+          "score": 1,
+          "created_utc": "2026-02-12 11:11:29",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1r04wed",
+      "title": "Observations From Using GPT-5.3 Codex and Claude Opus 4.6",
+      "subreddit": "LLMDevs",
+      "url": "https://www.reddit.com/r/LLMDevs/comments/1r04wed/observations_from_using_gpt53_codex_and_claude/",
+      "author": "Arindam_200",
+      "created_utc": "2026-02-09 13:58:50",
+      "score": 18,
+      "num_comments": 6,
+      "upvote_ratio": 0.85,
+      "text": "I tested GPT-5.3 Codex and Claude Opus 4.6 shortly after release to see what actually happens once you stop prompting and start expecting results. Benchmarks are easy to read. Real execution is harder to fake.\n\nBoth models were given the same prompts and left alone to work. The difference showed up fast.\n\nCodex doesn’t hesitate. It commits early, makes reasonable calls on its own, and keeps moving until something usable exists. You don’t feel like you’re co-writing every step. You kick it off, check back, and review what came out. That’s convenient, but it also means you sometimes get decisions you didn’t explicitly ask for.\n\nOpus behaves almost the opposite way. It slows things down, checks its own reasoning, and tries to keep everything internally tidy. That extra caution shows up in the output. Things line up better, explanations make more sense, and fewer surprises appear at the end. The tradeoff is time.\n\nA few things stood out pretty clearly:\n\n* Codex optimizes for momentum, not elegance\n* Opus optimizes for coherence, not speed\n* Codex assumes you’ll iterate anyway\n* Opus assumes you care about getting it right the first time\n\nThe interaction style changes because of that. Codex feels closer to delegating work. Opus feels closer to collaborating on it.\n\nNeither model felt “smarter” than the other. They just burn time in different places. Codex burns it after delivery. Opus burns it before.\n\nIf you care about moving fast and fixing things later, Codex fits that mindset. If you care about clean reasoning and fewer corrections, Opus makes more sense.\n\nI wrote a longer breakdown [here](https://www.tensorlake.ai/blog/claude-opus-4-6-vs-gpt-5-3-codex) with screenshots and timing details in the full post for anyone who wants the deeper context.",
+      "is_original_content": false,
+      "link_flair_text": "Discussion",
+      "permalink": "https://reddit.com/r/LLMDevs/comments/1r04wed/observations_from_using_gpt53_codex_and_claude/",
+      "domain": "self.LLMDevs",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "o4fmz12",
+          "author": "swarmed100",
+          "text": "Opus 4.6 reasons a lot longer than opus 4.5. One negative side I noticed from this is that it is \"better\" at finding delusional logic to explain why a set of facts that are clearly impossible \"make sense\", instead of concluding that some of the assumptions or inputs must be wrong since the set of facts are just impossible together.",
+          "score": 7,
+          "created_utc": "2026-02-09 14:03:48",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o4gbcxu",
+              "author": "External-Yak-371",
+              "text": "As a pro plan user I agree, but it also means my piddly allowance can nearly be consumed in one good planning session",
+              "score": 3,
+              "created_utc": "2026-02-09 16:10:11",
+              "is_submitter": false,
+              "replies": [
+                {
+                  "id": "o4hrtb3",
+                  "author": "Manfluencer10kultra",
+                  "text": "u/External-Yak-371 One git commit request for small refactors in many files (similar refactors) was enough for 48%.  It did notice I missed 5 items that needed to be refactored then used like 20k tokens to fix it, and then it was absolutely perfect.\n\nToo bad it was 50% of my 5h allowance (you get about 9 x 5h on pro at 11% of weekly ...).  In that sense, it was absolutely worthless spending my tokens on it.  \nBut what if I used Sonnet for it? it would have been maybe worse.  \nAnd these are the things that you don't want to do yourself, and want to hand over to AI. You close off your session after a long day, forget to commit all those refactors, but still want a sensible commit instead of \"lots of fixes\".  \nEh this is where AI tooling should come in to save the day, but nope..",
+                  "score": 1,
+                  "created_utc": "2026-02-09 20:21:31",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            },
+            {
+              "id": "o4gcjpr",
+              "author": "cmndr_spanky",
+              "text": "This is pretty worrying but makes sense. More reasoning doesn’t mean better results and often just causes useless “thought loops” that at best just wastes more open credits, at worst fills up context causing it to loose touch with the original request details.\n\nThat said, I’ve never been impressed with any of openAI’s models as coding agents, so I’d suspect opus is still better despite the flaws. We’ll see I guess",
+              "score": 2,
+              "created_utc": "2026-02-09 16:15:52",
+              "is_submitter": false,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "o4gfqe5",
+          "author": "kubrador",
+          "text": "so basically one model is a startup founder and the other is an engineering lead pretending to care about code review",
+          "score": 2,
+          "created_utc": "2026-02-09 16:31:01",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "o4hrdaq",
+          "author": "Manfluencer10kultra",
+          "text": "Bruh, I switched to Codex (Free) and getting incredible usage just on Free and GPT-5.2-Codex High, not even 5.3 and it's just night and day.  Claude put me in a depressive mood, and now I'm back enjoying engineering again.",
+          "score": 2,
+          "created_utc": "2026-02-09 20:19:16",
+          "is_submitter": false,
+          "replies": []
         }
       ]
     },
@@ -803,9 +898,9 @@
       "url": "https://i.redd.it/ggk43gavzthg1.jpeg",
       "author": "carsa81",
       "created_utc": "2026-02-06 08:02:13",
-      "score": 15,
+      "score": 16,
       "num_comments": 3,
-      "upvote_ratio": 0.8,
+      "upvote_ratio": 0.83,
       "text": "[External Link]",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -817,7 +912,7 @@
           "id": "o3vayfa",
           "author": "West_Struggle2530",
           "text": "Opus 4.6",
-          "score": 7,
+          "score": 6,
           "created_utc": "2026-02-06 08:27:02",
           "is_submitter": false,
           "replies": []
@@ -881,61 +976,15 @@
       ]
     },
     {
-      "id": "1qwdhwq",
-      "title": "I made a Transformer 3x faster by making 75% of tokens \"lazy\". It beats the standard baseline on loss in fixed-time training.",
-      "subreddit": "LLMDevs",
-      "url": "https://www.reddit.com/r/LLMDevs/comments/1qwdhwq/i_made_a_transformer_3x_faster_by_making_75_of/",
-      "author": "Morph2026",
-      "created_utc": "2026-02-05 06:09:15",
-      "score": 13,
-      "num_comments": 3,
-      "upvote_ratio": 1.0,
-      "text": "Hi everyone,\n\nI don't have the compute to train on 100B tokens or write a formal paper right now, so I'm dropping this here for the community to play with.\n\n**The Idea: \"WorkerTransformer\"**\n\nStandard Transformers are inefficient because every single token performs expensive Attention ($O(T^(2)$)) and FFN ($O(T)$) updates. But does every token really need to \"think\" deeply?\n\nI built a sparse-update architecture based on a simple intuition:\n\n1. **Divide & Conquer**: Split tokens into **Workers** (every 4th token) and **Memory** (the rest).\n2. **Workers**: Do the heavy lifting (Full Attention + FFN).\n3. **Memory**: Only do a cheap depthwise conv1d to capture local context (like Mamba/ConvNets) but **skip** the heavy Transformer block.\n4. **In-place Update**: Everything happens in-place. No extra tokens added, no sequence inflation.\n\n**The Result (on T=1024 sequence length):**\n\nI ran a \"battle\" between a Standard Transformer and my WorkerTransformer (same params, layers, dim) on a fixed 5-minute training budget.\n\n* **Standard Transformer**: 3.2 steps/s | Reached Val Loss **1.44**\n* **WorkerTransformer**: 8.0 steps/s (**2.5x speedup**) | Reached Val Loss **1.30**\n\nThe \"lazy\" model didn't just run faster; because it ran 2.5x more steps in the same timeframe, it actually learned **more** and achieved a significantly lower loss. It seems the trade-off of \"sparse compute vs. more iterations\" heavily favors sparse compute here.\n\n**Why I'm sharing this:**\n\nI suspect this could scale. The architecture is **pure PyTorch** (no custom CUDA kernels needed), making it dead simple to modify.\n\nIf you have spare A100s or are looking for a weekend project, I'd love to see someone scale this up to WikiText-103 or RedPajama.\n\n**Code & Benchmarks:** [https://github.com/SuiltaPico/WorkerTransformer](https://github.com/SuiltaPico/WorkerTransformer)\n\nLet me know if you find any flaws in my reasoning or if you manage to break it!",
-      "is_original_content": false,
-      "link_flair_text": "Discussion",
-      "permalink": "https://reddit.com/r/LLMDevs/comments/1qwdhwq/i_made_a_transformer_3x_faster_by_making_75_of/",
-      "domain": "self.LLMDevs",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "o44tfs6",
-          "author": "techperson1234",
-          "text": "Huh. Super interesting!",
-          "score": 1,
-          "created_utc": "2026-02-07 19:49:07",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o47mb91",
-          "author": "Dangerous-Sale3243",
-          "text": "Interesting. I dont know enough to comment technically, since i am mostly just a user than a creator. The idea seems obvious, or at least an obvious next step facing a problem of optimizing runtime. So my assumption is that this was considered and rejected by a bunch of smart guys at some point in the past few years, for reasons beyond my knowledge.",
-          "score": 1,
-          "created_utc": "2026-02-08 06:19:04",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o4dsf7h",
-          "author": "Foreign_Skill_6628",
-          "text": "I think you need to do a lot more testing. Do this on some Wikipedia/Shakespeare datasets, and use multiple validation samples using different sampling methodologies. Prove it isn’t a fluke.\n\nYou also need to do holdout testing (benchmarking). How well does it generalize on unseen data compared to traditional transformers?",
-          "score": 1,
-          "created_utc": "2026-02-09 04:50:44",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
       "id": "1r162ky",
       "title": "LLaDA2.1 vs Autoregressive Baselines: Is Diffusion Finally Competitive for Inference Throughput?",
       "subreddit": "LLMDevs",
       "url": "https://www.reddit.com/r/LLMDevs/comments/1r162ky/llada21_vs_autoregressive_baselines_is_diffusion/",
       "author": "Ill_Awareness6706",
       "created_utc": "2026-02-10 16:51:41",
-      "score": 12,
+      "score": 11,
       "num_comments": 0,
-      "upvote_ratio": 1.0,
+      "upvote_ratio": 0.93,
       "text": "Been digging into the LLaDA2.1 paper (arXiv:2602.08676) after seeing claims about diffusion LLMs hitting 892 TPS on HumanEval+. The numbers are interesting enough that I'm starting to wonder if we've been sleeping on diffusion models for inference workloads.\n\nQuick context for those unfamiliar: LLaDA2.1 introduces a dual decoding system (Speedy Mode vs Quality Mode) that lets you trade accuracy for throughput. The 100B model hits 892 TPS peak on coding benchmarks with quantization, while the 16B model averages 1071 TPS across nine benchmarks vs 302 TPS for Qwen3 8B. The key innovation is Token to Token editing that lets the model correct its own mistakes during generation.\n\nStandard absorbing state diffusion models have a fundamental problem: once a \\[MASK\\] token becomes a real token, it's locked in forever. LLaDA2.1 adds what they call an \"Editing Set\" alongside the \"Unmasking Set\" at each timestep. This means the model can retroactively fix errors during parallel decoding, which addresses the token inconsistency issues that have plagued diffusion LLMs. Speedy Mode generates a rough draft fast (aggressive M2T threshold), then T2T passes clean up the artifacts. Quality Mode uses conservative thresholds throughout for higher accuracy but slower generation.\n\nThe benchmark highlights: LLaDA2.1 Flash (100B) on HumanEval+ scores 89.63 in both modes, with Speedy Mode achieving 13.81 tokens per forward vs Quality Mode's 9.18 TPF. On LiveCodeBench, Speedy Mode hits 44.05 at 6.48 TPF while Quality Mode reaches 45.37 at 3.80 TPF. Peak throughput with their quantized setup: 891.74 TPS on HumanEval+, 801.48 TPS on BigCodeBench Full, 663.39 TPS on LiveCodeBench. The 16B Mini variant peaks at 1586.93 TPS on HumanEval+. Compared to baselines across nine benchmarks: LLaDA2.1 Mini averages 1071.2 TPS vs 597.1 for LLaDA2.0 Mini, 464.7 for Ling Mini 2.0, and 301.9 for Qwen3 8B. That's roughly 3.55x throughput comparing the 16B diffusion model against the 8B autoregressive baseline, so not exactly apples to apples on parameters, but the efficiency gap is notable. Reproducibility note: these numbers use customized SGLang with per block FP8 quantization.\n\nThey also have Multi Block Editing that trades throughput for accuracy: AIME 2025 jumps from 63.33 to 70.00 with MBE, ZebraLogic from 84.20 to 88.20. Average across 10 benchmarks: 72.67 at 5.14 TPF with MBE vs 70.69 at 5.82 TPF without.\n\nOn the training side, they built what they claim is the first large scale RL framework for diffusion LLMs using EBPO (ELBO based Block level Policy Optimization). The core problem is that sequence level log likelihood is intractable in block autoregressive models, so they use Vectorized Likelihood Estimation for parallelized bound computation. Interesting direction if you're thinking about fine tuning diffusion models beyond standard SFT, though I haven't dug deep into the training methodology yet.\n\nNow here's where I'm genuinely uncertain. The paper is upfront about the tradeoffs: Speedy Mode works well for code and math but can produce artifacts on general chat. They specifically mention n gram repetitions that self correction only partially fixes. So the question becomes: are these throughput numbers meaningful if you can only use Speedy Mode for narrow domains?\n\nTo make this concrete: say you're running a code completion service handling 10K requests per minute. At 302 TPS with Qwen3 8B, you need roughly 33 inference instances to keep up. At 1071 TPS with LLaDA2.1 Mini, that drops to about 10 instances. That's real infrastructure savings if the quality holds up in production. But I'm skeptical whether benchmark TPS translates to real world throughput given the different decoding dynamics, and whether the occasional n gram artifacts would tank user experience.\n\nPaper: [https://arxiv.org/abs/2602.08676](https://arxiv.org/abs/2602.08676)\n\nGitHub: [https://github.com/inclusionAI/LLaDA2.X](https://github.com/inclusionAI/LLaDA2.X)\n\nFor those running inference at scale: would 3x throughput on code generation be enough to justify adding a completely different model architecture to your stack? Or is the operational complexity not worth it until diffusion models close the gap on general tasks?",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -1027,7 +1076,7 @@
       "url": "https://www.reddit.com/gallery/1qz1adm",
       "author": "mr_ocotopus",
       "created_utc": "2026-02-08 06:10:48",
-      "score": 9,
+      "score": 10,
       "num_comments": 8,
       "upvote_ratio": 0.92,
       "text": "[External Link]",
@@ -1088,34 +1137,6 @@
       ]
     },
     {
-      "id": "1qwpdkz",
-      "title": "ACE-Step 1.5: an on-device music model that beats Suno on common eval metrics",
-      "subreddit": "LLMDevs",
-      "url": "https://v.redd.it/v0sqp0rh8phg1",
-      "author": "MatchSuccessful1253",
-      "created_utc": "2026-02-05 16:09:10",
-      "score": 9,
-      "num_comments": 1,
-      "upvote_ratio": 0.85,
-      "text": "[External Link]",
-      "is_original_content": false,
-      "link_flair_text": "Resource",
-      "permalink": "https://reddit.com/r/LLMDevs/comments/1qwpdkz/acestep_15_an_ondevice_music_model_that_beats/",
-      "domain": "v.redd.it",
-      "is_self": false,
-      "comments": [
-        {
-          "id": "o3shdm9",
-          "author": "TheGoddessInari",
-          "text": "Odd distinctive sound to everything on the site. 🤔",
-          "score": 1,
-          "created_utc": "2026-02-05 21:33:39",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
       "id": "1qygq2b",
       "title": "We have developed a different architecture for LLM that does not work on transformers but works on the principles of reservoir computing and energy modelling. It remains constant on vRAM as we scale context unlike transformers.",
       "subreddit": "LLMDevs",
@@ -1124,7 +1145,7 @@
       "created_utc": "2026-02-07 15:30:45",
       "score": 9,
       "num_comments": 3,
-      "upvote_ratio": 0.92,
+      "upvote_ratio": 1.0,
       "text": "[External Link]",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -1163,79 +1184,15 @@
       ]
     },
     {
-      "id": "1r0lbvd",
-      "title": "Mixture-of-Models routing beats single LLMs on SWE-Bench via task specialization",
-      "subreddit": "LLMDevs",
-      "url": "https://www.reddit.com/r/LLMDevs/comments/1r0lbvd/mixtureofmodels_routing_beats_single_llms_on/",
-      "author": "botirkhaltaev",
-      "created_utc": "2026-02-10 00:10:22",
-      "score": 8,
-      "num_comments": 0,
-      "upvote_ratio": 0.91,
-      "text": "I’ve been looking at per-task results on SWE-Bench Verified and noticed something that leaderboard averages hide: different models consistently solve *different* subsets of tasks.\n\nEven the top overall model on the leaderboard fails a non-trivial number of tasks that other models reliably solve, and the reverse is also true. This suggests strong task-level specialization rather than one model being strictly better.\n\nTo test this, I built a **Mixture-of-Models architecture**, which is different from traditional routing that just defaults to the strongest aggregate model most of the time. The goal isn’t to route to a single model as often as possible, but to exploit complementary strengths between models.\n\nConcretely:\n\n* The problem description is embedded\n* It’s assigned to a semantic cluster (learned from general coding data, not SWE-Bench)\n* Each cluster has learned per-model success statistics\n* The task is routed to the historically strongest model for that *type* of problem\n\nImportantly, this does **not** route the top aggregate model for the majority of tasks. Several clusters consistently route to other models where they outperform it, even though it has the highest overall score.\n\nThere’s no new foundation model, no test-time search, and no repo execution, just a lightweight gating mechanism over multiple models.\n\nUsing this Mixture-of-Models setup, the system reaches 75.6% on SWE-Bench, exceeding single-model baselines (\\~74%). The takeaway isn’t the absolute number, but the mechanism: leaderboard aggregates hide complementary strengths, and mixture architectures can capture a higher ceiling than any single model.\n\nBlog with details and methodology here: [https://nordlyslabs.com/blog/hypernova](https://nordlyslabs.com/blog/hypernova)\n\nGithub: the framework is open source ! [https://github.com/Nordlys-Labs/nordlys](https://github.com/Nordlys-Labs/nordlys)\n\nML/AI Research Community Discord: [https://discord.gg/dqW7BBrq](https://discord.gg/dqW7BBrq)",
-      "is_original_content": false,
-      "link_flair_text": "News",
-      "permalink": "https://reddit.com/r/LLMDevs/comments/1r0lbvd/mixtureofmodels_routing_beats_single_llms_on/",
-      "domain": "self.LLMDevs",
-      "is_self": true,
-      "comments": []
-    },
-    {
-      "id": "1r041y4",
-      "title": "A RAG Agent and their Types",
-      "subreddit": "LLMDevs",
-      "url": "https://www.reddit.com/gallery/1r041y4",
-      "author": "KarllsMarcel",
-      "created_utc": "2026-02-09 13:21:33",
-      "score": 8,
-      "num_comments": 3,
-      "upvote_ratio": 0.83,
-      "text": "[External Link]",
-      "is_original_content": false,
-      "link_flair_text": "Help Wanted",
-      "permalink": "https://reddit.com/r/LLMDevs/comments/1r041y4/a_rag_agent_and_their_types/",
-      "domain": "reddit.com",
-      "is_self": false,
-      "comments": [
-        {
-          "id": "o4fh4qy",
-          "author": "flonnil",
-          "text": "ballsy to use n8n screenshots in something that tries to sell you as a \"pro\".",
-          "score": 2,
-          "created_utc": "2026-02-09 13:29:24",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o4j8ojz",
-          "author": "dezastrologu",
-          "text": "Cool more LLM generated slop",
-          "score": 1,
-          "created_utc": "2026-02-10 00:58:43",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o4ptltc",
-          "author": "SystemFlowStudio",
-          "text": "One thing that helped me think about RAG agents more clearly was separating **retrieval responsibility** from **control responsibility**.\n\nRough breakdown I keep coming back to:\n\n**1. Passive RAG**  \nRetrieval is a single, fixed step (query → retrieve → answer). No iteration, no state. Easy to reason about, hard to scale to complex tasks.\n\n**2. Tool-augmented RAG agent**  \nThe agent decides *when* to retrieve vs act. Retrieval becomes a tool call, often interleaved with reasoning steps. This is where looping and stale context issues start to appear.\n\n**3. Planner-Executor RAG**  \nPlanner decomposes the task, executor performs steps, retrieval happens per step. Much more powerful, but you need guardrails or you get infinite plan-replan cycles.\n\n**4. Memory-augmented / stateful RAG**  \nRetrieval isn’t just documents — it includes prior actions, summaries, or checkpoints. Great for long tasks, very easy to accidentally poison the context.\n\nWhat I’ve noticed is most “RAG agent bugs” aren’t retrieval quality issues — they’re **control-flow failures** (no termination condition, repeated tool calls, planner drift).\n\nCurious how others here are drawing these boundaries — especially in production systems.",
-          "score": 1,
-          "created_utc": "2026-02-11 00:42:23",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
       "id": "1qz2edh",
       "title": "Golang or Python",
       "subreddit": "LLMDevs",
       "url": "https://www.reddit.com/r/LLMDevs/comments/1qz2edh/golang_or_python/",
       "author": "Ok-Satisfaction945",
       "created_utc": "2026-02-08 07:14:07",
-      "score": 7,
+      "score": 9,
       "num_comments": 19,
-      "upvote_ratio": 0.9,
+      "upvote_ratio": 1.0,
       "text": "Why python over golang? Current on my first year of mechatronics looking to expand and get ahead. I just bought a Jetson Orin nano I would like to start tinkering with. I understand python is the right now but from research I done I feel like golang really got more potential overall. Would love to hear from people in this space.",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -1247,7 +1204,7 @@
           "id": "o48u3q8",
           "author": "etherealflaim",
           "text": "Go is better for building systems. Python is better for stitching together other people's stuff, which in the world of AI means a lot more Lego bricks to do random stuff like training and evaluating models locally.  If you're using cloud models like Gemini, model gateways, or providers like ollama though, suddenly this advantage gets blunted.\n\nFor agentic systems, Temporal (which was built in Go but that isn't super relevant) is a killer technology and you can even mix and match Go and Python where each one suits.",
-          "score": 4,
+          "score": 5,
           "created_utc": "2026-02-08 12:55:51",
           "is_submitter": false,
           "replies": [
@@ -1425,6 +1382,70 @@
       ]
     },
     {
+      "id": "1r0lbvd",
+      "title": "Mixture-of-Models routing beats single LLMs on SWE-Bench via task specialization",
+      "subreddit": "LLMDevs",
+      "url": "https://www.reddit.com/r/LLMDevs/comments/1r0lbvd/mixtureofmodels_routing_beats_single_llms_on/",
+      "author": "botirkhaltaev",
+      "created_utc": "2026-02-10 00:10:22",
+      "score": 8,
+      "num_comments": 0,
+      "upvote_ratio": 0.91,
+      "text": "I’ve been looking at per-task results on SWE-Bench Verified and noticed something that leaderboard averages hide: different models consistently solve *different* subsets of tasks.\n\nEven the top overall model on the leaderboard fails a non-trivial number of tasks that other models reliably solve, and the reverse is also true. This suggests strong task-level specialization rather than one model being strictly better.\n\nTo test this, I built a **Mixture-of-Models architecture**, which is different from traditional routing that just defaults to the strongest aggregate model most of the time. The goal isn’t to route to a single model as often as possible, but to exploit complementary strengths between models.\n\nConcretely:\n\n* The problem description is embedded\n* It’s assigned to a semantic cluster (learned from general coding data, not SWE-Bench)\n* Each cluster has learned per-model success statistics\n* The task is routed to the historically strongest model for that *type* of problem\n\nImportantly, this does **not** route the top aggregate model for the majority of tasks. Several clusters consistently route to other models where they outperform it, even though it has the highest overall score.\n\nThere’s no new foundation model, no test-time search, and no repo execution, just a lightweight gating mechanism over multiple models.\n\nUsing this Mixture-of-Models setup, the system reaches 75.6% on SWE-Bench, exceeding single-model baselines (\\~74%). The takeaway isn’t the absolute number, but the mechanism: leaderboard aggregates hide complementary strengths, and mixture architectures can capture a higher ceiling than any single model.\n\nBlog with details and methodology here: [https://nordlyslabs.com/blog/hypernova](https://nordlyslabs.com/blog/hypernova)\n\nGithub: the framework is open source ! [https://github.com/Nordlys-Labs/nordlys](https://github.com/Nordlys-Labs/nordlys)\n\nML/AI Research Community Discord: [https://discord.gg/dqW7BBrq](https://discord.gg/dqW7BBrq)",
+      "is_original_content": false,
+      "link_flair_text": "News",
+      "permalink": "https://reddit.com/r/LLMDevs/comments/1r0lbvd/mixtureofmodels_routing_beats_single_llms_on/",
+      "domain": "self.LLMDevs",
+      "is_self": true,
+      "comments": []
+    },
+    {
+      "id": "1r041y4",
+      "title": "A RAG Agent and their Types",
+      "subreddit": "LLMDevs",
+      "url": "https://www.reddit.com/gallery/1r041y4",
+      "author": "KarllsMarcel",
+      "created_utc": "2026-02-09 13:21:33",
+      "score": 7,
+      "num_comments": 3,
+      "upvote_ratio": 0.77,
+      "text": "[External Link]",
+      "is_original_content": false,
+      "link_flair_text": "Help Wanted",
+      "permalink": "https://reddit.com/r/LLMDevs/comments/1r041y4/a_rag_agent_and_their_types/",
+      "domain": "reddit.com",
+      "is_self": false,
+      "comments": [
+        {
+          "id": "o4fh4qy",
+          "author": "flonnil",
+          "text": "ballsy to use n8n screenshots in something that tries to sell you as a \"pro\".",
+          "score": 2,
+          "created_utc": "2026-02-09 13:29:24",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "o4j8ojz",
+          "author": "dezastrologu",
+          "text": "Cool more LLM generated slop",
+          "score": 1,
+          "created_utc": "2026-02-10 00:58:43",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "o4ptltc",
+          "author": "SystemFlowStudio",
+          "text": "One thing that helped me think about RAG agents more clearly was separating **retrieval responsibility** from **control responsibility**.\n\nRough breakdown I keep coming back to:\n\n**1. Passive RAG**  \nRetrieval is a single, fixed step (query → retrieve → answer). No iteration, no state. Easy to reason about, hard to scale to complex tasks.\n\n**2. Tool-augmented RAG agent**  \nThe agent decides *when* to retrieve vs act. Retrieval becomes a tool call, often interleaved with reasoning steps. This is where looping and stale context issues start to appear.\n\n**3. Planner-Executor RAG**  \nPlanner decomposes the task, executor performs steps, retrieval happens per step. Much more powerful, but you need guardrails or you get infinite plan-replan cycles.\n\n**4. Memory-augmented / stateful RAG**  \nRetrieval isn’t just documents — it includes prior actions, summaries, or checkpoints. Great for long tasks, very easy to accidentally poison the context.\n\nWhat I’ve noticed is most “RAG agent bugs” aren’t retrieval quality issues — they’re **control-flow failures** (no termination condition, repeated tool calls, planner drift).\n\nCurious how others here are drawing these boundaries — especially in production systems.",
+          "score": 1,
+          "created_utc": "2026-02-11 00:42:23",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
       "id": "1qyimtf",
       "title": "Grounding Is Not a Prompt",
       "subreddit": "LLMDevs",
@@ -1443,71 +1464,15 @@
       "comments": []
     },
     {
-      "id": "1qwmbq0",
-      "title": "glm 4.7 swe-bench 73.8% - tested claims on real refactoring tasks, improvement over previous models measurable",
-      "subreddit": "LLMDevs",
-      "url": "https://www.reddit.com/r/LLMDevs/comments/1qwmbq0/glm_47_swebench_738_tested_claims_on_real/",
-      "author": "Weird_Perception1728",
-      "created_utc": "2026-02-05 14:11:57",
-      "score": 7,
-      "num_comments": 4,
-      "upvote_ratio": 1.0,
-      "text": "saw glm 4.7 swe-bench verified score (73.8%, +5.8 vs glm 4.6) and terminal bench (41%, +16.5)\n\nskeptical of benchmark gaming so tested on actual software engineering tasks\n\n**methodology:**\n\n20 refactoring tasks from internal codebase (flask, fastapi, django projects)\n\neach task: multi-file changes, maintaining references, no breaking changes\n\ntested against: glm 4.6, deepseek v3, codellama 70b\n\nmetric: success rate (code runs without fixes) + retry attempts needed\n\n**results:**\n\nglm 4.7: 17/20 success first attempt (85%))  \ndeepseek v3: 14/20 success first attempt (70%)  \ncodellama 70b: 11/20 success first attempt (55%)\n\n**failure analysis:**\n\nglm 4.7 failures: mostly edge cases in dependency injection patterns\n\nother models: frequent import hallucination, circular dependency introduction, breaking type hints\n\n**terminal bench correlation:**\n\ntested bash script generation (10 automation tasks)\n\nglm 4.7: 9/10 scripts ran without syntax errors  \nothers: 5-7/10 average\n\nterminal bench score (41% vs \\~25-35% typical) actually translated to real usage\n\n**architectural notes:**\n\n355b parameters, moe with 32b active per token\n\ntraining on 14.8t tokens\n\n**where improvement shows:**\n\ncross-file context tracking significantly better (measured by import correctness)\n\niterative debugging fewer loops to solution (average 1.4 attempts vs 2.3 for previous)\n\nbash/terminal command generation syntax correctness up\n\n**where still limited:**\n\ntraining cutoff late-2024 (misses recent library updates)\n\narchitectural reasoning weaker than frontier closed models\n\nexplanation depth inferior to teaching-optimized models\n\n**cost efficiency:**\n\napi pricing: \\~$3/month plan for generous coding use (significantly under openai/anthropic)\n\n**discussion points:**\n\nis 73.8% swe-bench representing actual capability or benchmark-specific tuning?\n\nbased on 20-task sample, improvement over previous versions real and measurable\n\nterminal bench correlation to bash quality interesting - suggests benchmark captures meaningful skill\n\n**limitations of this analysis:**\n\nsmall sample size (20 tasks)\n\ntasks from specific domains (web backends)\n\nno comparison to gpt-4/claude (cost prohibitive for extensive testing)",
-      "is_original_content": false,
-      "link_flair_text": "Discussion",
-      "permalink": "https://reddit.com/r/LLMDevs/comments/1qwmbq0/glm_47_swebench_738_tested_claims_on_real/",
-      "domain": "self.LLMDevs",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "o3pxn6q",
-          "author": "WelcomeMysterious122",
-          "text": "nice.",
-          "score": 1,
-          "created_utc": "2026-02-05 14:19:03",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o3pz6ar",
-          "author": "microhan20",
-          "text": "Interesting that terminal bench score correlates with actual bash quality. Usually synthetic benchmarks don't predict real performance well, but 41% vs 25-35% showing in your tests suggests its capturing something meaningful",
-          "score": 1,
-          "created_utc": "2026-02-05 14:27:15",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o3tjp4u",
-          "author": "DeathShot7777",
-          "text": "How much does it cost in total to run swe verified on glm4.7 \n\nI am working on a code intelligence layer using Graphs so agents can use it for deeper codebase understanding and want to test performance improvements on it. Will need to save up 😅",
-          "score": 1,
-          "created_utc": "2026-02-06 00:58:36",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o3u2u9q",
-              "author": "Scared-Biscotti2287",
-              "text": "You might want to check their site for the coding plans the cheapest is like 3 bucks for a month",
-              "score": 1,
-              "created_utc": "2026-02-06 02:52:31",
-              "is_submitter": false,
-              "replies": []
-            }
-          ]
-        }
-      ]
-    },
-    {
       "id": "1qzi6ot",
       "title": "Moltbook - No Human Captcha allows only LLMs post",
       "subreddit": "LLMDevs",
       "url": "https://i.redd.it/85cc0i50nbig1.png",
       "author": "hasmcp",
       "created_utc": "2026-02-08 19:25:50",
-      "score": 6,
+      "score": 7,
       "num_comments": 7,
-      "upvote_ratio": 0.62,
+      "upvote_ratio": 0.63,
       "text": "[External Link]",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -1519,7 +1484,7 @@
           "id": "o4ckqbm",
           "author": "dezastrologu",
           "text": "Why do we still care about moltbook",
-          "score": 3,
+          "score": 2,
           "created_utc": "2026-02-09 00:40:22",
           "is_submitter": false,
           "replies": [
@@ -1575,6 +1540,175 @@
       ]
     },
     {
+      "id": "1qy8ptz",
+      "title": "Your agent's 100% pass rate on 10 runs is statistically compatible with 72% true reliability. Here's the math and a way to fix your CI.",
+      "subreddit": "LLMDevs",
+      "url": "https://www.reddit.com/r/LLMDevs/comments/1qy8ptz/your_agents_100_pass_rate_on_10_runs_is/",
+      "author": "Better_Accident8064",
+      "created_utc": "2026-02-07 08:39:48",
+      "score": 7,
+      "num_comments": 3,
+      "upvote_ratio": 0.82,
+      "text": "I ran a LangGraph agent with Claude 3.5 Haiku on a trivial task (\"What is 15 * 37?\") across 100 trials. Pass rate: 70%. Not 95%, not 99%. Seventy percent on a calculator task.\n\nThe interesting part isn't that agents fail — everyone here knows that. It's that **single-run evals can't detect it.** If you run 10 trials and get 10/10, Wilson score CI at 95% confidence gives you [0.722, 1.000]. Your \"perfect\" result is statistically compatible with a system that fails 28% of the time.\n\nThis matters for CI/CD. Most teams either skip agent evals in their pipeline or run each test once and assert pass/fail. Both approaches have the same problem: they can't distinguish a 95%-reliable agent from a 70%-reliable one unless you run enough trials.\n\n**What actually works for catching regressions:**\n\nRun each test case N times (N >= 20 makes a real difference). Compute Wilson CI on the pass rate. Compare against your baseline using Fisher exact test instead of naive diff. Use Benjamini-Hochberg correction if you're testing multiple cases simultaneously — otherwise you'll get false alarms.\n\nFor failure attribution: group trials into pass/fail, compare tool call distributions at each step, pick the step with the lowest Fisher p-value. This gives you \"step 2 tool selection is the bottleneck\" instead of \"test failed.\"\n\nI open-sourced the framework I built for this: [agentrial](https://github.com/alepot55/agentrial). It wraps any Python callable and has adapters for LangGraph, CrewAI, AutoGen, Pydantic AI, OpenAI Agents SDK, and smolagents. YAML config, runs in CI, exit code 1 on statistically significant regression.\n\n```\nbasic-math      20/20  CI=[0.839, 1.000]  PASS\nmulti-step      14/20  CI=[0.480, 0.862]  FAIL\n  → Step 2: tool selection diverges (p=0.003)\n```\n\nCurious how others are handling this. Are you running multi-trial evals in CI? Using soft thresholds? Something else entirely?\n",
+      "is_original_content": false,
+      "link_flair_text": "Tools",
+      "permalink": "https://reddit.com/r/LLMDevs/comments/1qy8ptz/your_agents_100_pass_rate_on_10_runs_is/",
+      "domain": "self.LLMDevs",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "o41ydxz",
+          "author": "Thick-Protection-458",
+          "text": "\\> Your agent's 100% pass rate\n\nWell, isn't it clear?\n\nI mean that's fucking heuristic rather than predictable algorithm. With additional sampling randomness.\n\nYou can never have 100% working solution in such a case. You can have (unknown to you yet) distribution of test results you can't reliably distinguish from 100%.",
+          "score": 4,
+          "created_utc": "2026-02-07 09:17:22",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o420e97",
+              "author": "Better_Accident8064",
+              "text": "Exactly. You can't distinguish true 100% from a sample that happened to look like 100%. But you can quantify it.\n\n20/20 passes gives a Wilson 95% CI of \\[0.839, 1.000\\], so your \"perfect\" score is compatible with 84% true reliability. agentrial just makes this math explicit and wires it into CI/CD.",
+              "score": 1,
+              "created_utc": "2026-02-07 09:37:38",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "o43me85",
+          "author": "lionmeetsviking",
+          "text": "I use this: https://github.com/madviking/pydantic-llm-tester",
+          "score": 1,
+          "created_utc": "2026-02-07 16:15:01",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1r204ab",
+      "title": "Intent Model",
+      "subreddit": "LLMDevs",
+      "url": "https://www.reddit.com/r/LLMDevs/comments/1r204ab/intent_model/",
+      "author": "Repulsive_Laugh_1875",
+      "created_utc": "2026-02-11 15:18:54",
+      "score": 7,
+      "num_comments": 12,
+      "upvote_ratio": 0.9,
+      "text": "Hi community,  \nthis is my first post here 🙂\n\nI’m an experienced AI Engineer / AI DevOps Engineer / Consultant working for a well-known US-based company. I’d really appreciate your thoughts on a challenge I’m currently facing and whether you would approach it differently.\n\nUse-Case\n\nI’m building an **intent classifier** that must:\n\n* Run **on edge**\n* Stay around **\\~100ms latency**\n* Predict **1 out of 9 intent labels**\n* Consider **up to 2 previous conversation turns**\n\nThe environment is domain-specific (medical domain in reality), but to simplify, imagine a system controlling a car.\n\nExample:  \nYou have an intent like `lane_change`, and the user can request it in many different ways.\n\nCurrent Setup\n\n* Base model: **phi-3.5-mini-instruct**\n* Fine-tuned using **LoRA**\n* Model explicitly outputs only the intent token (e.g., `command_xyz`)\n* Each intent is mapped to a **single special token**\n* Almost no system prompt (removed to save tokens)\n\nPerformance:\n\n* \\~110ms latency (non-quantized) → acceptable\n* \\~10 input tokens on average\n* \\~5 output tokens on average\n* 25k training samples\n* \\~95% accuracy\n\nSpeed is not the main issue — I still have some room for token optimization and quantization if needed.\n\nthe real challenge -> the missing 5%.\n\nThe issue is **edge cases**.\n\nThe model operates in an open-input environment. The user can phrase requests in unlimited ways.\n\nFor example:  \nFor `lane_change`, there might be 30+ semantically equivalent variations. I built a synthetic data generation pipeline to create such variations and spent \\~2 weeks refining it. Evaluation suggests it's decent.\n\nBut:\n\nThere are still rare phrasings that the model hasn’t seen → wrong intent prediction.\n\nOf course, I can:\n\n* Iteratively collect misclassifications\n* Add them to the training set\n* Retrain\n\nBut that’s slow and reactive.\n\nConstraints:\n\n* I could use a larger model (e.g., phi-4), and I’ve tested it.\n* However, time-to-first-token for phi-4 is significantly slower.\n* Latency is more important than squeezing out a few extra percent of quality.\n\nSo scaling up model size isn’t ideal.\n\nMy questions to you:\n\nHow would you tackle the final 5%?\n\nI’d really appreciate hearing how others would approach this kind of edge, low-latency intent classification problem.\n\nThanks in advance!",
+      "is_original_content": false,
+      "link_flair_text": "Discussion",
+      "permalink": "https://reddit.com/r/LLMDevs/comments/1r204ab/intent_model/",
+      "domain": "self.LLMDevs",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "o4tefqh",
+          "author": "Swimming-Chip9582",
+          "text": "Can you detect whether the output is likely to be an edge case or know when it's part of an uncertain category?  Perhaps you can fallback on a larger model and accept latency when it's unsure. So starting both the small and large concurrent, if the small finishes first and is all good just cancel the large one, if it's uncertain then wait for completion from the bigger model. ",
+          "score": 4,
+          "created_utc": "2026-02-11 15:48:43",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "o4tll8h",
+          "author": "FoodAccurate5414",
+          "text": "You need to look into using very very very small models to handle edge cases. There are tons on hugging face. Run it along side your main model",
+          "score": 2,
+          "created_utc": "2026-02-11 16:22:02",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o4v57q9",
+              "author": "Repulsive_Laugh_1875",
+              "text": "Can you recommend something or at least tell which ones you have in mind?",
+              "score": 1,
+              "created_utc": "2026-02-11 20:43:59",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "o4t91xc",
+          "author": "InfraScaler",
+          "text": "Ok, so catching new ways of expressing the intent from your users is definitely reactive, but what about using bigger LLMs to generate those for you? Can you even use agents leveraging big LLMs to \"test\" and help prepare training for your system? Not necessarily cheap, but your employer may be able to afford it :-)",
+          "score": 1,
+          "created_utc": "2026-02-11 15:22:59",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o4tc616",
+              "author": "Repulsive_Laugh_1875",
+              "text": "It’s not the employer — it’s the customer who has to pay for it 😉\n\nJokes aside, thank you for your comment.\n\nI’m already using GPT-5.2-chat for the synthetic data generation. As mentioned, I’m currently achieving a full match rate  (intent plus parameters) of around 95%, and based on the latest metrics even closer to 97%, which I consider quite solid.\n\nThat’s why I don’t believe the data generation itself is the core issue here.\n\n  \n\\-------------------------- edited\n\n  \nin fact, I also thought about leveraging two agents to simulate such qustion answer things and try to figure out such edge cases. But this is costly.",
+              "score": 2,
+              "created_utc": "2026-02-11 15:38:00",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "o4thauy",
+                  "author": "InfraScaler",
+                  "text": ">But this is costly.\n\nNot for you! :P",
+                  "score": 2,
+                  "created_utc": "2026-02-11 16:02:04",
+                  "is_submitter": false,
+                  "replies": []
+                },
+                {
+                  "id": "o4ybuxq",
+                  "author": "BehindUAll",
+                  "text": "Why is cost an issue? If you are using 2 classifiers, they are cheaper than LLMs and if you are using LLMs like Llama-3.1 8b or Mistral small etc. you will get great speed and is cheap too. Plus you can use groq, SambaNova or Cerebras for fast and cheap inference. And for LLMs the input will be like 10 words and output 1 word if you do your system prompt right. The cost goes way down.",
+                  "score": 1,
+                  "created_utc": "2026-02-12 09:17:07",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "o4vvjay",
+          "author": "Charming_Support726",
+          "text": "First I doubt that models with decoder only architecture are the best fit for this task.  They allways bring error classes which are unwanted in these scenarios.\n\nSecond I doubt, that you ever will reach 100% - but that's obvious\n\nThird: Encoder-Decoder architectures promise the best fit and efficiency for these tasks, but you'll never know ( we did back in 2020 over a 1000 intents with Rasa in a BERT-Style Intent detector went over 90% but appeared still flaky). T5Gemma Style Models could be a solution, but I got no experience on fine tuning them.\n\nFourth you could apply additional techniques like reranking or building a similarity distance to sample sentences to make sure that your generation is a valid result.  Maybe good to combine this approaches with multiple generations of the result.\n\n\n\n",
+          "score": 1,
+          "created_utc": "2026-02-11 22:53:04",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o4ysnco",
+              "author": "Repulsive_Laugh_1875",
+              "text": "To your fist point: I agree to this but I don´t get what you mean by error classes? Do you mean just a wrong prediction label with this? If thats your point, you are right. These are the edge cases what I´m talking about! It never responds in a different way, it just predicts sometimes the wrong label (edge cases).\n\n  \nTo your second point -> That is obvious and clear. Customer is already pretty satisfied with the solution, but I´m not :D\n\n  \nthird: good hint. I need to look into them on how to really finetune them.\n\n  \nfourth: Indeed, I also wanted to test if you purely rely on similarity (history dependend intents excluded). I wanted to test if you can embedd those 25k and just detect the intent based on the similarity. I did something similar a few years back and this worked also very solid ;-) Now with the larger embedding representations, could also be an option.",
+              "score": 1,
+              "created_utc": "2026-02-12 11:51:20",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "o4yfzud",
+          "author": "tshawkins",
+          "text": "If it is acceptable to have edge case resolution slower, you could push the cases that fail to resolve out to a bigger model, and push those requests and thier resolutions into a set of training data for your next primary model rebuild. Its a hybrid solution that uses both bigger model and retraining for the 5% only.",
+          "score": 1,
+          "created_utc": "2026-02-12 09:58:02",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "o4u6y1l",
+          "author": "TheBioto",
+          "text": "Give Mistral 3b a shot and see how it works. \n\nI am currently doing something similar with endpoint nodes with small models. Mistral was the only one that was fast enough/could be guided enough to accomplish my needs.\n\nI don't have any suggestions for your edge cases issue, good luck!",
+          "score": 1,
+          "created_utc": "2026-02-11 18:01:47",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
       "id": "1qzm5bo",
       "title": "Skill Seekers v3.0.0 - Universal doc preprocessor for AI systems",
       "subreddit": "LLMDevs",
@@ -1603,51 +1737,60 @@
       ]
     },
     {
-      "id": "1qy8ptz",
-      "title": "Your agent's 100% pass rate on 10 runs is statistically compatible with 72% true reliability. Here's the math and a way to fix your CI.",
+      "id": "1r143o1",
+      "title": "Cut Agent Cost By 90% By Fixing Context Bloat, Routing Models and Actually Using Caching [Claude]",
       "subreddit": "LLMDevs",
-      "url": "https://www.reddit.com/r/LLMDevs/comments/1qy8ptz/your_agents_100_pass_rate_on_10_runs_is/",
-      "author": "Better_Accident8064",
-      "created_utc": "2026-02-07 08:39:48",
+      "url": "https://www.reddit.com/r/LLMDevs/comments/1r143o1/cut_agent_cost_by_90_by_fixing_context_bloat/",
+      "author": "thelastexcursion",
+      "created_utc": "2026-02-10 15:40:15",
       "score": 6,
-      "num_comments": 3,
-      "upvote_ratio": 0.8,
-      "text": "I ran a LangGraph agent with Claude 3.5 Haiku on a trivial task (\"What is 15 * 37?\") across 100 trials. Pass rate: 70%. Not 95%, not 99%. Seventy percent on a calculator task.\n\nThe interesting part isn't that agents fail — everyone here knows that. It's that **single-run evals can't detect it.** If you run 10 trials and get 10/10, Wilson score CI at 95% confidence gives you [0.722, 1.000]. Your \"perfect\" result is statistically compatible with a system that fails 28% of the time.\n\nThis matters for CI/CD. Most teams either skip agent evals in their pipeline or run each test once and assert pass/fail. Both approaches have the same problem: they can't distinguish a 95%-reliable agent from a 70%-reliable one unless you run enough trials.\n\n**What actually works for catching regressions:**\n\nRun each test case N times (N >= 20 makes a real difference). Compute Wilson CI on the pass rate. Compare against your baseline using Fisher exact test instead of naive diff. Use Benjamini-Hochberg correction if you're testing multiple cases simultaneously — otherwise you'll get false alarms.\n\nFor failure attribution: group trials into pass/fail, compare tool call distributions at each step, pick the step with the lowest Fisher p-value. This gives you \"step 2 tool selection is the bottleneck\" instead of \"test failed.\"\n\nI open-sourced the framework I built for this: [agentrial](https://github.com/alepot55/agentrial). It wraps any Python callable and has adapters for LangGraph, CrewAI, AutoGen, Pydantic AI, OpenAI Agents SDK, and smolagents. YAML config, runs in CI, exit code 1 on statistically significant regression.\n\n```\nbasic-math      20/20  CI=[0.839, 1.000]  PASS\nmulti-step      14/20  CI=[0.480, 0.862]  FAIL\n  → Step 2: tool selection diverges (p=0.003)\n```\n\nCurious how others are handling this. Are you running multi-trial evals in CI? Using soft thresholds? Something else entirely?\n",
+      "num_comments": 2,
+      "upvote_ratio": 1.0,
+      "text": "Started looking into this after my agent randomly fired off close to 1M tokens in a single request. Costs were unpredictable, rate limits were getting hammered, and I had no idea why.\n\nSo I instrumented everything, tracked token usage per action, and tested changes one at a time.\n\nLogged token counts per request, the model used, and the task it handled.\n\nRan multiple passes, compared baseline against each change, then cross-checked Anthropic's dashboard to see what actually got billed.\n\nAlso took screenshots of token graphs and fed them back into the agent to calibrate cost estimates. A bit meta, but it worked.\n\nKey finding #1: Context loading was the problem\n\nThe agent was loading all workspace and Slack session context on every single heartbeat. Once I stopped that, context-related tokens dropped \\~80%.\n\nAdded a \"new session\" command that archives old history in memory instead of resending it. Immediate difference.\n\nKey finding #2: Most tasks don't need the expensive model\n\nAfter classifying tasks, I routed about 75-85% of work to a cheap model, 10% to mid-tier, and only 3-5% to the expensive one.\n\nFile moves? CSV cleanup? Zero benefit from reasoning-heavy models.\n\nKey finding #3: Caching changed everything\n\nOne 6-hour multi-agent job was 95% cache-served and cost around $6 instead of an estimated $150.\n\nWhat surprised me most: the waste wasn't from complex tasks.\n\nIt was background behavior, heartbeats, retries, and context re-sends.\n\nOnce I controlled those, costs became predictable and boring.\n\nWhich is exactly what you want.\n\nToken efficiency isn't optimization. It's system design.\n\nCurious how others are handling cost control in agent setups.",
       "is_original_content": false,
-      "link_flair_text": "Tools",
-      "permalink": "https://reddit.com/r/LLMDevs/comments/1qy8ptz/your_agents_100_pass_rate_on_10_runs_is/",
+      "link_flair_text": "Discussion",
+      "permalink": "https://reddit.com/r/LLMDevs/comments/1r143o1/cut_agent_cost_by_90_by_fixing_context_bloat/",
       "domain": "self.LLMDevs",
       "is_self": true,
       "comments": [
         {
-          "id": "o41ydxz",
-          "author": "Thick-Protection-458",
-          "text": "\\> Your agent's 100% pass rate\n\nWell, isn't it clear?\n\nI mean that's fucking heuristic rather than predictable algorithm. With additional sampling randomness.\n\nYou can never have 100% working solution in such a case. You can have (unknown to you yet) distribution of test results you can't reliably distinguish from 100%.",
-          "score": 5,
-          "created_utc": "2026-02-07 09:17:22",
+          "id": "o4n17b9",
+          "author": "Fulgren09",
+          "text": "Especially relevant when passing system prompts. Anthropic’s caching is unmatched. In services I design using Claude is strategic not just for quality but for this architectural feature. ",
+          "score": 1,
+          "created_utc": "2026-02-10 16:34:48",
           "is_submitter": false,
           "replies": [
             {
-              "id": "o420e97",
-              "author": "Better_Accident8064",
-              "text": "Exactly. You can't distinguish true 100% from a sample that happened to look like 100%. But you can quantify it.\n\n20/20 passes gives a Wilson 95% CI of \\[0.839, 1.000\\], so your \"perfect\" score is compatible with 84% true reliability. agentrial just makes this math explicit and wires it into CI/CD.",
+              "id": "o4n4nqs",
+              "author": "thelastexcursion",
+              "text": "Yes sir preach",
               "score": 1,
-              "created_utc": "2026-02-07 09:37:38",
+              "created_utc": "2026-02-10 16:50:37",
               "is_submitter": true,
               "replies": []
             }
           ]
-        },
-        {
-          "id": "o43me85",
-          "author": "lionmeetsviking",
-          "text": "I use this: https://github.com/madviking/pydantic-llm-tester",
-          "score": 1,
-          "created_utc": "2026-02-07 16:15:01",
-          "is_submitter": false,
-          "replies": []
         }
       ]
+    },
+    {
+      "id": "1r2qfcz",
+      "title": "Mix prompts instead of writing them by hand",
+      "subreddit": "LLMDevs",
+      "url": "https://i.redd.it/5z7edpx9n1jg1.png",
+      "author": "Everlier",
+      "created_utc": "2026-02-12 10:55:12",
+      "score": 5,
+      "num_comments": 0,
+      "upvote_ratio": 1.0,
+      "text": "[External Link]",
+      "is_original_content": false,
+      "link_flair_text": "Tools",
+      "permalink": "https://reddit.com/r/LLMDevs/comments/1r2qfcz/mix_prompts_instead_of_writing_them_by_hand/",
+      "domain": "i.redd.it",
+      "is_self": false,
+      "comments": []
     }
   ]
 }
