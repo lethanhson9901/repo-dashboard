@@ -1,449 +1,13 @@
 {
   "metadata": {
-    "last_updated": "2026-02-13 09:09:58",
+    "last_updated": "2026-02-14 02:59:58",
     "time_filter": "week",
     "subreddit": "LLMDevs",
     "total_items": 20,
-    "total_comments": 95,
-    "file_size_bytes": 133873
+    "total_comments": 76,
+    "file_size_bytes": 106743
   },
   "items": [
-    {
-      "id": "1qxmeee",
-      "title": "I built RAG for 10K+ NASA docs (1950s–present) in 2 weeks: VLMs for complex tables, diagrams & formulas, 657K+ pages on a single H100, live-streamed full build.",
-      "subreddit": "LLMDevs",
-      "url": "https://www.reddit.com/r/LLMDevs/comments/1qxmeee/i_built_rag_for_10k_nasa_docs_1950spresent_in_2/",
-      "author": "Low_Acanthisitta7686",
-      "created_utc": "2026-02-06 16:32:09",
-      "score": 257,
-      "num_comments": 44,
-      "upvote_ratio": 0.95,
-      "text": "**TL;DR:** I designed and built a full RAG system over 10,000 NASA technical documents spanning the 1950s to 2025 — we're talking scanned typewriter reports, handwritten notes, propulsion diagrams, mathematical formulas, failure investigations. Off-the-shelf tools broke down fast. I ended up building a custom pipeline using Qwen3-VL-8B to process what traditional OCR and parsers couldn't handle, ran the whole thing on a single H100 (657,000+ pages, \\~180 pages/min), and built an agentic retrieval system that doesn't just search — it investigates like a domain expert. The architecture is designed to scale to 100K+ documents. Everything was live-streamed (140+ hours across 15 streams), and the GitHub repo for the document processing pipeline and infra is coming soon.\n\nHey everyone, I'm Raj. Over the last 2 weeks, I live-streamed building what turned out to be the most technically challenging project I've taken on — and I wanted to share the experience while it's fresh. This is a long one, I tried to keep it short, but there was too much that I think is genuinely useful to cut.\n\n# The Domain\n\nSo here's the scenario I designed for this project — a fictional aerospace consultancy called \"Meridian Aerospace,\" modeled on very real challenges these companies face.\n\n85,000+ documents accumulated over 70+ years — real documents from NASA's Technical Reports Server (NTRS). Propulsion test reports, failure investigations, component specs, regulatory filings. Engineers spending 4-6 hours per project digging through archives. A missed critical failure mode last quarter because the relevant data was buried in a 1997 test report nobody knew existed.\n\nNow here's what makes these documents painful:\n\n* 1950s–1990s scanned reports — photocopied, faxed, re-scanned, degraded quality\n* Dense technical diagrams everywhere: thrust curves, propulsion schematics, thermal analysis charts\n* Mathematical formulas and engineering equations scattered throughout\n* Domain-specific acronyms (Isp, TWR, LOX, MMH, NTO) that are often never expanded in the text\n* Cross-references between documents — failure reports cite original test data, compliance docs reference design specs\n* Tables spanning multiple pages with nested sub-headers\n\nI used 10,000 documents from NASA's Technical Reports Server as the working dataset, with the architecture designed from day one to handle the full 85K+ and beyond.\n\n# What I Built\n\nI'll walk through the three main layers, but I want to be clear — these aren't independent pieces you build one after another. They feed into each other constantly. Decisions in the document processing layer directly shaped how the agent works, and understanding how engineers actually think (the agent layer) changed how I approached extraction. It's all connected.\n\n# The Document Processing Pipeline\n\nThis is where a huge chunk of the work lived, and honestly where most people underestimate the difficulty. The core realization: **you cannot build good retrieval over bad extractions.** If your chunked text is garbage, no embedding model or re-ranker is going to save you.\n\nI used Docling (from IBM, I know it has a ton of issues — I found workarounds and solved them too) for layout detection — figuring out where tables, figures, formulas, and text blocks sit on each page. Then Qwen3-VL-8B to actually interpret what's in those regions.\n\nA few of the harder problems:\n\n**Formula association:** Docling detects formulas fine, but they lose their position in the document flow. So you get a formula floating at the end of a page with no connection to the paragraph it belongs to. I built a system that paints colored bounding boxes with ID numbers directly onto page screenshots, then asks the VLM \"where does Formula 7 belong relative to these numbered paragraphs?\" Sounds weird, works surprisingly well. Gives you reading-order accuracy without re-OCRing anything.\n\n**Complex tables:** These were probably the single most painful thing to solve. We're talking massive grids — 72 columns by 50 rows of stability data — where position determines meaning. Down arrows mean \"carry this value down.\" Brackets group five rows under \"Unstable.\" Zebra lines and grid lines guide the human eye across dense numbers. Standard OCR reads left-to-right, top-to-bottom and has no idea what to do with any of this. Parsers treat the grid lines as noise or lose alignment if the scan is slightly tilted.\n\nI went through a lot of approaches. Standard markdown extraction lost alignment. CV-based heatmaps and projection lines to detect rows — worked about 80% but too brittle for production. JSON output from the VLM broke constantly on large tables (missed closing brackets). Small models (7B) hallucinated numbers and missed columns entirely.\n\nWhat actually worked was treating the table as a photograph of data rather than a stream of text. Use Docling purely for finding the bounding box coordinates, crop the original high-res page image (no downscaling — that destroys data in dense tables), and send the full-resolution crop to a large VLM. You need 72B+ to hold context across a 30-column table without losing track.\n\nTwo tricks that made a real difference. First, for tables with zebra lines or warped scans, I pre-process the image by drawing red horizontal lines onto it before sending to the VLM — basically a \"digital ruler\" that forces the model to keep row alignment. Second, the prompt strategy — instead of asking for just structured output, I ask for markdown (way more robust than JSON for grid data) plus a \"notes\" field where the model captures visual shorthand. \"If there's a down arrow, note the value is carried down. If there's a bracket, note the grouping.\" The model successfully returned \"unstable\" for rows that didn't explicitly have the text but were visually grouped under an \"Unstable\" bracket.\n\nFor the truly dense tables that still needed more work, I have a fallback that generates a detailed description and serves the raw image alongside it — which honestly, in aerospace, engineers prefer anyway over a potentially wrong structured output. But this isn't a dead end. The digital ruler approach and the prompt strategy were working well, and with more time I think there's a solid solution there. I was time-boxed to 2 weeks for this entire project, so I made the pragmatic call to move on. Might revisit this specifically and share if I make a breakthrough.\n\n**Legacy scan quality:** Documents from the 1960s have noise, \"Confidential\" stamps, hole punches, scan artifacts — and models happily pick all of these up as \"figures.\" Added a classification step asking the VLM: \"Is this a technical diagram or just a document artifact?\" Simple, but it cleaned up a lot of noise.\n\n**The full-page strategy:** I initially tried cropping individual formulas to save tokens. Docling's format detection models missed about 60% of small formulas in dense pages. So I pivoted — if any formula is detected on a page, send the entire page screenshot to the VLM and let it transcribe everything in reading order. More expensive per page (didn't matter as I deployed on a GPU), but the accuracy difference is massive. In this domain, a missed variable isn't a minor bug.\n\n**On OCR,** I didn't actually need traditional OCR for most of the heavy lifting. The figures, tables, and formulas — which are the hardest parts of these documents — were all handled by the VLM pipeline. OCR was only needed as a fallback for pages where the embedded text layer was missing or corrupted. So the approach became: use native text extraction where available, VLM for all the visual/structured content, and OCR only when truly needed. Disabling forced OCR where it wasn't necessary cut processing time significantly.\n\n# H100 Infrastructure & Scaling\n\nProcessing 10K documents — roughly 657,000+ pages — on a single H100 was its own adventure.\n\n**Where it started:** My first attempt was basically a monolithic script. Every worker loaded the PDF, loaded the model onto the GPU, ran inference, unloaded. Workers were fighting each other for GPU memory, CPU, RAM. Everything was crashing. Back-of-the-napkin math said this approach would take somewhere around 28 days for the full dataset. Obviously not going to work.\n\n**The rewrite:** I moved to a proper service-oriented architecture. Separated the CPU-heavy work (Docling parsing, chunking, text extraction) from the GPU-heavy work (VLM inference). Stateless Celery workers handle the CPU side, feeding requests to a persistent vLLM server that does nothing but inference. Redis as the message broker. Took some inspiration from how production ML systems handle millions of requests with limited compute — keep your inference engine as a persistent service, don't have each worker spin it up and tear it down.\n\nThat alone brought the estimate down to maybe 5-9 days. Still not great.\n\n**Then the tuning started.** FP8 quantization because running standard GGUF/Ollama on an H100 is wasting the hardware — FP8 is specifically optimized for Hopper. Concurrency tuning: tested 6, 8, 9, 10 Docling workers. 9 caused instant OOM. 10 saturated the queue. 6 underutilized the GPU. 8 was the sweet spot. Dynamic image scaling for oversized PDFs — some scans were 170MB, crashing workers during bitmap conversion. VRAM memory leak management — usage would creep up batch after batch until it crashed, so I added explicit garbage collection between cycles.\n\n**End result:** \\~2.5 days, running at about 180 pages per minute. From 28 days to 2.5 days on the same hardware, just by thinking about architecture and resource management. Again, could have done better, but was on a time crunch.\n\n# The Agent & Retrieval Layer\n\nThis part tends to get underestimated. Building the agent wasn't just \"wire up some tools to an LLM and write a system prompt.\" A huge amount of time went into two things: understanding the people who would actually use this system, and shaping how the agent itself thinks.\n\nI spent a lot of time with Claude role-playing as different engineer personas — a cautious senior engineer (\"Sandra\") approaching retirement who's seen things go wrong, a junior engineer who searches too narrowly. I was trying to understand: how does their day actually work? How do they use current traditional systems? What's literally going through their mind when they're investigating a failure mode? What are they worried about that they won't say out loud?\n\nThat process shaped everything about the agent. For example — engineers don't just look for failure cases. They specifically look for *success cases* as counter-evidence to validate risky designs. A standard RAG setup completely misses that nuance. Or the fact that a \"question about a valve failure\" might actually be about defending a design decision in a review meeting next week. The agent needs to understand the situation behind the question.\n\nThat understanding fed directly into how I designed the agent's reasoning. One of the bigger realizations was that spiking domain intuition in the system prompt often outperforms complex retrieval engineering. Instead of hardcoding examples, I focused on making the agent think like a propulsion engineer. It should be low-opinionated and already have hypotheses before it runs a single search. When someone mentions a pressure value, it should have intuition about whether that's nominal or concerning. When it finds a document, it should reason about what it means, not just return it. It's not a search tool — it's a reasoning engine with engineering expertise that uses search as one of its tools. And honestly, this is still just at the system prompt level — keeping it low-opinionated, letting the model lean on its own domain knowledge rather than constraining it — but it brings absolute wonders to how the system behaves.\n\nWhat came out of all that work:\n\nThe agent doesn't just search — it investigates. It maintains a working task list and notes, forms hypotheses based on its domain intuition before it even touches the search tool, and updates its understanding as it learns. When a question branches, it spawns sub-agents for parallel research threads. It can navigate — read adjacent chunks, follow cross-references between documents, pull threads across decades of reports.\n\nWhen the text extraction is uncertain — and on 1950s docs, it will be — the agent can request a screenshot of the actual PDF page region to visually verify what it's reading. That \"visual region\" tool ended up being one of the most important things in the whole system. It's the bridge between \"95% OCR accuracy\" and \"actually trustworthy in aerospace.\"\n\nI also integrated the NASA Thesaurus — 18K aerospace terms filtered down to 3.5K propulsion-relevant concepts — so the system handles query expansion properly. \"LOX\" matches \"Liquid Oxygen,\" \"2000 PSI\" finds results mentioning \"13.9 MPa.\" Without this, you're relying on exact keyword matches in a domain where everyone uses different terminology for the same thing.\n\nAnd time-boxed search — engineers ask things like \"what do we know about cryogenic engine failures between 1970 and 1980?\" Filtering by time period before semantic search cuts the search space dramatically. When I tested this, the agent successfully traced the 50-year evolution of cryogenic systems — from passive insulation in the 1970s to active cryo-coolers in the 2020s — without any deep research mode. Just proper filtering and good retrieval.\n\n# What's Coming Next\n\nI've linked all the YouTube streams in the comments below — 15 streams, some of them are 11+ hours long, so obviously that's a lot to sit through. To make things more digestible and actually useful, I'm going to be posting specific problem/solution breakdowns over the next few days, including how I evaluated the system with 10K docs. Each of these topics was genuinely its own nightmare to solve, and I think the details will be helpful for anyone working on similar problems.\n\nI'm also hoping to open-source the document processing pipeline and infrastructure code on GitHub soon, which I think will be genuinely useful for anyone dealing with large-scale document processing — whether it's aerospace or not.\n\nOne last thing — I genuinely want to thank the team behind Claude Code. Being honest, a project like this would realistically take a team of 3-4 engineers working 3-4 months. The document processing pipeline alone, the infrastructure, the agent design, the frontend, evaluation — each of these is a serious body of work. I did it solo in 2 weeks, live on stream, and that would not have been possible without Claude Code, it was in the loop for pretty much all of it. Seriously, thank you to the engineers behind it.\n\nHappy to answer questions, and if you've dealt with similar problems — legacy docs, domain-specific retrieval, scaling document processing — I'd love to hear what you ran into.",
-      "is_original_content": false,
-      "link_flair_text": "Discussion",
-      "permalink": "https://reddit.com/r/LLMDevs/comments/1qxmeee/i_built_rag_for_10k_nasa_docs_1950spresent_in_2/",
-      "domain": "self.LLMDevs",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "o3xvwcn",
-          "author": "ksk99",
-          "text": "Any evaluation metrixs u used, any subset of data set along with queries and results we can use to recreate/learn",
-          "score": 5,
-          "created_utc": "2026-02-06 18:02:03",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o3xxjlq",
-              "author": "Low_Acanthisitta7686",
-              "text": "Yeah! So in the last stream (Part 14) I went through evaluation. Basically, I loaded co-related full docs into Gemini (1M context window) and had it generate complex questions that tested different aspects of the agent — things like cross-document reasoning, degraded documents, negative/boundary tests, and more.   \n  \nThen I evaluated and tested whether the system could find the right set of docs within the 10K-doc space.   \n  \nI felt like this gave me a solid initial test suite to run, which would probably end up being a pretty strong evaluation as well. Sure, I’ll share the dataset and pipeline with the repo soon.",
-              "score": 5,
-              "created_utc": "2026-02-06 18:09:57",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "o3xniw6",
-          "author": "vladimirxi",
-          "text": "Nuts.  Well done on the documentation!  Crazy project.  Well thought out.",
-          "score": 9,
-          "created_utc": "2026-02-06 17:22:02",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o3xpjs5",
-              "author": "Low_Acanthisitta7686",
-              "text": "Thank you!",
-              "score": 4,
-              "created_utc": "2026-02-06 17:31:43",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "o3xd6ic",
-          "author": "Low_Acanthisitta7686",
-          "text": "Check the live streams here (15 streams, 140+ hours): [https://www.youtube.com/@rajsuthanofficial7585/streams](https://www.youtube.com/@rajsuthanofficial7585/streams)",
-          "score": 9,
-          "created_utc": "2026-02-06 16:33:17",
-          "is_submitter": true,
-          "replies": [
-            {
-              "id": "o3xz1qw",
-              "author": "flaxseedyup",
-              "text": "You absolute gem of a man. I will definitely be looking at this. Thank you so much for sharing!    \n    \nWhere did you learn the majority of the core skills needed for such a project?    \n    \nDo you rate the “The AI Automators” who are on YouTube?",
-              "score": 5,
-              "created_utc": "2026-02-06 18:17:01",
-              "is_submitter": false,
-              "replies": [
-                {
-                  "id": "o3y00x7",
-                  "author": "Low_Acanthisitta7686",
-                  "text": "haha thanks ❤️\n\nI pretty much learned by building stuff. I was working on my startup and also worked with a few enterprises along the way, but mostly just learned by doing random complex projects!",
-                  "score": 1,
-                  "created_utc": "2026-02-06 18:21:35",
-                  "is_submitter": true,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "o3yeh4z",
-          "author": "makinggrace",
-          "text": "This was a beast of a project. Love it.",
-          "score": 2,
-          "created_utc": "2026-02-06 19:30:43",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o3yfh68",
-              "author": "Low_Acanthisitta7686",
-              "text": "for sure.... thanks!",
-              "score": 1,
-              "created_utc": "2026-02-06 19:35:39",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "o3zizu5",
-          "author": "tehsilentwarrior",
-          "text": "Cool stuff. Will be useful in playing Kerbal 😂\n\nNo but, impressive stuff. Hope to see it soon!",
-          "score": 2,
-          "created_utc": "2026-02-06 22:54:55",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o40q0gm",
-              "author": "Low_Acanthisitta7686",
-              "text": "appreciate it mate!",
-              "score": 1,
-              "created_utc": "2026-02-07 03:12:00",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "o3zr9gx",
-          "author": "[deleted]",
-          "text": "[deleted]",
-          "score": 2,
-          "created_utc": "2026-02-06 23:41:55",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o40q9jt",
-              "author": "Low_Acanthisitta7686",
-              "text": "thanks buddy!",
-              "score": 1,
-              "created_utc": "2026-02-07 03:13:37",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "o40685c",
-          "author": "Legitimate-Leek4235",
-          "text": "I wonder if we give this prompt to opus 4.1 and all the agents which built the compiler, will it be able to replicate this",
-          "score": 2,
-          "created_utc": "2026-02-07 01:09:08",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o40qtfh",
-              "author": "Low_Acanthisitta7686",
-              "text": "Nope — not possible at all. There are so many moving pieces and decisions to make, and honestly it takes a ton of thinking, trial, and error to get to this point. Check my YouTube streams — for around 3 days (each 8+ hours) I was banging my head building the infra, and then we completely rewrote the entire thing in a day. So it literally takes a lot of work. Luckily I’m an engineer, so it naturally 100× my potential.",
-              "score": 1,
-              "created_utc": "2026-02-07 03:17:09",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "o40cczw",
-          "author": "OnlyTimeFan",
-          "text": "Thanks for sharing and spreading the knowledge",
-          "score": 2,
-          "created_utc": "2026-02-07 01:47:02",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o40r1c8",
-              "author": "Low_Acanthisitta7686",
-              "text": "always!",
-              "score": 2,
-              "created_utc": "2026-02-07 03:18:34",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "o415khy",
-          "author": "FiddlyDink",
-          "text": "This is incredible work! I’m working on a RAG project to connect an LLM to a Neo4j data store to be able to ask questions about old records and I know how challenging it can be. I’m not trying to solve half the challenges that you had to and yet I’m still struggling. I would love to learn more about this work and will definitely be checking out your streams!",
-          "score": 2,
-          "created_utc": "2026-02-07 04:59:53",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o41c2p0",
-              "author": "Low_Acanthisitta7686",
-              "text": "❤️",
-              "score": 1,
-              "created_utc": "2026-02-07 05:50:53",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "o41t0xh",
-          "author": "Electrical-Paper-323",
-          "text": "Excellent! Looking forward to the GitHub project 😊",
-          "score": 2,
-          "created_utc": "2026-02-07 08:25:07",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o41ts01",
-          "author": "Neovison_vison",
-          "text": "Can you TLDR us in new since your last write up 4 months ago?",
-          "score": 2,
-          "created_utc": "2026-02-07 08:32:30",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o4258z7",
-              "author": "Low_Acanthisitta7686",
-              "text": "Worked on a couple of projects since then, wrapped up a few, and have a few ongoing. But mostly right now I’m focused on my startup, basically building something similar: on-prem search at scale for regulated enterprises like finance, pharma, ITAR-protected companies, and more. It’s [intraplex.ai](http://intraplex.ai) if you’re interested.",
-              "score": 2,
-              "created_utc": "2026-02-07 10:25:39",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "o42hujq",
-          "author": "redbull-hater",
-          "text": "Good job man",
-          "score": 2,
-          "created_utc": "2026-02-07 12:20:12",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o42pk2x",
-          "author": "jaykeerti123",
-          "text": "Great stuff. Waiting for the GitHub code.",
-          "score": 2,
-          "created_utc": "2026-02-07 13:16:16",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o48ti6r",
-          "author": "Manson_79",
-          "text": "wanted to do the same for my company, but,  i was afraid for legal reasons about hallucinations,  how did you get around that?   i'm also in aviation fyi\n\n",
-          "score": 2,
-          "created_utc": "2026-02-08 12:51:33",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o4rxyle",
-              "author": "Low_Acanthisitta7686",
-              "text": "Totally valid concern, especially in aviation. I don’t treat the model as an authority at all. It’s strictly retrieval-grounded and always ties answers back to actual documents, and when things look uncertain it surfaces the original page for human verification. So it’s more of a smart document navigator than something you blindly trust.",
-              "score": 1,
-              "created_utc": "2026-02-11 10:17:08",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "o4bwsxb",
-          "author": "Rockingtits",
-          "text": "Super cool!",
-          "score": 2,
-          "created_utc": "2026-02-08 22:24:00",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o4fuhpt",
-              "author": "Low_Acanthisitta7686",
-              "text": "thanks buddy!",
-              "score": 1,
-              "created_utc": "2026-02-09 14:45:55",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "o4di4d3",
-          "author": "JackfruitVivid180",
-          "text": "how can I get started into this ?\n\n",
-          "score": 2,
-          "created_utc": "2026-02-09 03:42:39",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o4furqr",
-              "author": "Low_Acanthisitta7686",
-              "text": "I did a post on this a couple of months back, might be helpful for you - [https://www.reddit.com/r/LLMDevs/comments/1nl9oxo/i\\_built\\_rag\\_systems\\_for\\_enterprises\\_20k\\_docs/](https://www.reddit.com/r/LLMDevs/comments/1nl9oxo/i_built_rag_systems_for_enterprises_20k_docs/)",
-              "score": 2,
-              "created_utc": "2026-02-09 14:47:23",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "o4lclmb",
-          "author": "Mr_Frosty009",
-          "text": "This is huge, congrats. But why RAG with this big piece of data, fine tuning would be better and faster at the end? Maybe I missed something and this is not local?",
-          "score": 2,
-          "created_utc": "2026-02-10 10:32:39",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o4ry8gn",
-              "author": "Low_Acanthisitta7686",
-              "text": "Fine-tuning doesn’t really inject knowledge in a reliable way, especially for research workflows where you need grounded answers. With RAG you’re always tied back to real documents, so you can push accuracy way higher and actually verify things. Fine-tuned models tend to drift and hallucinate when juggling lots of source docs. For this kind of work, I’d trust retrieval over memory every time.",
-              "score": 1,
-              "created_utc": "2026-02-11 10:19:38",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "o4ntmkp",
-          "author": "Nice_Baby_3044",
-          "text": "great.what should be the infra needed for 2000 a4 size images for building agents?",
-          "score": 2,
-          "created_utc": "2026-02-10 18:45:04",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o4rycn5",
-              "author": "Low_Acanthisitta7686",
-              "text": "For \\~2k A4 images you don’t need anything crazy. A single decent GPU box (24–48GB VRAM) or even a solid CPU + API VLM setup is enough, since the bottleneck is mostly image parsing, not scale. Split CPU work (preprocessing/chunking) from inference, batch aggressively, and you’ll be done in hours, not days. The heavy infra only really shows up when you’re pushing hundreds of thousands of pages.",
-              "score": 1,
-              "created_utc": "2026-02-11 10:20:41",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "o3yvpnv",
-          "author": "No_Wrongdoer41",
-          "text": "Me and a small team are building a platform that can accomplish something comparable in a matter of hours, repeateably, on corpuses of thousands of documents. I'd love your feedback on what we're working in if you don't mind discussing it with me!",
-          "score": 1,
-          "created_utc": "2026-02-06 20:56:32",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o3ywgcm",
-              "author": "Low_Acanthisitta7686",
-              "text": "sure",
-              "score": 1,
-              "created_utc": "2026-02-06 21:00:13",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "o3yhhfr",
-          "author": "satechguy",
-          "text": "Which Ilm wrote such verbose text ;-)",
-          "score": 0,
-          "created_utc": "2026-02-06 19:45:31",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o3yitmx",
-              "author": "Low_Acanthisitta7686",
-              "text": "haha, I wrote it and had claude help polish the english.",
-              "score": 2,
-              "created_utc": "2026-02-06 19:52:08",
-              "is_submitter": true,
-              "replies": [
-                {
-                  "id": "o3zji2u",
-                  "author": "tehsilentwarrior",
-                  "text": "I write a lot too and people these days just think AI did it. \n\nI spent quite a lot of time perfecting my English so when I documented a massive project we have my boss kept asking what AI I used for that .. lol\n\nI just said <my inicials>AI, and he was hilariously confused when he couldn’t find it. I said I trained it myself over the last decades",
-                  "score": 3,
-                  "created_utc": "2026-02-06 22:57:42",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "o3y97qu",
-          "author": "bbahner",
-          "text": "This is awesome! Thanks for sharing. ",
-          "score": 1,
-          "created_utc": "2026-02-06 19:05:07",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o3ybujq",
-              "author": "Low_Acanthisitta7686",
-              "text": "Sure!",
-              "score": 1,
-              "created_utc": "2026-02-06 19:17:55",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "o4241bl",
-          "author": "QuanstScientist",
-          "text": "OMG, what an amazing process documentation. We both went through a very similar process, I’m working on a local RAG for the Epstein archive files, still in development, also using Claude, here at some details, still not in a state for public release https://boltzmannentropy.github.io/Librarius/",
-          "score": 0,
-          "created_utc": "2026-02-07 10:13:49",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o406bb6",
-          "author": "EditorDisastrous4994",
-          "text": "You should try Reseek. It's an AI second brain that handles semantic search across notes, PDFs, and web content in one place. It might be a good alternative if you want a unified system",
-          "score": -1,
-          "created_utc": "2026-02-07 01:09:40",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o40r0u3",
-              "author": "Low_Acanthisitta7686",
-              "text": "Checked it out, but it doesn’t mention anywhere what scale it can work with, and that’s super important.",
-              "score": 1,
-              "created_utc": "2026-02-07 03:18:29",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        }
-      ]
-    },
     {
       "id": "1r1oa4i",
       "title": "EpsteinFiles-RAG: Building a RAG Pipeline on 2M+ Pages",
@@ -451,7 +15,7 @@
       "url": "https://www.reddit.com/r/LLMDevs/comments/1r1oa4i/epsteinfilesrag_building_a_rag_pipeline_on_2m/",
       "author": "Cod3Conjurer",
       "created_utc": "2026-02-11 05:01:53",
-      "score": 187,
+      "score": 201,
       "num_comments": 32,
       "upvote_ratio": 0.93,
       "text": "I love playing around with RAG and AI, optimizing every layer to squeeze out better performance. Last night I thought: why not tackle something massive?\n\nTook the Epstein Files dataset from Hugging Face (teyler/epstein-files-20k) – 2 million+ pages of trending news and documents. The cleaning, chunking, and optimization challenges are exactly what excites me.\n\nWhat I built:\n\n\\- Full RAG pipeline with optimized data processing\n\n\\- Processed 2M+ pages (cleaning, chunking, vectorization)\n\n\\- Semantic search & Q&A over massive dataset\n\n\\- Constantly tweaking for better retrieval & performance\n\n\\- Python, MIT Licensed, open source\n\nWhy I built this:\n\nIt’s trending, real-world data at scale, the perfect playground.\n\nWhen you operate at scale, every optimization matters. This project lets me experiment with RAG architectures, data pipelines, and AI performance tuning on real-world workloads.\n\nRepo: [https://github.com/AnkitNayak-eth/EpsteinFiles-RAG](https://github.com/AnkitNayak-eth/EpsteinFiles-RAG)\n\nOpen to ideas, optimizations, and technical discussions!",
@@ -465,7 +29,7 @@
           "id": "o4s8hek",
           "author": "TylerDurdenFan",
           "text": ">The cleaning, chunking, and optimization challenges are exactly what excites me\n\nJust try to not get too excited around that material, mkay?",
-          "score": 22,
+          "score": 24,
           "created_utc": "2026-02-11 11:48:06",
           "is_submitter": false,
           "replies": [
@@ -473,7 +37,7 @@
               "id": "o4sctpa",
               "author": "Cod3Conjurer",
               "text": "He he 😂",
-              "score": -12,
+              "score": -10,
               "created_utc": "2026-02-11 12:20:13",
               "is_submitter": true,
               "replies": [
@@ -494,7 +58,7 @@
           "id": "o4tf78a",
           "author": "Significant-Crow-974",
           "text": "It would be marvellous to run this over the full set of unredacted files.\nI am hoping that the FBI who have illegally redacted information do not now delete that hoard of documents.\nI hope that when they finally manage to charge Trump and the Epstein class that they will be able to utilise a tool such as this to make their prosecutions more effective.\nWell done and Thank you!",
-          "score": 6,
+          "score": 7,
           "created_utc": "2026-02-11 15:52:18",
           "is_submitter": false,
           "replies": [
@@ -502,7 +66,7 @@
               "id": "o4tgqt7",
               "author": "Cod3Conjurer",
               "text": "The goal here is purely technical, building better retrieval over large unstructured datasets.  \nAt the end of the day, it’s an engineering experiment, not a legal authority.  \n",
-              "score": 1,
+              "score": 3,
               "created_utc": "2026-02-11 15:59:29",
               "is_submitter": true,
               "replies": [
@@ -532,7 +96,7 @@
           "id": "o4r00lr",
           "author": "[deleted]",
           "text": "[deleted]",
-          "score": 7,
+          "score": 6,
           "created_utc": "2026-02-11 05:12:38",
           "is_submitter": false,
           "replies": [
@@ -557,7 +121,7 @@
                   "id": "o4sf4yp",
                   "author": "[deleted]",
                   "text": "[deleted]",
-                  "score": -6,
+                  "score": -3,
                   "created_utc": "2026-02-11 12:36:23",
                   "is_submitter": false,
                   "replies": []
@@ -570,7 +134,7 @@
           "id": "o4tfnfq",
           "author": "DaRandomStoner",
           "text": "I was hoping you had the newly released documents in this... until we get these new documents processed through an OCR and into an organized data structure, we can't really go through them properly. \n\nIt would cost a good amount to process all the new documents so that we can include them in databases like this... it's all just compute costs though. DeepSeek's OCR is open-source and can run on most PCs. If a bunch of people got together we could expand databases like this to include all the newly released docs...",
-          "score": 4,
+          "score": 5,
           "created_utc": "2026-02-11 15:54:22",
           "is_submitter": false,
           "replies": [
@@ -597,7 +161,7 @@
               "id": "o4rf5lj",
               "author": "Cod3Conjurer",
               "text": "Yeeha i have seen that \nBut it is currently broken",
-              "score": 0,
+              "score": -1,
               "created_utc": "2026-02-11 07:20:23",
               "is_submitter": true,
               "replies": []
@@ -683,7 +247,7 @@
               "id": "o4tfjmw",
               "author": "Cod3Conjurer",
               "text": "You’re right that absolute accuracy matters. That’s why this should be treated as an assistive search layer, not a final source of truth.\n\nAt the end of the day, it’s an engineering experiment, not a legal authority.",
-              "score": 5,
+              "score": 3,
               "created_utc": "2026-02-11 15:53:54",
               "is_submitter": true,
               "replies": [
@@ -841,9 +405,9 @@
       "url": "https://www.reddit.com/r/LLMDevs/comments/1r04wed/observations_from_using_gpt53_codex_and_claude/",
       "author": "Arindam_200",
       "created_utc": "2026-02-09 13:58:50",
-      "score": 17,
+      "score": 18,
       "num_comments": 6,
-      "upvote_ratio": 0.82,
+      "upvote_ratio": 0.83,
       "text": "I tested GPT-5.3 Codex and Claude Opus 4.6 shortly after release to see what actually happens once you stop prompting and start expecting results. Benchmarks are easy to read. Real execution is harder to fake.\n\nBoth models were given the same prompts and left alone to work. The difference showed up fast.\n\nCodex doesn’t hesitate. It commits early, makes reasonable calls on its own, and keeps moving until something usable exists. You don’t feel like you’re co-writing every step. You kick it off, check back, and review what came out. That’s convenient, but it also means you sometimes get decisions you didn’t explicitly ask for.\n\nOpus behaves almost the opposite way. It slows things down, checks its own reasoning, and tries to keep everything internally tidy. That extra caution shows up in the output. Things line up better, explanations make more sense, and fewer surprises appear at the end. The tradeoff is time.\n\nA few things stood out pretty clearly:\n\n* Codex optimizes for momentum, not elegance\n* Opus optimizes for coherence, not speed\n* Codex assumes you’ll iterate anyway\n* Opus assumes you care about getting it right the first time\n\nThe interaction style changes because of that. Codex feels closer to delegating work. Opus feels closer to collaborating on it.\n\nNeither model felt “smarter” than the other. They just burn time in different places. Codex burns it after delivery. Opus burns it before.\n\nIf you care about moving fast and fixing things later, Codex fits that mindset. If you care about clean reasoning and fewer corrections, Opus makes more sense.\n\nI wrote a longer breakdown [here](https://www.tensorlake.ai/blog/claude-opus-4-6-vs-gpt-5-3-codex) with screenshots and timing details in the full post for anyone who wants the deeper context.",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -855,7 +419,7 @@
           "id": "o4fmz12",
           "author": "swarmed100",
           "text": "Opus 4.6 reasons a lot longer than opus 4.5. One negative side I noticed from this is that it is \"better\" at finding delusional logic to explain why a set of facts that are clearly impossible \"make sense\", instead of concluding that some of the assumptions or inputs must be wrong since the set of facts are just impossible together.",
-          "score": 6,
+          "score": 5,
           "created_utc": "2026-02-09 14:03:48",
           "is_submitter": false,
           "replies": [
@@ -910,6 +474,72 @@
       ]
     },
     {
+      "id": "1r3kgpn",
+      "title": "Rearchitecting LLMs — pruning, distillation, and smaller domain models (MEAP)",
+      "subreddit": "LLMDevs",
+      "url": "https://www.reddit.com/r/LLMDevs/comments/1r3kgpn/rearchitecting_llms_pruning_distillation_and/",
+      "author": "ManningBooks",
+      "created_utc": "2026-02-13 09:07:18",
+      "score": 18,
+      "num_comments": 8,
+      "upvote_ratio": 1.0,
+      "text": "Hi r/LLMDevs,\n\nStjepan from Manning here. The mods said it's ok if I post this here. \n\nWe’ve just released a book that’s very much aimed at the kinds of problems this community discusses all the time: what to do when a general-purpose LLM is technically impressive but awkward, expensive, or inefficient for your actual use case.\n\n**Rearchitecting LLMs** by Pere Martra  \n[https://www.manning.com/books/rearchitecting-llms](https://hubs.la/Q042-hLy0)\n\n[Rearchitecting LLMs by Pere Martra](https://preview.redd.it/vyy079zx78jg1.jpg?width=2213&format=pjpg&auto=webp&s=755a8b1ab1320ede5daedfa861d6ab8d1b0c5e5d)\n\nThe core idea of the book is simple but powerful: instead of treating open models as fixed artifacts, you can reshape them. Pere walks through structural techniques like targeted fine-tuning, pruning, and knowledge distillation to build smaller, cheaper, domain-focused models that still perform well on the tasks you care about.\n\nWhat makes this book interesting is how hands-on it gets. You’re not working with abstract toy networks. The examples focus on modifying widely used open models, such as Llama-3, Gemma, and Qwen. The focus is on understanding which parts of a model actually contribute to behavior, how to identify waste or redundancy, and how to remove or compress components without blindly wrecking performance.\n\nThere’s also some genuinely thoughtful material on combining behavioral analysis with structural changes. Instead of just cutting parameters and hoping for the best, the book explores ways to reason about why a modification works or fails. One section that tends to spark discussion is “fair pruning,” where pruning is used not only for efficiency but also to reduce bias at the neuron level.\n\nIf you’re working on local models, cost-constrained deployments, or specialized SLMs, this book is very much in that territory. It’s written for people who are comfortable with LLM concepts and want to go deeper into how models can be reshaped rather than simply prompted.\n\n**For the** r/LLMDevs **community:**  \nYou can get **50% off** with the code **MLMARTRA50RE**.\n\nA quick note on availability: the book is currently in **MEAP (Manning Early Access Program)**. That means you get immediate access to the chapters as they’re written, along with updates as the manuscript evolves.\n\nHappy to bring the author to answer questions about the book, the techniques it covers, or the kinds of readers it’s best suited for. And I’d be curious to hear from folks here who are already doing pruning or distillation in practice — what’s been harder than expected?\n\nI'm ready to give away 5 ebooks to the first five commenters who share their experience here.\n\nThank you all for having us. It feels great to be here.\n\nCheers,",
+      "is_original_content": false,
+      "link_flair_text": "Resource",
+      "permalink": "https://reddit.com/r/LLMDevs/comments/1r3kgpn/rearchitecting_llms_pruning_distillation_and/",
+      "domain": "self.LLMDevs",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "o54xstz",
+          "author": "StackSmashRepeat",
+          "text": "Would you list some common problems and terminologies that the book covers? I'll have a look if it peaks my interest.",
+          "score": 3,
+          "created_utc": "2026-02-13 09:31:19",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o5529pk",
+              "author": "ManningBooks",
+              "text": "Hey, thanks for asking. Here are some examples of what the book covers:\n\n\\- End-to-End Model Re-architecting (Chapter 2): Transform Gemma-3-270M using depth pruning and knowledge distillation for a 10% speed increase while retaining 93-98% of original capabilities in a hands-on project.\n\n\\- Data-Driven Pruning (Chapters 4-5): Create two models from the same base (Qwen3-0.6B or Llama-3.2-1B): one for formal texts (WikiText) and another for short messages (SMS Spam), using activation analysis with PyTorch hooks to highlight domain-specific component importance.\n\n\\- Bias Auditing and Correction: In ethics chapters, perform a model \"cleanup\" using ablation frameworks and PCA visualization to identify and mitigate demographic biases, achieving fairness without full retraining.\n\n\\- Mini-Capstone: Utilize a small \"draft model\" to speed up LLM inference by quickly proposing tokens, validated by a larger model.\n\n\\- Capstone Project: Migrate an agent system from costly external APIs to a specialized local Small Language Model (SLM).\n\nHope this helps.",
+              "score": 6,
+              "created_utc": "2026-02-13 10:13:34",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "o56j1zc",
+                  "author": "StackSmashRepeat",
+                  "text": "This is quite interesting; you're trying to move local models away from the static model while staying within the static framework? I could basically train a model for my iPhone, let's say I export all my email and scrub PII, format for training data and then I could fine-tune to write mails that look somewhat within the realm of my own style? \n\nI haven't looked into training or fine tuning as I couldn't think of a personal use case for these tiny models, but like you're saying \"domain-focused\", gave a clearer picture.\n\nThis is a little over my current scope as I'm not even sure if I understood this correctly, but I've been thinking of ways to make a digital twin that could handle writing across multiple platforms. Was always thinking Id need a larger model to handle such a task because it sounds easy enough, but capturing the essence of one's writing is quite a complex task for llms. At least in my experience.\n\nThanks for the info.",
+                  "score": 3,
+                  "created_utc": "2026-02-13 15:45:55",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "o57qobq",
+          "author": "marm_alarm",
+          "text": "I'm a subscriber to Manning and so I have access to all the MEAP content.  I am very interested in reading this book and will post my review here after I've taken a look!",
+          "score": 1,
+          "created_utc": "2026-02-13 19:14:34",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "o57u5v0",
+          "author": "dextoz",
+          "text": "Would love a copy and meap along!",
+          "score": 1,
+          "created_utc": "2026-02-13 19:31:48",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
       "id": "1r162ky",
       "title": "LLaDA2.1 vs Autoregressive Baselines: Is Diffusion Finally Competitive for Inference Throughput?",
       "subreddit": "LLMDevs",
@@ -928,13 +558,154 @@
       "comments": []
     },
     {
+      "id": "1r0lbvd",
+      "title": "Mixture-of-Models routing beats single LLMs on SWE-Bench via task specialization",
+      "subreddit": "LLMDevs",
+      "url": "https://www.reddit.com/r/LLMDevs/comments/1r0lbvd/mixtureofmodels_routing_beats_single_llms_on/",
+      "author": "botirkhaltaev",
+      "created_utc": "2026-02-10 00:10:22",
+      "score": 10,
+      "num_comments": 0,
+      "upvote_ratio": 1.0,
+      "text": "I’ve been looking at per-task results on SWE-Bench Verified and noticed something that leaderboard averages hide: different models consistently solve *different* subsets of tasks.\n\nEven the top overall model on the leaderboard fails a non-trivial number of tasks that other models reliably solve, and the reverse is also true. This suggests strong task-level specialization rather than one model being strictly better.\n\nTo test this, I built a **Mixture-of-Models architecture**, which is different from traditional routing that just defaults to the strongest aggregate model most of the time. The goal isn’t to route to a single model as often as possible, but to exploit complementary strengths between models.\n\nConcretely:\n\n* The problem description is embedded\n* It’s assigned to a semantic cluster (learned from general coding data, not SWE-Bench)\n* Each cluster has learned per-model success statistics\n* The task is routed to the historically strongest model for that *type* of problem\n\nImportantly, this does **not** route the top aggregate model for the majority of tasks. Several clusters consistently route to other models where they outperform it, even though it has the highest overall score.\n\nThere’s no new foundation model, no test-time search, and no repo execution, just a lightweight gating mechanism over multiple models.\n\nUsing this Mixture-of-Models setup, the system reaches 75.6% on SWE-Bench, exceeding single-model baselines (\\~74%). The takeaway isn’t the absolute number, but the mechanism: leaderboard aggregates hide complementary strengths, and mixture architectures can capture a higher ceiling than any single model.\n\nBlog with details and methodology here: [https://nordlyslabs.com/blog/hypernova](https://nordlyslabs.com/blog/hypernova)\n\nGithub: the framework is open source ! [https://github.com/Nordlys-Labs/nordlys](https://github.com/Nordlys-Labs/nordlys)\n\nML/AI Research Community Discord: [https://discord.gg/dqW7BBrq](https://discord.gg/dqW7BBrq)",
+      "is_original_content": false,
+      "link_flair_text": "News",
+      "permalink": "https://reddit.com/r/LLMDevs/comments/1r0lbvd/mixtureofmodels_routing_beats_single_llms_on/",
+      "domain": "self.LLMDevs",
+      "is_self": true,
+      "comments": []
+    },
+    {
+      "id": "1qygq2b",
+      "title": "We have developed a different architecture for LLM that does not work on transformers but works on the principles of reservoir computing and energy modelling. It remains constant on vRAM as we scale context unlike transformers.",
+      "subreddit": "LLMDevs",
+      "url": "https://i.redd.it/3830vd8tc3ig1.jpeg",
+      "author": "Dry_Oil2597",
+      "created_utc": "2026-02-07 15:30:45",
+      "score": 10,
+      "num_comments": 3,
+      "upvote_ratio": 1.0,
+      "text": "[External Link]",
+      "is_original_content": false,
+      "link_flair_text": "Discussion",
+      "permalink": "https://reddit.com/r/LLMDevs/comments/1qygq2b/we_have_developed_a_different_architecture_for/",
+      "domain": "i.redd.it",
+      "is_self": false,
+      "comments": [
+        {
+          "id": "o43s4zy",
+          "author": "HumanDrone8721",
+          "text": "That's lovely, now publish it, open source it and let us train models based on it with opensource data sets, like the ones from Olmo series, and this way we can compare the efficiency and accuracy of the new method. I think I still have $200 on thinker.ai so I could do a test run for you if you publish the pipeline for training and inference.",
+          "score": 10,
+          "created_utc": "2026-02-07 16:43:12",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "o4ezthp",
+          "author": "Noddybear",
+          "text": "What perplexity?",
+          "score": 1,
+          "created_utc": "2026-02-09 11:23:18",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o4f049r",
+              "author": "Dry_Oil2597",
+              "text": "For average over 10k msmarco docs its 18",
+              "score": 1,
+              "created_utc": "2026-02-09 11:25:57",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "1qzi6ot",
+      "title": "Moltbook - No Human Captcha allows only LLMs post",
+      "subreddit": "LLMDevs",
+      "url": "https://i.redd.it/85cc0i50nbig1.png",
+      "author": "hasmcp",
+      "created_utc": "2026-02-08 19:25:50",
+      "score": 10,
+      "num_comments": 7,
+      "upvote_ratio": 0.69,
+      "text": "[External Link]",
+      "is_original_content": false,
+      "link_flair_text": "Discussion",
+      "permalink": "https://reddit.com/r/LLMDevs/comments/1qzi6ot/moltbook_no_human_captcha_allows_only_llms_post/",
+      "domain": "i.redd.it",
+      "is_self": false,
+      "comments": [
+        {
+          "id": "o4ckqbm",
+          "author": "dezastrologu",
+          "text": "Why do we still care about moltbook",
+          "score": 2,
+          "created_utc": "2026-02-09 00:40:22",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o4d8oco",
+              "author": "hasmcp",
+              "text": "My interest on the brilliant idea came for dealing with the spams and/or unwanted inputs. I found it clever. The developers are trying innovative ways and enjoying the moment.",
+              "score": 3,
+              "created_utc": "2026-02-09 02:50:29",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "o4e5tbx",
+                  "author": "HumanDrone8721",
+                  "text": "So soon to verify that you're no robot you'll have to use a robot?",
+                  "score": 3,
+                  "created_utc": "2026-02-09 06:36:39",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "o4b61ea",
+          "author": "Moliri-Eremitis",
+          "text": "Interesting. How long was the verification window?",
+          "score": 1,
+          "created_utc": "2026-02-08 20:09:14",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o4bh7z1",
+              "author": "_tony_lewis",
+              "text": "Seems to be 30s and if you are incorrect it locks, one of my agents made a formatting mistake so list a post",
+              "score": 2,
+              "created_utc": "2026-02-08 21:05:21",
+              "is_submitter": false,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "o4qprcx",
+          "author": "dydhaw",
+          "text": "This is the dumbest thing I've ever seen",
+          "score": 1,
+          "created_utc": "2026-02-11 03:59:18",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
       "id": "1qz1adm",
       "title": "-68% model size, <0.4 pp accuracy loss: Compressed LLaMA-3.2-1B → Q4_0 GGUF on SNIPS Dataset (CPU Inference)",
       "subreddit": "LLMDevs",
       "url": "https://www.reddit.com/gallery/1qz1adm",
       "author": "mr_ocotopus",
       "created_utc": "2026-02-08 06:10:48",
-      "score": 10,
+      "score": 9,
       "num_comments": 8,
       "upvote_ratio": 0.92,
       "text": "[External Link]",
@@ -995,33 +766,15 @@
       ]
     },
     {
-      "id": "1r0lbvd",
-      "title": "Mixture-of-Models routing beats single LLMs on SWE-Bench via task specialization",
-      "subreddit": "LLMDevs",
-      "url": "https://www.reddit.com/r/LLMDevs/comments/1r0lbvd/mixtureofmodels_routing_beats_single_llms_on/",
-      "author": "botirkhaltaev",
-      "created_utc": "2026-02-10 00:10:22",
-      "score": 10,
-      "num_comments": 0,
-      "upvote_ratio": 1.0,
-      "text": "I’ve been looking at per-task results on SWE-Bench Verified and noticed something that leaderboard averages hide: different models consistently solve *different* subsets of tasks.\n\nEven the top overall model on the leaderboard fails a non-trivial number of tasks that other models reliably solve, and the reverse is also true. This suggests strong task-level specialization rather than one model being strictly better.\n\nTo test this, I built a **Mixture-of-Models architecture**, which is different from traditional routing that just defaults to the strongest aggregate model most of the time. The goal isn’t to route to a single model as often as possible, but to exploit complementary strengths between models.\n\nConcretely:\n\n* The problem description is embedded\n* It’s assigned to a semantic cluster (learned from general coding data, not SWE-Bench)\n* Each cluster has learned per-model success statistics\n* The task is routed to the historically strongest model for that *type* of problem\n\nImportantly, this does **not** route the top aggregate model for the majority of tasks. Several clusters consistently route to other models where they outperform it, even though it has the highest overall score.\n\nThere’s no new foundation model, no test-time search, and no repo execution, just a lightweight gating mechanism over multiple models.\n\nUsing this Mixture-of-Models setup, the system reaches 75.6% on SWE-Bench, exceeding single-model baselines (\\~74%). The takeaway isn’t the absolute number, but the mechanism: leaderboard aggregates hide complementary strengths, and mixture architectures can capture a higher ceiling than any single model.\n\nBlog with details and methodology here: [https://nordlyslabs.com/blog/hypernova](https://nordlyslabs.com/blog/hypernova)\n\nGithub: the framework is open source ! [https://github.com/Nordlys-Labs/nordlys](https://github.com/Nordlys-Labs/nordlys)\n\nML/AI Research Community Discord: [https://discord.gg/dqW7BBrq](https://discord.gg/dqW7BBrq)",
-      "is_original_content": false,
-      "link_flair_text": "News",
-      "permalink": "https://reddit.com/r/LLMDevs/comments/1r0lbvd/mixtureofmodels_routing_beats_single_llms_on/",
-      "domain": "self.LLMDevs",
-      "is_self": true,
-      "comments": []
-    },
-    {
       "id": "1r041y4",
       "title": "A RAG Agent and their Types",
       "subreddit": "LLMDevs",
       "url": "https://www.reddit.com/gallery/1r041y4",
       "author": "KarllsMarcel",
       "created_utc": "2026-02-09 13:21:33",
-      "score": 10,
+      "score": 9,
       "num_comments": 3,
-      "upvote_ratio": 0.86,
+      "upvote_ratio": 0.8,
       "text": "[External Link]",
       "is_original_content": false,
       "link_flair_text": "Help Wanted",
@@ -1059,53 +812,6 @@
       ]
     },
     {
-      "id": "1qygq2b",
-      "title": "We have developed a different architecture for LLM that does not work on transformers but works on the principles of reservoir computing and energy modelling. It remains constant on vRAM as we scale context unlike transformers.",
-      "subreddit": "LLMDevs",
-      "url": "https://i.redd.it/3830vd8tc3ig1.jpeg",
-      "author": "Dry_Oil2597",
-      "created_utc": "2026-02-07 15:30:45",
-      "score": 9,
-      "num_comments": 3,
-      "upvote_ratio": 1.0,
-      "text": "[External Link]",
-      "is_original_content": false,
-      "link_flair_text": "Discussion",
-      "permalink": "https://reddit.com/r/LLMDevs/comments/1qygq2b/we_have_developed_a_different_architecture_for/",
-      "domain": "i.redd.it",
-      "is_self": false,
-      "comments": [
-        {
-          "id": "o43s4zy",
-          "author": "HumanDrone8721",
-          "text": "That's lovely, now publish it, open source it and let us train models based on it with opensource data sets, like the ones from Olmo series, and this way we can compare the efficiency and accuracy of the new method. I think I still have $200 on thinker.ai so I could do a test run for you if you publish the pipeline for training and inference.",
-          "score": 10,
-          "created_utc": "2026-02-07 16:43:12",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o4ezthp",
-          "author": "Noddybear",
-          "text": "What perplexity?",
-          "score": 1,
-          "created_utc": "2026-02-09 11:23:18",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o4f049r",
-              "author": "Dry_Oil2597",
-              "text": "For average over 10k msmarco docs its 18",
-              "score": 1,
-              "created_utc": "2026-02-09 11:25:57",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        }
-      ]
-    },
-    {
       "id": "1qz2edh",
       "title": "Golang or Python",
       "subreddit": "LLMDevs",
@@ -1126,7 +832,7 @@
           "id": "o48u3q8",
           "author": "etherealflaim",
           "text": "Go is better for building systems. Python is better for stitching together other people's stuff, which in the world of AI means a lot more Lego bricks to do random stuff like training and evaluating models locally.  If you're using cloud models like Gemini, model gateways, or providers like ollama though, suddenly this advantage gets blunted.\n\nFor agentic systems, Temporal (which was built in Go but that isn't super relevant) is a killer technology and you can even mix and match Go and Python where each one suits.",
-          "score": 5,
+          "score": 6,
           "created_utc": "2026-02-08 12:55:51",
           "is_submitter": false,
           "replies": [
@@ -1311,8 +1017,8 @@
       "author": "rudzienki",
       "created_utc": "2026-02-12 11:50:51",
       "score": 9,
-      "num_comments": 7,
-      "upvote_ratio": 0.84,
+      "num_comments": 8,
+      "upvote_ratio": 0.85,
       "text": "Hey! I was recently hired to build an AI shopping assistant for a huge brand, 1B$+ in revenue. Unfortunately can't say which one is it (damn NDAs), but I thought I'd share some lessons. After the project CTO told me “Working with you was the best AI investment in the last year”, so I guess it went well!\n\nI'm reposting this from my linkedin, so sorry for this \"linkedinish\" vibe:\n\nThe biggest secret was, surprise, surprise, **not** wasn’t fancy AI methods, complex RAG pipelines, and multi step workflows. In the end it was good prompts, a bunch of domain-specific tools and one subagent.  \n  \nThe secret was the process.  \n  \nI didn’t know anything about skincare so I had to learn about it. Even light understanding of the domain turned out EXTREMELY IMPORTANT since it allowed m to play around with an agent and have a good judgement whether it says good things. The fastest feedback loop is always \"in your head\".   \n  \nI built a domain-specific dashboard for the client. A collaborative environment where domain experts can play around with an agent, comment, feedback, etc. I took the idea from [Hamel Husain](https://x.com/HamelHusain) who said that [“The Most Important AI Investment is A Simple Data Viewer”.](https://x.com/i/status/1991903412997509372) He was damn right about it.   \n  \nThe last thing is something that is not talked much about but it should. We got hundreds of files about company knowledge. This knowledge is spread around big organisations like crazy. But if you really really understand the domain, if you really digest it all and ask a lot of questions, you’ll be able to COMPRESS this knowledge. You’ll find common stuff, remove dead ends, and really narrow it down to sth that expresses most about this company in smallest piece of text. This is your system prompt!! Why split context and add a potential point of failure if you can have MOST of the important stuff always in the system prompt? It’s crazy how well it works.  \n  \nOn the context engineering side we ended up with a great system prompt + a bunch of tools for getting info about products. I added one subagent for more complex stuff (routine building), but that was the only “fancy” thing out there.  \n  \nI think the lesson here is that building agents is not hard on the technical level, and every developer can do it! The models do all the heavy lifting and they’re only getting better. The secret is understanding the domain and extracting the domain knowledge from people who know it. It's communication.\n\n  \nI'm curious:\n\nHave you built such \"customer support\"-related agents for your companies too? One thing that triggers me is amount of those giant SaaS companies that promises \"the super ultra duper ai agent\", and honestly? I think they don't have much secret sauce. Models are doing heavy lifting, and simple methods where heavy lifting is done by domain-specific knowledge trump general purpose ones. \n\nHere's what Malte from Vercel recently wrote btw:\n\nhttps://preview.redd.it/h2pjrjfix1jg1.png?width=1198&format=png&auto=webp&s=c8cd25ac93ee3a1b92cab153a1c591edbaf35d78\n\nIt somehow clicks.",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -1324,7 +1030,7 @@
           "id": "o4ysvg2",
           "author": "HatApprehensive141",
           "text": "“Secret sauce” = good prompts, domain tools, and actually understanding the business… basically just doing your job properly.\n\nLots of companies hype up intergalactic RAG pipelines, but if you don’t compress real domain knowledge into a clear system, your agent is just an overconfident intern. The real edge isn’t the model magic, it’s the context quality.",
-          "score": 6,
+          "score": 8,
           "created_utc": "2026-02-12 11:53:06",
           "is_submitter": false,
           "replies": []
@@ -1358,19 +1064,10 @@
           ]
         },
         {
-          "id": "o4zc408",
-          "author": "ampancha",
-          "text": "You're right that domain knowledge compression matters more than complex RAG for quality. The gap I see in most \"it works\" agents is what happens at production scale: prompt injection attempts from real users, hallucinated product claims becoming liability, and cost spikes without per-user attribution. For a $1B brand those risks are where the actual work starts. Sent you a DM with more detail.",
-          "score": 1,
-          "created_utc": "2026-02-12 13:57:36",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
           "id": "o51kyxj",
           "author": "nore_se_kra",
           "text": "Beyond the hype... interesting read despite the comments here. I dont think it hurts to tell the story of applied \"boring\" company specific domain knowledge one more time.",
-          "score": 1,
+          "score": 2,
           "created_utc": "2026-02-12 20:26:21",
           "is_submitter": false,
           "replies": []
@@ -1379,8 +1076,27 @@
           "id": "o51q54o",
           "author": "SamCRichard",
           "text": "What LLM did you use or are you routing between them\n\n",
-          "score": 1,
+          "score": 2,
           "created_utc": "2026-02-12 20:50:52",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o55hde0",
+              "author": "rudzienki",
+              "text": "Main thread was optimized for latency so it was good-but-not-best model, sonnet territory.\n\nSubagent was supposed to reason over many products to analyse interactions, in this case we used the best reasoning model. Still was a bit too slow with max reasoning effort, so we ended up with the best model with mid reasoning effort.",
+              "score": 1,
+              "created_utc": "2026-02-13 12:19:04",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "o4zc408",
+          "author": "ampancha",
+          "text": "You're right that domain knowledge compression matters more than complex RAG for quality. The gap I see in most \"it works\" agents is what happens at production scale: prompt injection attempts from real users, hallucinated product claims becoming liability, and cost spikes without per-user attribution. For a $1B brand those risks are where the actual work starts. Sent you a DM with more detail.",
+          "score": 1,
+          "created_utc": "2026-02-12 13:57:36",
           "is_submitter": false,
           "replies": []
         }
@@ -1404,6 +1120,15 @@
       "is_self": true,
       "comments": [
         {
+          "id": "o4z3q6l",
+          "author": "rudzienki",
+          "text": "It's just a standardised way for companies to \"expose their tools\".\n\nIf you're Stripe you have a bunch of tools: \"do payment\", \"check invoices\" etc. If you want your agent to use them you can just... add them as tools to your agent. That's it. \n\nBut with MCP you can just say \"connect to stripe MCP\" and it automatically fetches all Stripe tools to be called. Stripe updates tools, you get update automatically.\n\nBut aside from that - no difference. \n\nBtw, MCP is much bigger protocol that handles more stuff than exposing tools, but in reality it's 99%, other uses didn't get much traction as far as I know.",
+          "score": 7,
+          "created_utc": "2026-02-12 13:08:59",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
           "id": "o4zrwup",
           "author": "fooz42",
           "text": "Service registry and discovery for remote procedure call is a wheel that gets reinvented every platform. It's not a revolution except in the sense the wheel gets reinvented every time the cycle turns, and now I'm getting dizzy from my metaphor.",
@@ -1413,19 +1138,10 @@
           "replies": []
         },
         {
-          "id": "o4z3q6l",
-          "author": "rudzienki",
-          "text": "It's just a standardised way for companies to \"expose their tools\".\n\nIf you're Stripe you have a bunch of tools: \"do payment\", \"check invoices\" etc. If you want your agent to use them you can just... add them as tools to your agent. That's it. \n\nBut with MCP you can just say \"connect to stripe MCP\" and it automatically fetches all Stripe tools to be called. Stripe updates tools, you get update automatically.\n\nBut aside from that - no difference. \n\nBtw, MCP is much bigger protocol that handles more stuff than exposing tools, but in reality it's 99%, other uses didn't get much traction as far as I know.",
-          "score": 6,
-          "created_utc": "2026-02-12 13:08:59",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
           "id": "o4yy3mm",
           "author": "kubrador",
           "text": "mcp is basically \"what if we made tool use boring and standardized so literally any llm can talk to literally any tool without rewiring everything\" agents let your llm pick tools. mcp is the \\*protocol\\* so your llm doesn't need to know what tools exist. they just show up. it's the difference between \"here's a menu\" vs \"here's a standardized way to hand someone a menu\"\n\nyou need it when you're tired of writing custom integrations for every tool+llm combo. you don't need it if you're just bolting claude into your thing once and calling it a day.",
-          "score": 2,
+          "score": 4,
           "created_utc": "2026-02-12 12:31:42",
           "is_submitter": false,
           "replies": [
@@ -1439,6 +1155,24 @@
               "replies": []
             }
           ]
+        },
+        {
+          "id": "o54buzg",
+          "author": "FoldedKatana",
+          "text": "MCP is dead now. OpenClaw skills are where it's at",
+          "score": 2,
+          "created_utc": "2026-02-13 06:11:43",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "o50wvs5",
+          "author": "throwaway490215",
+          "text": "MCPs are bullshit. They are a standard that basically tells the program run on your computer to prepend `some-tool --help` when you start a conversation, but with much more overhead, and **every conversation** even if you dont want to use `some-tool` this session. \n\nAnybody talking about credentials/authentication is a moron. \n\nJust add a \"Use `some-tool --help` to do X\" in your AGENTS.md and you're good.",
+          "score": 2,
+          "created_utc": "2026-02-12 18:31:39",
+          "is_submitter": false,
+          "replies": []
         },
         {
           "id": "o4z5ouz",
@@ -1486,28 +1220,10 @@
           "replies": []
         },
         {
-          "id": "o54buzg",
-          "author": "FoldedKatana",
-          "text": "MCP is dead now. OpenClaw skills are where it's at",
-          "score": 1,
-          "created_utc": "2026-02-13 06:11:43",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o50wvs5",
-          "author": "throwaway490215",
-          "text": "MCPs are bullshit. They are a standard that basically tells the program run on your computer to prepend `some-tool --help` when you start a conversation, but with much more overhead, and **every conversation** even if you dont want to use `some-tool` this session. \n\nAnybody talking about credentials/authentication is a moron. \n\nJust add a \"Use `some-tool --help` to do X\" in your AGENTS.md and you're good.",
-          "score": 1,
-          "created_utc": "2026-02-12 18:31:39",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
           "id": "o4zwht1",
           "author": "Electronic-Door7134",
           "text": "Good luck explaining to an auditor why your gave a 3rd party company full access to your company data (which is what happens without mcp)",
-          "score": -2,
+          "score": -4,
           "created_utc": "2026-02-12 15:41:50",
           "is_submitter": false,
           "replies": [
@@ -1515,88 +1231,12 @@
               "id": "o50avet",
               "author": "PaddingCompression",
               "text": "Wut",
-              "score": 2,
+              "score": 3,
               "created_utc": "2026-02-12 16:48:36",
               "is_submitter": false,
               "replies": []
             }
           ]
-        }
-      ]
-    },
-    {
-      "id": "1qzi6ot",
-      "title": "Moltbook - No Human Captcha allows only LLMs post",
-      "subreddit": "LLMDevs",
-      "url": "https://i.redd.it/85cc0i50nbig1.png",
-      "author": "hasmcp",
-      "created_utc": "2026-02-08 19:25:50",
-      "score": 8,
-      "num_comments": 7,
-      "upvote_ratio": 0.66,
-      "text": "[External Link]",
-      "is_original_content": false,
-      "link_flair_text": "Discussion",
-      "permalink": "https://reddit.com/r/LLMDevs/comments/1qzi6ot/moltbook_no_human_captcha_allows_only_llms_post/",
-      "domain": "i.redd.it",
-      "is_self": false,
-      "comments": [
-        {
-          "id": "o4ckqbm",
-          "author": "dezastrologu",
-          "text": "Why do we still care about moltbook",
-          "score": 2,
-          "created_utc": "2026-02-09 00:40:22",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o4d8oco",
-              "author": "hasmcp",
-              "text": "My interest on the brilliant idea came for dealing with the spams and/or unwanted inputs. I found it clever. The developers are trying innovative ways and enjoying the moment.",
-              "score": 2,
-              "created_utc": "2026-02-09 02:50:29",
-              "is_submitter": true,
-              "replies": [
-                {
-                  "id": "o4e5tbx",
-                  "author": "HumanDrone8721",
-                  "text": "So soon to verify that you're no robot you'll have to use a robot?",
-                  "score": 3,
-                  "created_utc": "2026-02-09 06:36:39",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "o4b61ea",
-          "author": "Moliri-Eremitis",
-          "text": "Interesting. How long was the verification window?",
-          "score": 1,
-          "created_utc": "2026-02-08 20:09:14",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o4bh7z1",
-              "author": "_tony_lewis",
-              "text": "Seems to be 30s and if you are incorrect it locks, one of my agents made a formatting mistake so list a post",
-              "score": 2,
-              "created_utc": "2026-02-08 21:05:21",
-              "is_submitter": false,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "o4qprcx",
-          "author": "dydhaw",
-          "text": "This is the dumbest thing I've ever seen",
-          "score": 1,
-          "created_utc": "2026-02-11 03:59:18",
-          "is_submitter": false,
-          "replies": []
         }
       ]
     },
@@ -1607,9 +1247,9 @@
       "url": "https://substack.com/home/post/p-187075330",
       "author": "SeriousSir1148",
       "created_utc": "2026-02-07 16:45:11",
-      "score": 7,
+      "score": 8,
       "num_comments": 0,
-      "upvote_ratio": 0.71,
+      "upvote_ratio": 0.75,
       "text": "[External Link]",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -1769,40 +1409,112 @@
       ]
     },
     {
-      "id": "1r143o1",
-      "title": "Cut Agent Cost By 90% By Fixing Context Bloat, Routing Models and Actually Using Caching [Claude]",
+      "id": "1r21425",
+      "title": "I tracked how much time my team wastes re-explaining context. The number is embarrassing.",
       "subreddit": "LLMDevs",
-      "url": "https://www.reddit.com/r/LLMDevs/comments/1r143o1/cut_agent_cost_by_90_by_fixing_context_bloat/",
-      "author": "thelastexcursion",
-      "created_utc": "2026-02-10 15:40:15",
+      "url": "https://www.reddit.com/r/LLMDevs/comments/1r21425/i_tracked_how_much_time_my_team_wastes/",
+      "author": "arapkuliev",
+      "created_utc": "2026-02-11 15:56:39",
       "score": 7,
-      "num_comments": 2,
-      "upvote_ratio": 1.0,
-      "text": "Started looking into this after my agent randomly fired off close to 1M tokens in a single request. Costs were unpredictable, rate limits were getting hammered, and I had no idea why.\n\nSo I instrumented everything, tracked token usage per action, and tested changes one at a time.\n\nLogged token counts per request, the model used, and the task it handled.\n\nRan multiple passes, compared baseline against each change, then cross-checked Anthropic's dashboard to see what actually got billed.\n\nAlso took screenshots of token graphs and fed them back into the agent to calibrate cost estimates. A bit meta, but it worked.\n\nKey finding #1: Context loading was the problem\n\nThe agent was loading all workspace and Slack session context on every single heartbeat. Once I stopped that, context-related tokens dropped \\~80%.\n\nAdded a \"new session\" command that archives old history in memory instead of resending it. Immediate difference.\n\nKey finding #2: Most tasks don't need the expensive model\n\nAfter classifying tasks, I routed about 75-85% of work to a cheap model, 10% to mid-tier, and only 3-5% to the expensive one.\n\nFile moves? CSV cleanup? Zero benefit from reasoning-heavy models.\n\nKey finding #3: Caching changed everything\n\nOne 6-hour multi-agent job was 95% cache-served and cost around $6 instead of an estimated $150.\n\nWhat surprised me most: the waste wasn't from complex tasks.\n\nIt was background behavior, heartbeats, retries, and context re-sends.\n\nOnce I controlled those, costs became predictable and boring.\n\nWhich is exactly what you want.\n\nToken efficiency isn't optimization. It's system design.\n\nCurious how others are handling cost control in agent setups.",
+      "num_comments": 12,
+      "upvote_ratio": 0.82,
+      "text": "I got annoyed enough to actually measure this.  \n  \nFor two weeks I logged every time someone on my 6-person eng team had to re-explain context to someone else. Slack catch-ups, meeting recaps, \"here's what we decided and why\" conversations, onboarding someone into a thread.  \n  \n47 times per week. Average 8.5 minutes each. That's 6.5 hours/week of engineering time just... transferring context from one brain to another.  \n  \nAnd that's only the times someone *bothered*. How many times did someone just not explain, and the other person made a decision with half the picture?  \n  \nWe have Notion. We have Confluence. We have a wiki nobody reads. We have \"just search Slack\" which is a joke. None of it works because the context is either stale, unfindable, or so buried in noise that nobody trusts it.  \n  \nI've been experimenting with treating it as a memory problem instead of a documentation problem. Like, what if decisions and context got captured *as they happened* instead of someone writing a doc after the fact (which nobody does)?  \n  \nEarly results are promising but I'm curious: is anyone else measuring this? Or are we all just accepting \"let me catch you up\" as a normal part of work?",
       "is_original_content": false,
       "link_flair_text": "Discussion",
-      "permalink": "https://reddit.com/r/LLMDevs/comments/1r143o1/cut_agent_cost_by_90_by_fixing_context_bloat/",
+      "permalink": "https://reddit.com/r/LLMDevs/comments/1r21425/i_tracked_how_much_time_my_team_wastes/",
       "domain": "self.LLMDevs",
       "is_self": true,
       "comments": [
         {
-          "id": "o4n17b9",
-          "author": "Fulgren09",
-          "text": "Especially relevant when passing system prompts. Anthropic’s caching is unmatched. In services I design using Claude is strategic not just for quality but for this architectural feature. ",
-          "score": 1,
-          "created_utc": "2026-02-10 16:34:48",
+          "id": "o4vfvzu",
+          "author": "radarsat1",
+          "text": "yes, humans talking to each other is a normal part of work.",
+          "score": 14,
+          "created_utc": "2026-02-11 21:35:20",
           "is_submitter": false,
           "replies": [
             {
-              "id": "o4n4nqs",
-              "author": "thelastexcursion",
-              "text": "Yes sir preach",
-              "score": 1,
-              "created_utc": "2026-02-10 16:50:37",
-              "is_submitter": true,
+              "id": "o55yfuf",
+              "author": "MannToots",
+              "text": "I like when people succinctly prove they didn't read the whole thing.  ",
+              "score": 0,
+              "created_utc": "2026-02-13 14:01:55",
+              "is_submitter": false,
               "replies": []
             }
           ]
+        },
+        {
+          "id": "o4x7jvn",
+          "author": "Nofoofro",
+          "text": "It sounds like a culture, process and info architecture issue. \n\nSo many of these posts have so little detail. So many words to say so little.",
+          "score": 5,
+          "created_utc": "2026-02-12 03:35:56",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "o4vi0yz",
+          "author": "WolfeheartGames",
+          "text": "This is a problem of information theory and how communication works.",
+          "score": 3,
+          "created_utc": "2026-02-11 21:45:23",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "o50jv89",
+          "author": "UncleRedz",
+          "text": "May I ask how many products and/or feature areas your team is responsible for and the size of the team? Too big teams and self organization doesn't work, information starts to become siloed. Too many products and/or feature areas and the cognitive load increases to a point where it's simply not possible to keep track of everything by everyone. Then you need to split into sub-teams with specific areas of responsibilities, which you can only do if the team is big enough. So it's both organizational and resource constrainted. I guess you could call it a memory problem, but i'd say it's more about memory capacity then.",
+          "score": 2,
+          "created_utc": "2026-02-12 17:31:01",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "o4z8bxu",
+          "author": "PaddingCompression",
+          "text": "This is my favorite part of vibe coding.\n\nLLMs are so obviously bad at context that I'm forced to be really good at explicit communication and organization of information.  These skills are just generally pretty useful in life.\n\nIt's like practicing delegation skills on hard mode.",
+          "score": 1,
+          "created_utc": "2026-02-12 13:36:31",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "o4ztvpo",
+          "author": "Mad_Tyrion",
+          "text": "you are not alone :(",
+          "score": 1,
+          "created_utc": "2026-02-12 15:29:19",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "o5404zr",
+          "author": "mimitwothree",
+          "text": "Is that the problem or job stress? Let me out it this way. Your parents asked you what probably a billion time in a year to do something and u still didn't.\n\nShall I say lazy?\nCan't be bothered?\n\nNo bro. \n\nIt's just growing as a person . If this bothers u then trust me this is not the problem. \nThe problem is the job and you . \nRelax .",
+          "score": 1,
+          "created_utc": "2026-02-13 04:41:39",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "o56s9o2",
+          "author": "gh0stwriter1234",
+          "text": "Probably the most effective way to reduce this is have the correct person decide things... decentralized decision making is always going to be less efficient but it is also more robust at various levels as well as in distributing blame in the event of failure because instead of throwing one person under the bus and continuing to be bad everyone has to accept reality.\n\nSometimes being effective is counter productive in the long run because of the secondary effects.",
+          "score": 1,
+          "created_utc": "2026-02-13 16:29:29",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "o57bphs",
+          "author": "siddu71",
+          "text": "Don't optimize humans like robots or programming...",
+          "score": 1,
+          "created_utc": "2026-02-13 18:03:03",
+          "is_submitter": false,
+          "replies": []
         }
       ]
     },
@@ -1882,86 +1594,22 @@
       ]
     },
     {
-      "id": "1r21425",
-      "title": "I tracked how much time my team wastes re-explaining context. The number is embarrassing.",
+      "id": "1r3hvkg",
+      "title": "Observation: LLMs seem to have a \"Version 2.0\" bias when generating new UIs",
       "subreddit": "LLMDevs",
-      "url": "https://www.reddit.com/r/LLMDevs/comments/1r21425/i_tracked_how_much_time_my_team_wastes/",
-      "author": "arapkuliev",
-      "created_utc": "2026-02-11 15:56:39",
-      "score": 5,
-      "num_comments": 9,
-      "upvote_ratio": 0.73,
-      "text": "I got annoyed enough to actually measure this.  \n  \nFor two weeks I logged every time someone on my 6-person eng team had to re-explain context to someone else. Slack catch-ups, meeting recaps, \"here's what we decided and why\" conversations, onboarding someone into a thread.  \n  \n47 times per week. Average 8.5 minutes each. That's 6.5 hours/week of engineering time just... transferring context from one brain to another.  \n  \nAnd that's only the times someone *bothered*. How many times did someone just not explain, and the other person made a decision with half the picture?  \n  \nWe have Notion. We have Confluence. We have a wiki nobody reads. We have \"just search Slack\" which is a joke. None of it works because the context is either stale, unfindable, or so buried in noise that nobody trusts it.  \n  \nI've been experimenting with treating it as a memory problem instead of a documentation problem. Like, what if decisions and context got captured *as they happened* instead of someone writing a doc after the fact (which nobody does)?  \n  \nEarly results are promising but I'm curious: is anyone else measuring this? Or are we all just accepting \"let me catch you up\" as a normal part of work?",
+      "url": "https://i.redd.it/rmkiv7qmh7jg1.jpeg",
+      "author": "Routine_Connection8",
+      "created_utc": "2026-02-13 06:29:02",
+      "score": 6,
+      "num_comments": 0,
+      "upvote_ratio": 1.0,
+      "text": "[External Link]",
       "is_original_content": false,
       "link_flair_text": "Discussion",
-      "permalink": "https://reddit.com/r/LLMDevs/comments/1r21425/i_tracked_how_much_time_my_team_wastes/",
-      "domain": "self.LLMDevs",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "o4vfvzu",
-          "author": "radarsat1",
-          "text": "yes, humans talking to each other is a normal part of work.",
-          "score": 13,
-          "created_utc": "2026-02-11 21:35:20",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o4x7jvn",
-          "author": "Nofoofro",
-          "text": "It sounds like a culture, process and info architecture issue. \n\nSo many of these posts have so little detail. So many words to say so little.",
-          "score": 7,
-          "created_utc": "2026-02-12 03:35:56",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o4vi0yz",
-          "author": "WolfeheartGames",
-          "text": "This is a problem of information theory and how communication works.",
-          "score": 3,
-          "created_utc": "2026-02-11 21:45:23",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o50jv89",
-          "author": "UncleRedz",
-          "text": "May I ask how many products and/or feature areas your team is responsible for and the size of the team? Too big teams and self organization doesn't work, information starts to become siloed. Too many products and/or feature areas and the cognitive load increases to a point where it's simply not possible to keep track of everything by everyone. Then you need to split into sub-teams with specific areas of responsibilities, which you can only do if the team is big enough. So it's both organizational and resource constrainted. I guess you could call it a memory problem, but i'd say it's more about memory capacity then.",
-          "score": 2,
-          "created_utc": "2026-02-12 17:31:01",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o4z8bxu",
-          "author": "PaddingCompression",
-          "text": "This is my favorite part of vibe coding.\n\nLLMs are so obviously bad at context that I'm forced to be really good at explicit communication and organization of information.  These skills are just generally pretty useful in life.\n\nIt's like practicing delegation skills on hard mode.",
-          "score": 1,
-          "created_utc": "2026-02-12 13:36:31",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o4ztvpo",
-          "author": "Mad_Tyrion",
-          "text": "you are not alone :(",
-          "score": 1,
-          "created_utc": "2026-02-12 15:29:19",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o5404zr",
-          "author": "mimitwothree",
-          "text": "Is that the problem or job stress? Let me out it this way. Your parents asked you what probably a billion time in a year to do something and u still didn't.\n\nShall I say lazy?\nCan't be bothered?\n\nNo bro. \n\nIt's just growing as a person . If this bothers u then trust me this is not the problem. \nThe problem is the job and you . \nRelax .",
-          "score": 1,
-          "created_utc": "2026-02-13 04:41:39",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
+      "permalink": "https://reddit.com/r/LLMDevs/comments/1r3hvkg/observation_llms_seem_to_have_a_version_20_bias/",
+      "domain": "i.redd.it",
+      "is_self": false,
+      "comments": []
     }
   ]
 }
