@@ -1,385 +1,13 @@
 {
   "metadata": {
-    "last_updated": "2026-02-25 09:09:57",
+    "last_updated": "2026-02-26 03:06:08",
     "time_filter": "week",
     "subreddit": "aws",
     "total_items": 20,
-    "total_comments": 143,
-    "file_size_bytes": 172088
+    "total_comments": 128,
+    "file_size_bytes": 147919
   },
   "items": [
-    {
-      "id": "1r8ehng",
-      "title": "Everyone says \"tag your resources\" for cost control. Nobody explains how to actually do it well.",
-      "subreddit": "aws",
-      "url": "https://www.reddit.com/r/aws/comments/1r8ehng/everyone_says_tag_your_resources_for_cost_control/",
-      "author": "alex_aws_solutions",
-      "created_utc": "2026-02-18 20:35:12",
-      "score": 110,
-      "num_comments": 62,
-      "upvote_ratio": 0.89,
-      "text": "Every AWS cost optimization post says the same thing: \"tag your resources, use Cost Allocation Tags.\" Great advice, very helpful, thanks.\n\nBut after 18 months of cleaning up a pretty messy AWS setup I realized that having tags is not the hard part. The hard part is having the right tags in a structure that actually tells you something useful. We went from \"yeah we tag stuff\" to genuinely understanding our spend down to the feature level, and the difference is night and day.\n\nHere's what worked for us.\n\n**Three mandatory tags, everything else optional**\n\nWe use exactly three required tags on every resource:\n\n* **Environment**: prod, staging, dev and sandbox. Obvious but you'd be surprised how many things don't have this.\n* **Service**: this is YOUR service, not the AWS service. So not \"RDS\" but \"payment-processor\" or \"user-api\" or \"data-pipeline\". This is the one that matters most.\n* **Team**: who owns this when it breaks at 2am. Also who gets asked when the cost spikes.\n\nThe key insight for us was Service. We used to tag by AWS product type which told us basically nothing we didn't allready know from Cost Explorer. Once we started tagging by our own service names, everything changed. A single Service:payment-processor tag now spans the ALB, the ECS tasks, the RDS cluster, the SQS queues. I can see what it actually costs to run payments across all infrastructure, not just what individual resources cost in isolation.\n\n**Why only three**\n\nWe started with 12 required tags. Compliance was maybe 40% at best. People just didn't bother or tagged inconsistently. Dropped to 3 mandatory + 5 optional and we're at around 95% now. Turns out people will actually do it if you keep it simple.\n\n**Enforce tagging at creation, not with angry Slack messages**\n\nThis was probably our biggest lesson. We handle this on two levels now:\n\n1. We use OPA policies with Terraform now (see picture). If a resource doesn't have the three mandatory tags, the apply just fails. No exceptions, no \"I'll add it later\". Retroactive tagging is a nightmare and honestly a waste of everyones time.\n2. At the AWS Organization level with SCPs, they block the creation of resources that don’t include those tags. This covers cases where someone spins up resources manually in the console, through the CLI or SDK, outside of terraform.\n\nWe spent almost two weeks tagging old resources manually before we accepted it would have been cheaper to just let them expire and recreate them properly. If you're early enough, enforce from day one. If you're late, don't try to fix everything, just enforce going forward and let the old stuff cycle out.\n\n**The report that actually gets read**\n\nWe have a simple monthly report that flags any service where cost went up more than 30% month over month. The catch is this only works if tagging is consistent, which is why enforcement matters so much.\n\nWhen payment-processor jumps from $800 to $2,400, thats a conversation worth having. And it’s a very different conversation than \"our EC2 bill went up\". Finance doesn't care about EC2 vs Lambda. They want to know what business capability costs what and whether the increase makes sense. \"The recommendation engine doubled because we shipped a new model\" is an answer people can actually work with.\n\n**The unsolved problem: shared infrastructure**\n\nThe one thing we still don't have a clean answer for is shared resources. Databases that serve multiple services, shared Redis clusters, that kind of thing. Right now we tag those with the primary consumer and accept it’s not perfectly accurate. Looked into split cost allocation tags but honestly it felt like over-engineering for our size.\n\nCurious how others handle this. Anyone have a tagging strategy that actually survived contact with reality? Especially for shared infrastructure.",
-      "is_original_content": false,
-      "link_flair_text": "article",
-      "permalink": "https://reddit.com/r/aws/comments/1r8ehng/everyone_says_tag_your_resources_for_cost_control/",
-      "domain": "self.aws",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "o64h47r",
-          "author": "ryancoplen",
-          "text": "IMHO, while tags can be helpful its not the end all be all, specifically because of the issues you called out at the end: shared \"stuff\".\n\nInstead of trying to use tags and assigning ownership that way, I massively prefer to separate everything by account.\n\nYou bring up Environment, Service and Team as ways that you want to enforce control. This is backwards from my preference.\n\nTeams are the top level of ownership and accountability. AWS accounts should be owned by a single team. What happens in those accounts is the responsibility of the owning team.\n\nServices should be owned by a single team, and they should run in accounts owned by those teams.\n\nStages (Dev/Test/Prod) are how Services are deployed. Each stage of a service should have its own account. This makes sure that someone whacking an IAM role in your devo environment doesn't somehow impact your Prod envionment which is (stupidly) running  in that same account.\n\nI'd add that regional distribution is another thing that should also be happening in their own accounts. So your NA prod environment for Service A is in a different account than the EU prod environment for ServiceA.\n\nBreak your infra up by accounts and make one team the operational and financial owner of each account. Then when you (the FinOps person) get a billing alert for an account (or the security team gets an alert for someting), you know exactly who to reach out to and everyone should already understand and agree with how responsibility is distributed.\n\nTeams are free to use tags in their own accounts however they like (or not use them), it doesn't matter to the bigger organization or company.",
-          "score": 44,
-          "created_utc": "2026-02-18 20:59:09",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o655aau",
-              "author": "rariety",
-              "text": "Agree with this, with the caveat that you need to be careful about going too granular and creating too many accounts. Yes it's great for blast radius, but there's a base cost for a new account typically, and if everything needs to be privately networked together, it can get incredibly expensive if your accounts start numbering in the hundreds",
-              "score": 6,
-              "created_utc": "2026-02-18 22:52:03",
-              "is_submitter": false,
-              "replies": [
-                {
-                  "id": "o657gmy",
-                  "author": "ryancoplen",
-                  "text": "Yeah, in general I would try to avoid any shared networking requirements. Instead I prefer to use things like ALB, APIGW, SNS, SQS, etc to manage communication across accounts. These constructs make your relationships and dependencies between accounts much more clear.\n\nBut yes, if its impossible to avoid having something like a shared VPC or (heaven forbid) something like Transit Gateway, then yes, there is a cost for having too many accounts.\n\nMy advice would be, **don't do that**! But sometimes you are just saddled with legacy designs and systems and have no choice. At least you can stop making it worse and extending the poor design, but that takes buy-in from leadership.",
-                  "score": 3,
-                  "created_utc": "2026-02-18 23:03:17",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            },
-            {
-              "id": "o689ws6",
-              "author": "camelConsulting",
-              "text": "This is the way! I do cloud strategy & lots of FinOps and have come to the same conclusion.\n\nYou need separate accounts anyway for different environments, as you say, and mostly you can group accounts by specific application/service. Accounts attach to dedicated network accounts with shared VPCs.\n\nThen @OP to answer your question, there will be accounts with shared resources. Whether those are things like foundations / network / observability or large shared databases like BQ.\n\nThe way I approach those is to sort those accounts descending by $ spend and work with the platform teams involved to come up with an allocation methodology. You might “peanut butter” spread core foundational infrastructure like VPCs or even observability, basically assign a % of the cost to applications based on their % of total directly attributable spend and therefore a “probably accurate” but imprecise mechanism.\n\nBut I’ve also done ‘shared platforms’ like container platforms or shared large databases where you need to ensure there’s a proper intake associating container apps or DB tables with cost centers or applications. You can then pull operational data like # of x-sized container hours per month as a % of total x-sized container hours to build allocation ratios.\n\nIt gets pretty granular, which is why it is critical to:\n\n1. Start with the most expensive shared accounts and continue descending; and\n2. Make the account owner (I.e. shred platform team) accountable for the spend until that account’s spend can be allocated to “customers” effectively.\n\nYou’ll never hit every single account, but if you do this, the 80/20 rule will help you attribute / allocate the majority of spend with a reasonable output of effort.",
-              "score": 2,
-              "created_utc": "2026-02-19 12:17:28",
-              "is_submitter": false,
-              "replies": []
-            },
-            {
-              "id": "o68blf5",
-              "author": "alex_aws_solutions",
-              "text": "I agree with that. That would be the more appropiate choice for a bigger infra. But still need to use the right naming convention for this as well to work, which is almost like tagging.",
-              "score": 1,
-              "created_utc": "2026-02-19 12:29:25",
-              "is_submitter": true,
-              "replies": [
-                {
-                  "id": "o69br03",
-                  "author": "ryancoplen",
-                  "text": "The key is that any \"thing\" in AWS is going to be tied to an account. Its usually right there in the ARN. So you only need to maintain a single relationship between account numbers and the \"owning\" team in order to deal with essentially anything.\n\nAnd teams that ignore a naming convention or forget tags or whatever won't impact the ability to link them to the resources that they own.",
-                  "score": 2,
-                  "created_utc": "2026-02-19 15:51:22",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "o64jldo",
-          "author": "SpecialistMode3131",
-          "text": "You defined your tag ontology.  Good stuff.  Realize that pretty much every business has a different one, and that's why no one gives you the one-size-fits-all answer since there isn't one.\n\nFor the shared resources, my first instinct is to add \\*all\\* the consumers as tags, and then when costs spike, you know who all's involved.  Then insist on per-service/team metrics (if necessary, custom cloudwatch, but log aggregating works probably pretty well) with a naming scheme that lets you tie them together with the tags, to provide more granular insight.  Really though, this is why backend isn't going to be a solved problem any time soon.  Bespoke solutions for bespoke business.",
-          "score": 10,
-          "created_utc": "2026-02-18 21:10:31",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o65mkap",
-          "author": "katatondzsentri",
-          "text": "My advice: never assume that your teams and service ownership will not change. Because it will. Sooner than you expect.\n\nI'd rather go with environment and service tags, and a separate service catalog that (among many others) contains ownership information.",
-          "score": 4,
-          "created_utc": "2026-02-19 00:25:43",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o69692m",
-          "author": "KayeYess",
-          "text": "We use two \"golden\" tags .. one for access and the other for cost. These tags (both name and value) are enforced at provisioning time. This is setup when a tenant is onboarded to an AWS account through a highly controlled workflow (many of our accounts have multiple tenants).\n\nA combination of SCP, RCP, ABAC/RBAC policies, CFN Custom Registry, Service Catalog and TF Sentinel are used for enforcement and vertical segmentation. Compliance is also tracked through Governance and FinOPs tools.\n\nThere is no silver bullet solution. AWS provides the tools. Customer has to implement based on their situation, architecture and requirements.",
-          "score": 5,
-          "created_utc": "2026-02-19 15:24:16",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o65f79d",
-          "author": "FransUrbo",
-          "text": "Tags for cost control and monitoring is .. dumb!\n\nNo matter how much time you spend on it, you'll never get enough..\n\nBest, imo, is different accounts for everything. With a bit of thougt on cross-account roles, you don't even need SSO and AD etc.",
-          "score": 3,
-          "created_utc": "2026-02-18 23:45:10",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o64kg0b",
-          "author": "Inner_Butterfly1991",
-          "text": "None of this seems super bad, but why are you posting AI slop? It's so obvious and so painful to read.",
-          "score": 12,
-          "created_utc": "2026-02-18 21:14:27",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o64kt2s",
-              "author": "Maleficent-Story-861",
-              "text": "Accusing everything of AI slop is becoming its own version of slop.",
-              "score": -4,
-              "created_utc": "2026-02-18 21:16:08",
-              "is_submitter": false,
-              "replies": [
-                {
-                  "id": "o64rthn",
-                  "author": "Suspicious-Tough-390",
-                  "text": "Yeah but this is",
-                  "score": 11,
-                  "created_utc": "2026-02-18 21:48:20",
-                  "is_submitter": false,
-                  "replies": []
-                },
-                {
-                  "id": "o64szqp",
-                  "author": "nemec",
-                  "text": "The post is obviously completely written with LLMs. If there's no way to distinguish your output from a completely fabricated LLM role play... is it worth sharing?",
-                  "score": 8,
-                  "created_utc": "2026-02-18 21:53:45",
-                  "is_submitter": false,
-                  "replies": []
-                },
-                {
-                  "id": "o65ns0x",
-                  "author": "Inner_Butterfly1991",
-                  "text": "I could have just said it's horribly written and unnecessarily flowery and doesn't make its point in a concise manner even to the level that if it was a 9th grade essay it would fail. But instead I pointed out what we all know, it came out of an llm, was low effort, and is just written insanely terribly.",
-                  "score": 1,
-                  "created_utc": "2026-02-19 00:32:28",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "o64fpc6",
-          "author": "Mchlpl",
-          "text": "Environment: sure\n\nService: yes - as long as these are consistent with how services are actually named in documentation. Think how to automate it.\n\nTeam/owner: meh... this should be in service catalog which you can reference by service name. Makes switching ownership so much easier.\n\n  \nShared resources? Extract into a separate system and tag independently.",
-          "score": 4,
-          "created_utc": "2026-02-18 20:52:42",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o64kp9q",
-              "author": "methods2121",
-              "text": "LOL, Owner is the most valuable tag, IMHO, out of these (unless your in accounting) and it's not a person but a distro list or similar , because this is exactly what the team needs when there's a sev1 and the odds that the CMDB is correct or even mapped to a cloud resource is relatively slim.\n\nWe also include the APP\\_ID, (ELUSID in CMDB) because this maps back to the CMDB and during the ATO phase this is checked and validated before deployment is approved.  This then should have all the additional meta data you may need regarding the service/app.",
-              "score": 7,
-              "created_utc": "2026-02-18 21:15:39",
-              "is_submitter": false,
-              "replies": [
-                {
-                  "id": "o655a2b",
-                  "author": "shiftedcloud",
-                  "text": "I generally prefer tags to be for things that are unlikely to change because otherwise you have the overhead of changing tags everywhere when those values change.\n\n\nWhen a service's team ownership changes, I don't want to have to modify the IaC for the database. \n\n\nIt's easy enough to have a spreadsheet or table or service catalog that contains the service to team mapping. And it's much easier to modify that mapping when services move to different teams.\n\n\nTo Mchlpl's point, I've had to deal with too many stale tags because no one got around to updating the ownership to want to do that again.",
-                  "score": 2,
-                  "created_utc": "2026-02-18 22:52:01",
-                  "is_submitter": false,
-                  "replies": []
-                },
-                {
-                  "id": "o64xh7x",
-                  "author": "Mchlpl",
-                  "text": "Yes, having the way to find owner ASAP is crucial. My experience is that having this information in resource tags leads to incorrect information though, unless you can enforce engineering action (terraform apply) on organisational one (transferring ownership). A service catalog which is the source of truth on who owns what works a lot better in my experience. Just make sure one of your tags is an unambiguous reference to the entry in catalog.",
-                  "score": 1,
-                  "created_utc": "2026-02-18 22:13:56",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            },
-            {
-              "id": "o64gyul",
-              "author": "extreme4all",
-              "text": "please elaborate  \n\\> Shared resources? Extract into a separate system and tag independently.",
-              "score": 3,
-              "created_utc": "2026-02-18 20:58:28",
-              "is_submitter": false,
-              "replies": [
-                {
-                  "id": "o64wr1z",
-                  "author": "Mchlpl",
-                  "text": "From OP  \n\\>  Databases that serve multiple services, shared Redis clusters, that kind of thing. Right now we tag those with the primary consumer and accept it’s not perfectly accurate.\n\nTrack it separately and either accept that you can't assign the costs to individual consumers, or work on how to measure actual usage.",
-                  "score": 2,
-                  "created_utc": "2026-02-18 22:10:34",
-                  "is_submitter": false,
-                  "replies": []
-                },
-                {
-                  "id": "o65pjx3",
-                  "author": "NotTooDeep",
-                  "text": "Databases are almost always a shared resource. They handle transactions from applications. They provide the data source for reporting databases. The can hold valuable auditing information for cybercrime forensics. They are the target for API calls. \n\nIt makes no sense to try to conform a database to a tag system, with the exception of gross costs. This is actually useful. Making the costs visible can force really interesting questions to be asked, especially about the instance type that's hosting the database.",
-                  "score": 1,
-                  "created_utc": "2026-02-19 00:42:26",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "o660zwh",
-          "author": "ppafford",
-          "text": "we use, but I'm looking at other comments to see what I could add/remove/change\n\n```\nproject=\"acme-api\"\ncost_center=\"acme-code\"\nowner_name=\"acme-team\"\nowner_email=\"team@acme.com\"\norganization=\"acme\"\ndepartment=\"billing\"\n```",
-          "score": 2,
-          "created_utc": "2026-02-19 01:48:42",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o6778mn",
-          "author": "T0X1C0P",
-          "text": "Thanks for sharing this, I got to learn a few things from this.",
-          "score": 2,
-          "created_utc": "2026-02-19 06:28:54",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o6jxzmv",
-          "author": "AlphaToBe",
-          "text": "Bro the ONE thing that will silently destroy your tagging strategy and NOBODY warns you about: tag keys are case-sensitive in AWS.\n\n\n`Service` and `service` and `SERVICE` are THREE different tags. They all show up separately in Cost Explorer, they all count against your 500 active cost allocation tag limit, and your 4 teams will absolutely pick different casings because why wouldn't they.\n\n\nI spent a whole afternoon wondering why my cost breakdown numbers didn't add up. Turns out I had `Team`, `team`, and one genius who used `TEAM`. Three versions of the same data, none of them complete. Beautiful.\n\n\nAnd here is the other thing nobody tells you. Cost Allocation Tags have to be MANUALLY activated in the Billing Console before they show up in Cost Explorer. And they are NOT retroactive. So you tag everything today, forget to activate? Last month's data is gone. Forever. Just gone.\n\n\nQuick sanity check, run this and see what tags you actually have activated:\n\n\n```\naws ce list-cost-allocation-tags --status active\n```\n\n\nAnd this one to find resources with missing tags before you waste time in Tag Editor:\n\n\n```\naws resourcegroupstaggingapi get-resources \\\n  --tag-filters Key=Service,Values= \\\n  --query 'ResourceTagMappingList[].ResourceARN'\n```\n\n\nEnforce lowercase-only from day one. Activate your cost allocation tags BEFORE you need the data. Trust me on this one.",
-          "score": 2,
-          "created_utc": "2026-02-21 05:02:45",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o6lzcz6",
-              "author": "alex_aws_solutions",
-              "text": "That's is absolutely true and an important point if you want to highlight specific tags in your standard reports (CE or CUR). However, if you're creating reports manually, which is often the case when consulting or cleaning up other people's mess, you can still filter by tags if they were set.\n\nThanks for the good contribution!\n\n(Also: it's case-sensitive -> use --status \\[Active, Inactive\\]) ;-)",
-              "score": 1,
-              "created_utc": "2026-02-21 15:08:36",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "o65um08",
-          "author": "edthesmokebeard",
-          "text": "AI-format slop.",
-          "score": 4,
-          "created_utc": "2026-02-19 01:11:18",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o6abbt1",
-              "author": "n00lp00dle",
-              "text": "reddit has turned into tiktok for medium articles. bullshit listicles that tickle your balls and say what a good engineer you are for having the same opion as chatgpt are completely inescapable.",
-              "score": 1,
-              "created_utc": "2026-02-19 18:40:51",
-              "is_submitter": false,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "o64ynlv",
-          "author": "the_coffee_maker",
-          "text": "Where picture?",
-          "score": 1,
-          "created_utc": "2026-02-18 22:19:31",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o689pih",
-              "author": "alex_aws_solutions",
-              "text": "[https://imgur.com/ASxWmvE](https://imgur.com/ASxWmvE)",
-              "score": 1,
-              "created_utc": "2026-02-19 12:16:01",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "o68foik",
-          "author": "ThyDarkey",
-          "text": "We do a lot of shared infrastructure as we provision resources for the companies inside our group.\n\nWe just wack on a Company = ALL, there then is some % the finance team then split that recharge back down to those companies. This is all shown in our recharging dashboard in quicksight.",
-          "score": 1,
-          "created_utc": "2026-02-19 12:56:52",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o6raetg",
-          "author": "sandro-_",
-          "text": "I like that! + enforcing them via tag policies in orgs also enforces it so that they are actually used",
-          "score": 1,
-          "created_utc": "2026-02-22 11:49:21",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o64nrpz",
-          "author": "JPJackPott",
-          "text": "I have a very similar structure to what you describe and it works well. We are single tenanted so service describes the tenant for us. \n\nEach AWS account is a dimension for us too, which describes a logic grouping of customers. \n\nI do two billing breakdowns: one that distributes all ‘unallocated’ costs to the grouping proportionally. Then a second breakdown which breaks each grouping down to tenant level, again folding untagged costs into each tenant proportionally. \n\nNot at the point of making tags mandatory in SCP yet but all deployments are automated so getting the tags in the templates wasn’t too difficult.",
-          "score": 1,
-          "created_utc": "2026-02-18 21:29:34",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o64r3cy",
-          "author": "blocked_user_name",
-          "text": "Thanks this could be helpful.",
-          "score": 1,
-          "created_utc": "2026-02-18 21:44:59",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o64rnym",
-          "author": "religionisanger",
-          "text": "We deploy everything in terraform so have git repositories for our resources; it makes it easier to track things like when there’s a set of load balancers.",
-          "score": 1,
-          "created_utc": "2026-02-18 21:47:38",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o650qpv",
-          "author": "GoofAckYoorsElf",
-          "text": "Add another tag that says where the resource is deployed from if you have no mono repo. Add others that state when the resource has been deployed, from what branch (if on DEV and deployed from an FB), what commit SHA, pipeline ID, who triggered the pipeline... This is all valuable information in the case of a failure.",
-          "score": 1,
-          "created_utc": "2026-02-18 22:29:32",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o68ycg9",
-          "author": "YetMoreSpaceDust",
-          "text": "> Nobody explains how to actually do it well.\n\nBut if you want to know how to do it poorly, I can definitely help with that!",
-          "score": 0,
-          "created_utc": "2026-02-19 14:43:34",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o64jnxr",
-          "author": "[deleted]",
-          "text": "[deleted]",
-          "score": -3,
-          "created_utc": "2026-02-18 21:10:51",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
     {
       "id": "1raski8",
       "title": "AWS Certificate Manager updates default certificate validity to comply with new guidelines",
@@ -387,9 +15,9 @@
       "url": "https://aws.amazon.com/about-aws/whats-new/2026/02/aws-certificate-manager-updates-default/",
       "author": "SudoAlex",
       "created_utc": "2026-02-21 14:32:40",
-      "score": 43,
+      "score": 48,
       "num_comments": 8,
-      "upvote_ratio": 0.95,
+      "upvote_ratio": 0.97,
       "text": "[External Link]",
       "is_original_content": false,
       "link_flair_text": "security",
@@ -401,7 +29,7 @@
           "id": "o6lu1ai",
           "author": "SudoAlex",
           "text": "Posted this mostly due to the future uncertainty from their announcement back in June 2025, with exportable public certificates: https://www.reddit.com/r/aws/comments/1ldpw1d/aws_certificate_manager_introduces_public/ - as it was well known that certificate lifetimes would be limited in the long run.\n\nThey'll be reducing the duration, along with the price:\n\n> We have reduced the pricing for ACM’s exportable public certificates in line with the shorter validity period. 198-day exportable public certificate will now cost $7/Fully Qualified domain name (down from $15) and $79/ wildcard name (down from $149). Please refer to ACM’s pricing page for more details. For more information about ACM, visit the [ACM documentation](https://docs.aws.amazon.com/acm/latest/userguide/acm-certificate-characteristics.html).\n\n~~Although the wildcard pricing feels like a slightly sneaky $4.50 increase (half of $149 is $74.50)~~.\n\nUpdated numbers below.",
-          "score": 8,
+          "score": 9,
           "created_utc": "2026-02-21 14:38:53",
           "is_submitter": true,
           "replies": [
@@ -409,7 +37,7 @@
               "id": "o6m80fe",
               "author": "Mutjny",
               "text": ">Although the wildcard pricing feels like a slightly sneaky $4.50 increase (half of $149 is $74.50).\n\n198 days is not half of 365.  The new price is exactly equivalent to the old price with the reduced number of days.  Its actually like $1.50 less.",
-              "score": 7,
+              "score": 6,
               "created_utc": "2026-02-21 15:53:16",
               "is_submitter": false,
               "replies": [
@@ -453,9 +81,9 @@
       "url": "https://www.reddit.com/r/aws/comments/1rata1g/if_s3_vectors_offer_sub_second_latency_why_does/",
       "author": "nucleustt",
       "created_utc": "2026-02-21 15:03:03",
-      "score": 36,
-      "num_comments": 35,
-      "upvote_ratio": 0.84,
+      "score": 37,
+      "num_comments": 36,
+      "upvote_ratio": 0.85,
       "text": "I'm building a customer service agent and need a vector DB for RAG.\n\nNaturally, I gravitated toward S3 vectors because the 90% cost reduction was super attractive.\n\nI'm wondering if I'm making the right choice (even though I see RAG as a use case).\n\nBasically, the chatbot has to answer questions via WhatsApp.",
       "is_original_content": false,
       "link_flair_text": "technical question",
@@ -467,7 +95,7 @@
           "id": "o6lylv2",
           "author": "Sirwired",
           "text": "Because \"sub-second\" is super slow vs. the alternatives.",
-          "score": 78,
+          "score": 80,
           "created_utc": "2026-02-21 15:04:33",
           "is_submitter": false,
           "replies": [
@@ -483,7 +111,7 @@
                   "id": "o6m2aog",
                   "author": "CoastRedwood",
                   "text": "How big is the data you’re storing? Bigger the dataset the higher the latency and greater the cpu usage.",
-                  "score": 6,
+                  "score": 7,
                   "created_utc": "2026-02-21 15:24:17",
                   "is_submitter": false,
                   "replies": []
@@ -496,7 +124,7 @@
           "id": "o6mfh90",
           "author": "jdanton14",
           "text": "If I had a database that has 900ms of latency, I'd fire my DBA and my storage vendor.",
-          "score": 19,
+          "score": 21,
           "created_utc": "2026-02-21 16:30:37",
           "is_submitter": false,
           "replies": [
@@ -562,7 +190,7 @@
           "id": "o6nshiy",
           "author": "Due-Horse-5446",
           "text": "500ms is sub second too..",
-          "score": 6,
+          "score": 7,
           "created_utc": "2026-02-21 20:38:10",
           "is_submitter": false,
           "replies": [
@@ -591,7 +219,7 @@
           "id": "o6oabfi",
           "author": "tank_of_happiness",
           "text": "I’m using it for your same use case. The LLM’s thinking takes way longer. I’m happy with the results I’m getting and the cost is almost nothing at my volume. Previously I was using open search and paying a couple hundred a month.",
-          "score": 5,
+          "score": 6,
           "created_utc": "2026-02-21 22:13:00",
           "is_submitter": false,
           "replies": [
@@ -700,9 +328,9 @@
       "url": "https://www.reddit.com/r/aws/comments/1r9nmsm/when_dynamodb_singletable_design_is_the_wrong/",
       "author": "tejovanthn",
       "created_utc": "2026-02-20 06:11:35",
-      "score": 33,
+      "score": 32,
       "num_comments": 16,
-      "upvote_ratio": 0.83,
+      "upvote_ratio": 0.81,
       "text": "Last week's multi-tenant post hit #1 here. The comments were more useful than the upvotes - three engineers described it as a disaster at their companies.\n\nThey're not wrong. I use single-table design in production and I'm building a tool around it, but there are real situations where it's the wrong call.\n\nThe cases where you shouldn't reach for it:\n\n* Access patterns are still changing (pre-PMF products)\n* No DynamoDB champion on the team - works great until that person leaves\n* Significant reporting or analytics requirements\n* Fewer than 6 access patterns (just use multi-table, it's fine)\n* Multiple teams or bounded contexts sharing the same deployment\n* Per-entity DynamoDB Streams processing (you get one stream per table, not per entity type)\n\nThe \"disaster\" pattern I keep seeing isn't single-table being wrong - it's teams starting with key design before listing access patterns. You design the table to serve access patterns, not the other way around.\n\nFull post covers: the decision framework table, the microservices/team ownership case (probably the most underrated reason to avoid it), and what I actually use for [rasika.life](http://rasika.life) vs what I'd use for a prototype.\n\n→ [https://singletable.dev/blog/when-not-to-use-single-table-design](https://singletable.dev/blog/when-not-to-use-single-table-design)\n\nCurious what situations have pushed your teams away from it - or toward it despite the complexity.",
       "is_original_content": false,
       "link_flair_text": "article",
@@ -743,7 +371,7 @@
           "id": "o6dssuw",
           "author": "mehneni",
           "text": "It was a disaster for us as well. Causing 6 digit monthly costs at some point. I guess a problem is always: You have to know what you are doing.\n\nReducing the number of tables compared to a relational design makes sense. But I'd almost limit the single table to something like one aggregate in DDD at most: [https://martinfowler.com/bliki/DDD\\_Aggregate.html](https://martinfowler.com/bliki/DDD_Aggregate.html)\n\nJust putting unrelated data in a complex data model with very different quantities in a single table is a disaster. In our case it was an event store, a production database and a (complex) configuration store. Mixing all of this is an absolutely horrible idea, because the different areas have vastly different requirements and change rates.\n\nScanning the table becomes impossible. This might not matter for day-to-day operations, but if every migration takes a week and is hugely expensive that is a problem and you become very inflexible.\n\nAnd always put an expiry on the data. Because deleting data by scanning the table is just so expensive that is makes more sense to create a new table and drop the old one (which is a stressful thing to do if your backup will take ages to reconstruct the table ;).\n\nThe risk in having more tables is also smaller. In that case you can only mess up one area of the data. So only do single table if you know exactly what you are doing. Merging multiple tables into one is easier than the other way around.",
-          "score": 13,
+          "score": 14,
           "created_utc": "2026-02-20 07:09:30",
           "is_submitter": false,
           "replies": [
@@ -770,7 +398,7 @@
               "id": "o6dvg3e",
               "author": "tejovanthn",
               "text": "Six-digit monthly costs is the nightmare scenario - and the root cause you're describing is exactly what I called out in the post: mixing data with vastly different access patterns, quantities, and change rates into one table. An event store and a production database have almost nothing in common operationally. That's not a single-table design problem, that's a data modeling problem that single-table made worse.\n\nThe DDD aggregate framing is actually the clearest heuristic I've heard for where the boundary should be. One aggregate (or tightly related aggregates that are always queried together) per table makes the access patterns predictable and keeps migrations scoped. The moment you're mixing things that evolve independently - your config store vs. your event store - you've lost the main benefit and kept all the costs.\n\nThe TTL point is underrated. Designing for data expiry from day one changes how you think about the whole model. \"How does this data leave the table?\" should be in the access patterns list from the start.\n\nGoing to add the aggregate boundary heuristic to the post - it's a more actionable framing than what I had.",
-              "score": 1,
+              "score": 3,
               "created_utc": "2026-02-20 07:33:58",
               "is_submitter": true,
               "replies": []
@@ -846,7 +474,7 @@
               "id": "o6drp4t",
               "author": "tejovanthn",
               "text": "Thank you :) I used to lead engineering teams building on AWS for the better half of the last decade. Decided to step back and focus on some passion projects. :)   \n  \nCurrently I'm an indie developer. Day job is building [rasika.life](https://rasika.life) (a Carnatic music platform) where DynamoDB is the primary datastore — so this isn't theoretical for me, it's the system I'm maintaining.\n\nOn RDS: yes, reasonably deep. I've built on Postgres for years and it's my default for anything with complex reporting, evolving schemas, or strong relational requirements — which is basically why it made the \"when to avoid single-table\" list. DocumentDB I've touched but wouldn't claim expertise.\n\nThe honest answer is that I get deep in DynamoDB specifically because I made the choice to build on it and had to live with the consequences. Nothing sharpens your opinion on a tool like owning it in production.",
-              "score": 5,
+              "score": 6,
               "created_utc": "2026-02-20 06:59:27",
               "is_submitter": true,
               "replies": []
@@ -862,9 +490,9 @@
       "url": "https://www.reddit.com/r/aws/comments/1r8s1yy/how_bad_is_it_to_launch_without_a_proper_cloud/",
       "author": "These_Run_7070",
       "created_utc": "2026-02-19 06:40:35",
-      "score": 30,
+      "score": 29,
       "num_comments": 76,
-      "upvote_ratio": 0.75,
+      "upvote_ratio": 0.73,
       "text": "We are 8 months from launch and honestly we have just been spinning up services as we need them. no real architecture doc, just \"lets use this because it works.\" our AWS bill went from 2k to 8k in 3 months and we're not even at scale yet though.   \nmy co founder keeps saying we'll \"fix it after launch\" but I'm getting nervous. what if we hit product market fit and the whole thing falls apart because we built on sand?\n\nIs it crazy to pause feature dev for a month to actually design this properly? or do most startups just figure it out as they grow?\n\n",
       "is_original_content": false,
       "link_flair_text": "discussion",
@@ -876,7 +504,7 @@
           "id": "o679a5q",
           "author": "sobeitharry",
           "text": "We are battling mistakes from 10 years ago.  A penny saved is a penny earned.",
-          "score": 88,
+          "score": 91,
           "created_utc": "2026-02-19 06:46:22",
           "is_submitter": false,
           "replies": [
@@ -884,7 +512,7 @@
               "id": "o67kc6k",
               "author": "tumes",
               "text": "The number of conference talks I have been to in the last year or two that are just people confidently post mortem-ing, in public no less, the same fucking mistakes every startup makes and has made for the last 15 years in the same order is just… too magnificent for words. I’m begging you, we are gross and old but hire one reliable greybeard who has seen some shit, they will save you one funding round worth of flailing and churn by shooting down your galaxy brain bullshit that relies on one non-load balanced server for ingress or a terminally unindexed database column or whatever.",
-              "score": 47,
+              "score": 46,
               "created_utc": "2026-02-19 08:26:58",
               "is_submitter": false,
               "replies": [
@@ -892,7 +520,7 @@
                   "id": "o69l4i8",
                   "author": "sobeitharry",
                   "text": "Yet we refuse to bring in outside expertise even when our in house experts recommend.  Just get it done,  yesterday.",
-                  "score": 6,
+                  "score": 7,
                   "created_utc": "2026-02-19 16:36:31",
                   "is_submitter": false,
                   "replies": []
@@ -961,7 +589,7 @@
           "id": "o679dve",
           "author": "seany1212",
           "text": "I’d love to know what product you were working on that would allow for not being ready for release in 8 months. Also, how are you spending 8k with no throughput? Just what services at what sizing are you actually running?",
-          "score": 42,
+          "score": 45,
           "created_utc": "2026-02-19 06:47:12",
           "is_submitter": false,
           "replies": [
@@ -969,7 +597,7 @@
               "id": "o68h8py",
               "author": "ImNewHere05",
               "text": "Yeah, these numbers are wild",
-              "score": 16,
+              "score": 17,
               "created_utc": "2026-02-19 13:06:49",
               "is_submitter": false,
               "replies": []
@@ -1055,7 +683,7 @@
           "id": "o67lx04",
           "author": "Sudoplays",
           "text": "Can you give some more insight into what services you’re using, why and the cost of each one?\n\n“Fix it after launch” - this is highly unlikely to happen as new features are needed, bugs get squashed and the focus shifts away from architecture.\n\nPlanning your cloud infrastructure is important, and should be done before deploying any resources. Infrastructure as code isn’t required, but it’ll make everything easier down the road when you need to have separate dev/rc/prod environments.\n\n8k is a huge bill for something that isn’t even launched yet, even 3k is quite high.",
-          "score": 4,
+          "score": 5,
           "created_utc": "2026-02-19 08:42:36",
           "is_submitter": false,
           "replies": []
@@ -1064,7 +692,7 @@
           "id": "o67cvli",
           "author": "watergoesdownhill",
           "text": "This whole thing reeks. Anything that takes more than six months typically doesn’t ship at all. \n\nI have a feeling you guys are battling customer requirements. While also doing some sort of grand infrastructure.",
-          "score": 10,
+          "score": 9,
           "created_utc": "2026-02-19 07:17:27",
           "is_submitter": false,
           "replies": []
@@ -1082,7 +710,7 @@
           "id": "o67aohd",
           "author": "notospez",
           "text": "At this stage it depends on your runway. Do you have or expect to have millions available for growth? Then 8k/month in infra is peanuts and you can hire a bunch of people to reengineer next year once you know which product features resonate with customers and have actual usage data.",
-          "score": 4,
+          "score": 3,
           "created_utc": "2026-02-19 06:58:12",
           "is_submitter": false,
           "replies": []
@@ -1473,15 +1101,155 @@
       ]
     },
     {
+      "id": "1rdff6p",
+      "title": "Price increase at AWS?",
+      "subreddit": "aws",
+      "url": "https://www.reddit.com/r/aws/comments/1rdff6p/price_increase_at_aws/",
+      "author": "servermeta_net",
+      "created_utc": "2026-02-24 12:52:15",
+      "score": 21,
+      "num_comments": 16,
+      "upvote_ratio": 0.78,
+      "text": "Recently many non hyperscaler providers I use (Hetzner, OVH) increased their prices due to the supply issues we all know. Do you think AWS and other hyperscalers will follow through, or will they shield their customers from the hardware market fluctuations? ",
+      "is_original_content": false,
+      "link_flair_text": "discussion",
+      "permalink": "https://reddit.com/r/aws/comments/1rdff6p/price_increase_at_aws/",
+      "domain": "self.aws",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "o74p0sd",
+          "author": "PaintDrinkingPete",
+          "text": "AWS likely has an advantage of already having a massive infrastructure and having priority with manufacturers...and already charging more for their services than many of the smaller budget VPS and cloud computing services providers operating on tighter margins, so they don't have to be as reactionary to the market in cases like this. \n\neventually though, if things keep trending as they are... yes, prices will have to go up.",
+          "score": 43,
+          "created_utc": "2026-02-24 13:11:04",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "o74uxv9",
+          "author": "criminalsunrise",
+          "text": "AWS tend not to do price rises - I believe it's one of their core principles. What they will do is have new service levels (instance types) that are more expensive and slowly sunset the old ones. We may see that accelerated a bit with the supply crunch.",
+          "score": 36,
+          "created_utc": "2026-02-24 13:44:41",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o750bw8",
+              "author": "RickySpanishLives",
+              "text": "Highly likely. The systems already in the field are just being amortized out. No real point increasing their price because they are already there. New instance types will incur an increased cost since they will cost more and have a BOM with more expensive parts.",
+              "score": 11,
+              "created_utc": "2026-02-24 14:13:37",
+              "is_submitter": false,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "o74mnrx",
+          "author": "Old_Cry1308",
+          "text": "aws will probably absorb some of it short-term. long-term, they'll pass it on. they’re not running a charity.",
+          "score": 39,
+          "created_utc": "2026-02-24 12:56:33",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o74nwec",
+              "author": "moduspol",
+              "text": "They might have bigger longer term deals on hardware like this and haven’t had to eat any higher costs yet.",
+              "score": 12,
+              "created_utc": "2026-02-24 13:04:13",
+              "is_submitter": false,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "o7712h9",
+          "author": "FlatCondition6222",
+          "text": "Less spot capacity, for example, is also a \"way\" to raise prices.",
+          "score": 3,
+          "created_utc": "2026-02-24 19:48:02",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "o74pe0u",
+          "author": "Negative-Cook-5958",
+          "text": "There is already about a 5% increase with each EC2 generation change (r6i => r7i => r8i for example), they won't increase pricing for existing SKUs, just make the newer ones expensive when they are available.",
+          "score": 10,
+          "created_utc": "2026-02-24 13:13:17",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o74vbkc",
+              "author": "davewritescode",
+              "text": "The thing is you should be using less compute as new generations usually perform better",
+              "score": 7,
+              "created_utc": "2026-02-24 13:46:43",
+              "is_submitter": false,
+              "replies": [
+                {
+                  "id": "o750u03",
+                  "author": "RickySpanishLives",
+                  "text": "It's really the instance shape that determines if that is possible. Sometimes the compute is indeed a better performer but the instance shape gives you more than you need at an increased price requiring you to binpack your computer to cover it. Less a concern if you breathe EKS/ECS - but an issue if you use raw EC2.",
+                  "score": 2,
+                  "created_utc": "2026-02-24 14:16:15",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "o74ps5y",
+          "author": "JonnyBravoII",
+          "text": "Yes. Many of their prices have been the same for years (EBS, lambda, data transfer) and are obviously cash cows. On the EC2 front, prices started going up after the 6 series.  The t series, while wildly popular, are clearly being sunset as the t4g is 6 years.old at this point. I would expect storage costs will be the first to go up.",
+          "score": 4,
+          "created_utc": "2026-02-24 13:15:34",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "o74u5uo",
+          "author": "d70",
+          "text": "Who is keeping track? https://aws.amazon.com/blogs/aws/category/price-reduction/\nThat said, I agree that some new instance types are slightly more expensive than older ones but they are different products, no?",
+          "score": 4,
+          "created_utc": "2026-02-24 13:40:27",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "o78ssws",
+          "author": "Complex86",
+          "text": "I think AWS will pass this on in future generations of instance family or other services they may provide down the line.",
+          "score": 1,
+          "created_utc": "2026-02-25 01:05:28",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "o74yw4o",
+          "author": "Shington501",
+          "text": "Everything is going up",
+          "score": 1,
+          "created_utc": "2026-02-24 14:06:00",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
       "id": "1rbw463",
       "title": "Podcast?",
       "subreddit": "aws",
       "url": "https://www.reddit.com/r/aws/comments/1rbw463/podcast/",
       "author": "putneyj",
       "created_utc": "2026-02-22 20:10:12",
-      "score": 16,
+      "score": 17,
       "num_comments": 10,
-      "upvote_ratio": 0.94,
+      "upvote_ratio": 0.95,
       "text": "So, is the official AWS podcast no longer doing news? Anyone else that used it to get \\*most\\* of your news about new services? I’m honestly a little bummed, but it just feels like the way things are going at AWS.",
       "is_original_content": false,
       "link_flair_text": "discussion",
@@ -1493,7 +1261,7 @@
           "id": "o6tzvdo",
           "author": "signsots",
           "text": "The latest episode aligns with the recent layoff announcements. Wouldn't be surprised if it was part of it unfortunately.",
-          "score": 16,
+          "score": 19,
           "created_utc": "2026-02-22 20:18:05",
           "is_submitter": false,
           "replies": []
@@ -1502,10 +1270,39 @@
           "id": "o6u20m0",
           "author": "coyotefarmer",
           "text": "That was a big part of how I kept up with changes. Such a shame. I don't see how ending something like that can be beneficial in the long run. I listened to it for years.",
-          "score": 5,
+          "score": 6,
           "created_utc": "2026-02-22 20:29:02",
           "is_submitter": false,
           "replies": []
+        },
+        {
+          "id": "o71w9ms",
+          "author": "ArchangelAdrian",
+          "text": "Well the host Simon Elisha announced on his LinkedIn 2 weeks ago that his time at AWS came to an end.",
+          "score": 4,
+          "created_utc": "2026-02-24 00:41:22",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o71xjc9",
+              "author": "putneyj",
+              "text": "Damn, yeah I would imagine that’s pretty much the end then. Not even a regular conversation with Werner can save your job.",
+              "score": 3,
+              "created_utc": "2026-02-24 00:48:28",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "o740qdd",
+                  "author": "ArchangelAdrian",
+                  "text": "Sad if you think about it.",
+                  "score": 2,
+                  "created_utc": "2026-02-24 10:02:57",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
         },
         {
           "id": "o6vz1y4",
@@ -1536,35 +1333,6 @@
           ]
         },
         {
-          "id": "o71w9ms",
-          "author": "ArchangelAdrian",
-          "text": "Well the host Simon Elisha announced on his LinkedIn 2 weeks ago that his time at AWS came to an end.",
-          "score": 3,
-          "created_utc": "2026-02-24 00:41:22",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o71xjc9",
-              "author": "putneyj",
-              "text": "Damn, yeah I would imagine that’s pretty much the end then. Not even a regular conversation with Werner can save your job.",
-              "score": 3,
-              "created_utc": "2026-02-24 00:48:28",
-              "is_submitter": true,
-              "replies": [
-                {
-                  "id": "o740qdd",
-                  "author": "ArchangelAdrian",
-                  "text": "Sad if you think about it.",
-                  "score": 2,
-                  "created_utc": "2026-02-24 10:02:57",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
           "id": "o6y8fb4",
           "author": "Specific-Art-9149",
           "text": "I built a morning brief email with Claude that scans various AWS RSS feeds along with 3rd party RSS and Reddit for AWS news.   Costs me about 7 cents a day utilizing Claude API, and it is emailed daily.  I'm an SA not a developer, so pretty happy with how it turned out.",
@@ -1577,194 +1345,8 @@
           "id": "o6xz8n2",
           "author": "bot403",
           "text": "Google gemeni can turn anything into a podcast episode. Use it on the main aws RSS feed :D",
-          "score": -4,
+          "score": -3,
           "created_utc": "2026-02-23 12:52:50",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
-      "id": "1r8cd6p",
-      "title": "Is Elastic Beanstalk down?",
-      "subreddit": "aws",
-      "url": "https://www.reddit.com/r/aws/comments/1r8cd6p/is_elastic_beanstalk_down/",
-      "author": "vvvwwwwvvwwwvwvvwvvw",
-      "created_utc": "2026-02-18 19:16:15",
-      "score": 14,
-      "num_comments": 4,
-      "upvote_ratio": 0.82,
-      "text": "All of a sudden our Elastic Beanstalk environments started failing. We can no longer deploy or even change configurations. It seems like AWS made changes to Elastic Beanstalk, CloudFormation, and RDS, and they are no longer communicating correctly.\n\n\n\nWe have **12 environments affected, including production.**\nus-east1\n\nWhen checking AWS Repost, I see others reporting errors that started suddenly:  \n[https://repost.aws/questions/QUeJkV4KL9TNKzZeY0Z\\_0B0A/uploading-new-version-to-elastic-beanstalk-gives-vpc-migration-error](https://repost.aws/questions/QUeJkV4KL9TNKzZeY0Z_0B0A/uploading-new-version-to-elastic-beanstalk-gives-vpc-migration-error)\n\n\n\nSo far I have not seen any official AWS notice about this.\n",
-      "is_original_content": false,
-      "link_flair_text": "discussion",
-      "permalink": "https://reddit.com/r/aws/comments/1r8cd6p/is_elastic_beanstalk_down/",
-      "domain": "self.aws",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "o64cng4",
-          "author": "pixlgeek",
-          "text": "Nothing on our end.",
-          "score": 3,
-          "created_utc": "2026-02-18 20:38:22",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o64keo8",
-          "author": "ruibranco",
-          "text": "classic aws move - make breaking changes to the EB/CloudFormation integration and the health dashboard stays green the entire time. check if the repost thread mentions which region, we had similar cfn drift issues in eu-west-1 last month after a silent platform update",
-          "score": 2,
-          "created_utc": "2026-02-18 21:14:17",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o74bs3i",
-          "author": "vvvwwwwvvwwwvwvvwvvw",
-          "text": "An update from AWS Support team:\n\n\"I’m writing to update you on the work related to your Beanstalk environments XXXX-HML and XXXX-PROD\n\nI received an update from the internal team. The fix is scheduled to be applied in us-east-1 on February 24 by the end of the day.\n\nI will stay in touch with the internal team to confirm that everything is fully completed on the 24th. As soon as I have any news, I will send another update. Thank you for your patience.\"  \n",
-          "score": 1,
-          "created_utc": "2026-02-24 11:39:42",
-          "is_submitter": true,
-          "replies": []
-        }
-      ]
-    },
-    {
-      "id": "1rdff6p",
-      "title": "Price increase at AWS?",
-      "subreddit": "aws",
-      "url": "https://www.reddit.com/r/aws/comments/1rdff6p/price_increase_at_aws/",
-      "author": "servermeta_net",
-      "created_utc": "2026-02-24 12:52:15",
-      "score": 12,
-      "num_comments": 16,
-      "upvote_ratio": 0.72,
-      "text": "Recently many non hyperscaler providers I use (Hetzner, OVH) increased their prices due to the supply issues we all know. Do you think AWS and other hyperscalers will follow through, or will they shield their customers from the hardware market fluctuations? ",
-      "is_original_content": false,
-      "link_flair_text": "discussion",
-      "permalink": "https://reddit.com/r/aws/comments/1rdff6p/price_increase_at_aws/",
-      "domain": "self.aws",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "o74p0sd",
-          "author": "PaintDrinkingPete",
-          "text": "AWS likely has an advantage of already having a massive infrastructure and having priority with manufacturers...and already charging more for their services than many of the smaller budget VPS and cloud computing services providers operating on tighter margins, so they don't have to be as reactionary to the market in cases like this. \n\neventually though, if things keep trending as they are... yes, prices will have to go up.",
-          "score": 38,
-          "created_utc": "2026-02-24 13:11:04",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o74uxv9",
-          "author": "criminalsunrise",
-          "text": "AWS tend not to do price rises - I believe it's one of their core principles. What they will do is have new service levels (instance types) that are more expensive and slowly sunset the old ones. We may see that accelerated a bit with the supply crunch.",
-          "score": 29,
-          "created_utc": "2026-02-24 13:44:41",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o750bw8",
-              "author": "RickySpanishLives",
-              "text": "Highly likely. The systems already in the field are just being amortized out. No real point increasing their price because they are already there. New instance types will incur an increased cost since they will cost more and have a BOM with more expensive parts.",
-              "score": 7,
-              "created_utc": "2026-02-24 14:13:37",
-              "is_submitter": false,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "o74mnrx",
-          "author": "Old_Cry1308",
-          "text": "aws will probably absorb some of it short-term. long-term, they'll pass it on. they’re not running a charity.",
-          "score": 35,
-          "created_utc": "2026-02-24 12:56:33",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o74nwec",
-              "author": "moduspol",
-              "text": "They might have bigger longer term deals on hardware like this and haven’t had to eat any higher costs yet.",
-              "score": 13,
-              "created_utc": "2026-02-24 13:04:13",
-              "is_submitter": false,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "o74pe0u",
-          "author": "Negative-Cook-5958",
-          "text": "There is already about a 5% increase with each EC2 generation change (r6i => r7i => r8i for example), they won't increase pricing for existing SKUs, just make the newer ones expensive when they are available.",
-          "score": 7,
-          "created_utc": "2026-02-24 13:13:17",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o74vbkc",
-              "author": "davewritescode",
-              "text": "The thing is you should be using less compute as new generations usually perform better",
-              "score": 7,
-              "created_utc": "2026-02-24 13:46:43",
-              "is_submitter": false,
-              "replies": [
-                {
-                  "id": "o750u03",
-                  "author": "RickySpanishLives",
-                  "text": "It's really the instance shape that determines if that is possible. Sometimes the compute is indeed a better performer but the instance shape gives you more than you need at an increased price requiring you to binpack your computer to cover it. Less a concern if you breathe EKS/ECS - but an issue if you use raw EC2.",
-                  "score": 2,
-                  "created_utc": "2026-02-24 14:16:15",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "o74ps5y",
-          "author": "JonnyBravoII",
-          "text": "Yes. Many of their prices have been the same for years (EBS, lambda, data transfer) and are obviously cash cows. On the EC2 front, prices started going up after the 6 series.  The t series, while wildly popular, are clearly being sunset as the t4g is 6 years.old at this point. I would expect storage costs will be the first to go up.",
-          "score": 3,
-          "created_utc": "2026-02-24 13:15:34",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o74u5uo",
-          "author": "d70",
-          "text": "Who is keeping track? https://aws.amazon.com/blogs/aws/category/price-reduction/\nThat said, I agree that some new instance types are slightly more expensive than older ones but they are different products, no?",
-          "score": 4,
-          "created_utc": "2026-02-24 13:40:27",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o7712h9",
-          "author": "FlatCondition6222",
-          "text": "Less spot capacity, for example, is also a \"way\" to raise prices.",
-          "score": 2,
-          "created_utc": "2026-02-24 19:48:02",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o78ssws",
-          "author": "Complex86",
-          "text": "I think AWS will pass this on in future generations of instance family or other services they may provide down the line.",
-          "score": 1,
-          "created_utc": "2026-02-25 01:05:28",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o74yw4o",
-          "author": "Shington501",
-          "text": "Everything is going up",
-          "score": 1,
-          "created_utc": "2026-02-24 14:06:00",
           "is_submitter": false,
           "replies": []
         }
@@ -1777,8 +1359,8 @@
       "url": "https://www.reddit.com/r/aws/comments/1rd7p4v/cloudfront_http_rest_api_gateway/",
       "author": "Alive_Opportunity_14",
       "created_utc": "2026-02-24 05:31:50",
-      "score": 10,
-      "num_comments": 7,
+      "score": 13,
+      "num_comments": 11,
       "upvote_ratio": 1.0,
       "text": "Cloudfront has introduced flat rate pricing with WAF and DDos protection included. I am thinking of adding cloudfront in front of my rest api gateway for benefits mentioned above. Does it make sense from an infra design perspective?",
       "is_original_content": false,
@@ -1791,7 +1373,7 @@
           "id": "o7372db",
           "author": "Old_Cry1308",
           "text": "makes sense if you need the protection and pricing works for you, otherwise might be overkill.",
-          "score": 3,
+          "score": 5,
           "created_utc": "2026-02-24 05:34:47",
           "is_submitter": false,
           "replies": [
@@ -1831,7 +1413,27 @@
           "score": 1,
           "created_utc": "2026-02-24 12:07:55",
           "is_submitter": false,
-          "replies": []
+          "replies": [
+            {
+              "id": "o7drkhi",
+              "author": "vppencilsharpening",
+              "text": "I'd also add that it leverages the AWS managed backbone for transport from the Edge to the Origin. So if your application is running in a single region you get AWS's team ensuring fast connections from the CloudFront edge to your application instead of relying on the public internet. \n\nIt's not going to make a huge difference, but it's not nothing. \n\nClient -> Public Internet (short distance) -> AWS CloudFront Edge (closest to the client) -> AWS Network (for most of the distance) -> Origin Application\n\nVS\n\nClient -> Public Internet (long distance) -> AWS Network (for a very short distance) -> Origin Application",
+              "score": 1,
+              "created_utc": "2026-02-25 19:34:26",
+              "is_submitter": false,
+              "replies": [
+                {
+                  "id": "o7dx975",
+                  "author": "KayeYess",
+                  "text": "Yes ... that's a general benefit of a CDN. Client reaches CDN edge, and CDN handles the rest.",
+                  "score": 1,
+                  "created_utc": "2026-02-25 20:00:36",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
         },
         {
           "id": "o797flg",
@@ -1839,6 +1441,15 @@
           "text": "Harden your security response header and content security policy for your cloudfront.  \n\nLambda edge for quick validations. Cloudfront managed functions makes some things simple \n\nDon’t forget your tls flow. Where you want to terminate. At the cloudfront , lessen the load on the api.",
           "score": 1,
           "created_utc": "2026-02-25 02:28:55",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "o7f6tjp",
+          "author": "TheDearlyt",
+          "text": "The main tradeoff is added complexity so it’s worth it mostly when you actually plan to use WAF rules, caching, or global performance improvements, not just stack services for the sake of it.\n\nPersonally, I ended up using Gcore for a similar setup because I wanted CDN + edge protection in front of APIs without dealing with too much AWS configuration overhead. It felt simpler to manage while still giving the edge security and performance benefits.",
+          "score": 1,
+          "created_utc": "2026-02-25 23:43:11",
           "is_submitter": false,
           "replies": []
         }
@@ -1851,9 +1462,9 @@
       "url": "https://www.reddit.com/r/aws/comments/1rc92pf/cdk_codepipeline_how_do_you_handle_existing/",
       "author": "Hungry_Assistant6753",
       "created_utc": "2026-02-23 05:36:51",
-      "score": 9,
-      "num_comments": 6,
-      "upvote_ratio": 0.8,
+      "score": 10,
+      "num_comments": 7,
+      "upvote_ratio": 0.86,
       "text": "We have an AWS CDK app deployed via CodePipeline. Our stack manages DynamoDB tables, Lambda functions, S3 buckets, and SageMaker endpoints.\n\n\n\n**Background**: Early on we had to delete and re-create our CloudFormation stack a few times due to deployment issues (misconfigured IAM, bad config, etc). We intentionally kept our DynamoDB tables and S3 buckets alive by setting RemovalPolicy.RETAIN. we didn't want to lose production data just because we needed to nuke the stack.\n\n**The problem**: When we re-deploy the stack after deleting it, CloudFormation tries to CREATE the tables again but they already exist. It fails. So we added a context flag `--context import-existing-tables=true` to our cdk synth command in CodePipeline, which switches the table definitions from new dynamodb.Table(...) to dynamodb.Table.from\\_table\\_name(...). This works fine for existing tables.\n\nNow, we added a new DynamoDB table. It doesn't exist yet anywhere. But the pipeline always passes `--context import-existing-tables=true`, so CDK tries to import a table that doesn't exist yet it just creates a reference to a non-existent table. No error, no table created.\n\n**Current workaround**: We special-cased the new table to always create it regardless of the flag, and leave the old tables under the import flag. But this feels fragile every time we add a new table we have to remember to handle this manually.\n\n**The question**: How do you handle this pattern cleanly in CDK? **Is there an established pattern for \"create if not exists, import if exists\"** that works in a fully automated",
       "is_original_content": false,
       "link_flair_text": "technical question",
@@ -1865,7 +1476,7 @@
           "id": "o6wmzp0",
           "author": "deviled-tux",
           "text": "you leave the code alone and have it create the stuff \n\ncdk import to import them \n\nThis does not seem like something you should be automating because this shouldn’t be happening that often \n",
-          "score": 16,
+          "score": 17,
           "created_utc": "2026-02-23 05:41:14",
           "is_submitter": false,
           "replies": []
@@ -1874,7 +1485,7 @@
           "id": "o6won7x",
           "author": "cachemonet0x0cf6619",
           "text": "1. split stacks by the volatility of the resources. think stateful and stateless. \n\n2. use multiple accounts to split your resources so you’re not developing against production resources. \n\n3. if you can’t split accounts add an environment to the stack name and use that to separate dev and prod. \n\n4. don’t do that auto context thing. that’s a code smell. you shouldn’t need that with the advice above. \n\n5. bonus: i would never use code pipeline. instead i’d use github actions using a self hosted runner in my aws account. way easier and that skill is transferable.",
-          "score": 11,
+          "score": 10,
           "created_utc": "2026-02-23 05:54:47",
           "is_submitter": false,
           "replies": []
@@ -1901,7 +1512,7 @@
           "id": "o6wmtts",
           "author": "pausethelogic",
           "text": "I’m sure there’s a way, but this is honestly one of the major downsides of cloudformation and CDK - there’s no proper state management\n\nIt’s part of why terraform is a much more popular IaC tool, it actually has state management for resources so it knows what resources were deleted, which still exist, and how to handle them",
-          "score": 2,
+          "score": 3,
           "created_utc": "2026-02-23 05:39:55",
           "is_submitter": false,
           "replies": [
@@ -1909,50 +1520,21 @@
               "id": "o6wq4jx",
               "author": "cachemonet0x0cf6619",
               "text": "“can you fix my Honda’s transmission?”\n\n“nah, mate. but if you’d have gotten a bike you wouldn’t need a new transmission”\n\nthat’s how stupid your reply sounds",
-              "score": -8,
+              "score": -7,
               "created_utc": "2026-02-23 06:07:10",
               "is_submitter": false,
               "replies": []
             }
           ]
-        }
-      ]
-    },
-    {
-      "id": "1ralvuk",
-      "title": "36hr+ Downtime - Response Required: Your Account is on Hold - Need Help",
-      "subreddit": "aws",
-      "url": "https://www.reddit.com/r/aws/comments/1ralvuk/36hr_downtime_response_required_your_account_is/",
-      "author": "Realistic-Lab6157",
-      "created_utc": "2026-02-21 08:25:28",
-      "score": 8,
-      "num_comments": 3,
-      "upvote_ratio": 0.75,
-      "text": "I received this 2 days ago, and I have seen other posts too about it.  \nThe pain is that I have all the right documents to get this verification done but the communication process is so slow and confusing which keeps delaying this and my services are still down.\n\nI have already created support tickets and cases but there has been no response for the last 12 hours. I am stuck here and need urgent help. u/AWSSupport\n\nI am not even sure if the verification team works on the weekends which might add 2 more days of downtime.\n\nDoes anyone have any idea on how to get this escalated or prioritized?",
-      "is_original_content": false,
-      "link_flair_text": "discussion",
-      "permalink": "https://reddit.com/r/aws/comments/1ralvuk/36hr_downtime_response_required_your_account_is/",
-      "domain": "self.aws",
-      "is_self": true,
-      "comments": [
+        },
         {
-          "id": "o6kqbq3",
-          "author": "Sirwired",
-          "text": "Which support plan do you have?",
-          "score": 4,
-          "created_utc": "2026-02-21 09:21:21",
+          "id": "o7b0va0",
+          "author": "iamtheconundrum",
+          "text": "Naming resources explicitly will result in naming collisions. Also, you should put resources like dynamodb tables in a separate stack so you can nuke other stacks without affecting the persistent parts of your architecture.",
+          "score": 1,
+          "created_utc": "2026-02-25 10:55:53",
           "is_submitter": false,
-          "replies": [
-            {
-              "id": "o6l304i",
-              "author": "Realistic-Lab6157",
-              "text": "It’s basic. I was trying to upgrade it but it’s not allowing me.",
-              "score": 2,
-              "created_utc": "2026-02-21 11:24:46",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
+          "replies": []
         }
       ]
     },
@@ -1963,7 +1545,7 @@
       "url": "https://www.reddit.com/r/aws/comments/1rbfv2w/cloudwatch_alarms_mute_rules/",
       "author": "becharaerizk",
       "created_utc": "2026-02-22 07:47:17",
-      "score": 7,
+      "score": 8,
       "num_comments": 17,
       "upvote_ratio": 1.0,
       "text": "Hello,\n\nI wanted to implement some kind of maintenance mode on alarms i have setup on my work's awa account. Right before i started i saw WA released alarms mute rules which do exactly what i want.\n\nIt works well using the console but i want to write a function that takes a specific string and created mute rules with all alarms containing this string. (For automated workflows and such)\n\nI noticed that neither the cli nor the python sdk support this yet, when are mute rules supposed to be released for cli or boto3 in python?\n\n  \nFeature I am speaking about: [Configure alarm mute rules](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/alarm-mute-rules-configure.html)\n\n  \nChecking [boto3's latest documentation](https://docs.aws.amazon.com/boto3/latest/reference/services/cloudwatch.html): no mention of this feature",
@@ -2107,7 +1689,7 @@
       "created_utc": "2026-02-20 09:45:29",
       "score": 7,
       "num_comments": 26,
-      "upvote_ratio": 1.0,
+      "upvote_ratio": 0.9,
       "text": "Let's say I want to delete 100000 items from dynamodb, what is the best approach to delete \"all-or-nothing\", TransactWriteItems only support 100 items, so I don't want to cause inconsistency in my data if for some reason the delete function fails alongs the way.\n\nAnd in my case, I simply couldn't find a solution to implement it with GSI, so the only solution for me is to delete them manually.",
       "is_original_content": false,
       "link_flair_text": "database",
@@ -2128,7 +1710,7 @@
           "id": "o6ee2vq",
           "author": "pint",
           "text": "this is a problem you should not have. the requirement itself screams badly that something is really wrong there, and you should seriously reconsider.\n\nwithout knowing more about the problem, here is a theoretical solution.\n\n1. add a new data field e.g. \"obsolete\" to the records, optionally add a ttl too\n1. modify the software to obey that field\n1. deploy the software, which means at an instant all the records are now \"gone\"\n1. let the ttl delete the records, or delete them manually at your convenience\n\nstep 2 is the most problematic, because the \"software\" might be a dozen different systems, and they might rely heavily on the assumption that queries will return rows in a timely manner, which is now not guaranteed.\n\nsuch operations have to be considered *in advance* with dynamodb.",
-          "score": 11,
+          "score": 13,
           "created_utc": "2026-02-20 10:28:36",
           "is_submitter": false,
           "replies": [
@@ -2153,7 +1735,7 @@
                   "id": "o6eglzf",
                   "author": "RecordingForward2690",
                   "text": "Without knowing the details, but just going on what you say here, I agree that your problem screams \"Relational Database\" to me. DynamoDB is simply not designed or intended for your problem.\n\nFor all practical purposes, if you use DynamoDB for something like you describe, you will be writing a custom layer that tries to give you Relational Database functionality (multi-table queries, ACID compliance across multi-table operations and such) on top of DynamoDB. That has already been done, and it's called a Relational Database.\n\nDynamoDB shines when you just have a handful of tables, need extremely high performance at any scale, and are able to live with the loss of ACID compliance - or are willing to write additional code to get some of that ACID compliance back.",
-                  "score": 5,
+                  "score": 6,
                   "created_utc": "2026-02-20 10:51:16",
                   "is_submitter": false,
                   "replies": []
@@ -2162,7 +1744,7 @@
                   "id": "o6egq5d",
                   "author": "pint",
                   "text": "to be honest, relying rdbms referential integrity for such huge operations is also not recommended. it is bad design there too, even if at least possible.\n\ni advocate for separation of data. in the old days, we just dumped everything in \"the database\", because where else data would go, right? so different types of data ended up there, configuration, users and privileges, transactions, logs, web sessions, temporary data. all these data types have very different usage patterns, and probably shouldn't be in the same database.\n\none nice pattern is to keep operational data in dynamodb, and use dynamodb streams to deliver historic data to s3 or a rdbms for statistical analysis. meanwhile, keep configuration in ssm, user data maybe in whatever authentication tool you are using, logs in cloudwatch.\n\nrely more on program logic when aggregating data from different sources (as opposed to sql).\n\nwhen it comes to referential integrity, ask yourself the question: can we somehow get away without it? can be employ a little bit of cleverness or extra code to not have to deal with it?",
-                  "score": 5,
+                  "score": 4,
                   "created_utc": "2026-02-20 10:52:16",
                   "is_submitter": false,
                   "replies": []
@@ -2193,7 +1775,7 @@
           "id": "o6ebxoi",
           "author": "safeinitdotcom",
           "text": "DynamoDB just doesn't support this natively at that scale. You can either:\n\n\\- add a`deleted=true` attribute or smth like that, filter it in queries and clean up later.\n\n\\- BatchWriteItems but log which batches completed somewhere, on failure you resume instead of starting over.\n\nIf you need true all-or-nothing for 100k records, that's a relational DB problem. DynamoDB isn't designed for it.",
-          "score": 3,
+          "score": 2,
           "created_utc": "2026-02-20 10:08:49",
           "is_submitter": false,
           "replies": [
@@ -2209,7 +1791,7 @@
                   "id": "o6eykkr",
                   "author": "KainMassadin",
                   "text": "> I got told to use Dynamodb by our CTO\n\nBeen there, sucks.",
-                  "score": 4,
+                  "score": 5,
                   "created_utc": "2026-02-20 13:03:31",
                   "is_submitter": false,
                   "replies": []
@@ -2312,97 +1894,13 @@
       ]
     },
     {
-      "id": "1r840au",
-      "title": "Next AWS Associate after SAA? (Have Azure certs)",
-      "subreddit": "aws",
-      "url": "https://www.reddit.com/r/aws/comments/1r840au/next_aws_associate_after_saa_have_azure_certs/",
-      "author": "luffy6700",
-      "created_utc": "2026-02-18 14:10:47",
-      "score": 6,
-      "num_comments": 12,
-      "upvote_ratio": 0.81,
-      "text": "Hey everyone,\nI have 9 months internship experience as a Multicloud Administrator and hold:\nMicrosoft Certified: Azure Administrator Associate\nMicrosoft Certified: Azure Security Engineer Associate\nMicrosoft Certified: Azure Solutions Architect Expert\nAWS Certified Solutions Architect – Associate\nI have a 100% AWS voucher.\nWhich Associate cert should I take next to boost job opportunities",
-      "is_original_content": false,
-      "link_flair_text": "training/certification",
-      "permalink": "https://reddit.com/r/aws/comments/1r840au/next_aws_associate_after_saa_have_azure_certs/",
-      "domain": "self.aws",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "o638rhj",
-          "author": "benpakal",
-          "text": "CloudOps. This is 95% same as SAA + some multi org stuff",
-          "score": 2,
-          "created_utc": "2026-02-18 17:38:02",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o658bug",
-              "author": "BloodAndTsundere",
-              "text": "It’s that much an overlap? I thought Developer was the biggest overlap. I’m studying for SAA and Developer simultaneously right now but I’d consider swapping one out for or just adding CloudOps",
-              "score": 1,
-              "created_utc": "2026-02-18 23:07:50",
-              "is_submitter": false,
-              "replies": [
-                {
-                  "id": "o67rfuc",
-                  "author": "benpakal",
-                  "text": "I havent done Developer, but I have done SAA SAP DevOps and CloudOps. CloudOps was very similar to SAA imho",
-                  "score": 2,
-                  "created_utc": "2026-02-19 09:37:33",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "o62lrmu",
-          "author": "Ninjaivxx",
-          "text": "I think you should do Developer",
-          "score": 1,
-          "created_utc": "2026-02-18 15:53:56",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o62s79d",
-          "author": "Willkuer__",
-          "text": "I did Developer (which is basically the same as SAA) and DataEngineer, which is okish.\n\nI think the AI certs are also relevant for the current market and likely easy.\n\nI heard Devops is fun since it also has a partical component.\n\nMy next cert will hopefully be SA Professional.\n\nSo I would go for (in that order)\n1. AI stuff\n2. Data Engineer\n3. SA Professional\n4. Developer (just too much overlap with SAA)\n5. Devops",
-          "score": 1,
-          "created_utc": "2026-02-18 16:23:02",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o64b2l0",
-          "author": "alex_aws_solutions",
-          "text": "If you're handling a Multiaccounts Environment or Organizations, I would to the CloudOps.",
-          "score": 1,
-          "created_utc": "2026-02-18 20:30:47",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o66i2cw",
-          "author": "Ok_Difficulty978",
-          "text": "Nice lineup of certs already that’s solid.\n\nSince you already have SAA + strong Azure background, I’d probably go for AWS SysOps Admin Associate next. It fits well with multicloud/admin work and looks good for ops/cloud roles. Dev Associate is good too if you’re more into coding side.\n\nAlso depends what jobs you’re aiming for tbh. I usually check a few practice questions first before locking in (used sites like vmexam before, helped me see where I stand).\n\n[https://awscertexam.wordpress.com/2024/09/12/aws-sysops-administrator-jobs-pass-the-soa-c02-exam/](https://awscertexam.wordpress.com/2024/09/12/aws-sysops-administrator-jobs-pass-the-soa-c02-exam/)",
-          "score": 1,
-          "created_utc": "2026-02-19 03:29:08",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
       "id": "1rb6tvu",
       "title": "Registering Partition Information to Glue Iceberg Tables",
       "subreddit": "aws",
       "url": "https://www.reddit.com/r/aws/comments/1rb6tvu/registering_partition_information_to_glue_iceberg/",
       "author": "mike_get_lean",
       "created_utc": "2026-02-22 00:07:23",
-      "score": 6,
+      "score": 7,
       "num_comments": 1,
       "upvote_ratio": 1.0,
       "text": "I am creating Glue Iceberg tables using Spark on EMR. After creation, I also write a few records to the table. However, when I do this, Spark does not register any partition information in Glue table metadata.\n\nAs I understand, when we use hive, during writes, spark updates table metadata in Glue such as partition information by invoking UpdatePartition API. And therefore, when we write new partitions in Hive, we can get EventBridge notifications from Glue for events such as `BatchCreatePartition`. Also, when we invoke `GetPartitions`, we can get partition information from Glue Tables.\n\nI understand Iceberg works based on metadata and has a feature for hidden partitioning but I am not sure if this is the sole reason Spark is not registering metadata info with Glue table. This is causing various issues such as not being able to detect data changes in tables, not being able to run Glue Data Quality checks on selected partitions, etc.\n\nIs there a simple way I can get this partition change and update information directly from Glue?\n\nOne of the bad ways to do this will be to create S3 notifications, subscribe to those and then run Glue Crawler on those events, which will create another S3 based Glue table with the correct partition information. And then do DQ checks on this new table. I do not like this approach at all because I will need to setup significant automation to achieve this.",
@@ -2424,15 +1922,53 @@
       ]
     },
     {
+      "id": "1ralvuk",
+      "title": "36hr+ Downtime - Response Required: Your Account is on Hold - Need Help",
+      "subreddit": "aws",
+      "url": "https://www.reddit.com/r/aws/comments/1ralvuk/36hr_downtime_response_required_your_account_is/",
+      "author": "Realistic-Lab6157",
+      "created_utc": "2026-02-21 08:25:28",
+      "score": 5,
+      "num_comments": 3,
+      "upvote_ratio": 0.67,
+      "text": "I received this 2 days ago, and I have seen other posts too about it.  \nThe pain is that I have all the right documents to get this verification done but the communication process is so slow and confusing which keeps delaying this and my services are still down.\n\nI have already created support tickets and cases but there has been no response for the last 12 hours. I am stuck here and need urgent help. u/AWSSupport\n\nI am not even sure if the verification team works on the weekends which might add 2 more days of downtime.\n\nDoes anyone have any idea on how to get this escalated or prioritized?",
+      "is_original_content": false,
+      "link_flair_text": "discussion",
+      "permalink": "https://reddit.com/r/aws/comments/1ralvuk/36hr_downtime_response_required_your_account_is/",
+      "domain": "self.aws",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "o6kqbq3",
+          "author": "Sirwired",
+          "text": "Which support plan do you have?",
+          "score": 3,
+          "created_utc": "2026-02-21 09:21:21",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o6l304i",
+              "author": "Realistic-Lab6157",
+              "text": "It’s basic. I was trying to upgrade it but it’s not allowing me.",
+              "score": 2,
+              "created_utc": "2026-02-21 11:24:46",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        }
+      ]
+    },
+    {
       "id": "1raayhv",
       "title": "Help with cognito: Code security resource quotas not enforced?",
       "subreddit": "aws",
       "url": "https://www.reddit.com/r/aws/comments/1raayhv/help_with_cognito_code_security_resource_quotas/",
       "author": "TutorNeat2724",
       "created_utc": "2026-02-20 23:20:47",
-      "score": 4,
+      "score": 5,
       "num_comments": 3,
-      "upvote_ratio": 0.84,
+      "upvote_ratio": 0.86,
       "text": "Hi everyone,\nI’ve noticed what seems to be unexpected behavior regarding Cognito User Pools code security resource quotas.\nAccording to the [documented limits](https://docs.aws.amazon.com/cognito/latest/developerguide/quotas.html#resource-quotas), certain operations (e.g. GetUserAttributeVerificationCode) should be rate-limited (for example, max 5 consecutive requests). However, in my tests, I’m able to call GetUserAttributeVerificationCode more than 5 times in a row without receiving any throttling error or limit exception.\nHas anyone experienced the same behavior?\nIs there any additional configuration required to enforce these quotas, or are they applied under specific conditions only?",
       "is_original_content": false,
       "link_flair_text": "technical question",
@@ -2461,6 +1997,72 @@
       ]
     },
     {
+      "id": "1rckoel",
+      "title": "CACs in Workspaces",
+      "subreddit": "aws",
+      "url": "https://www.reddit.com/r/aws/comments/1rckoel/cacs_in_workspaces/",
+      "author": "KrazyMuffin",
+      "created_utc": "2026-02-23 15:36:47",
+      "score": 5,
+      "num_comments": 2,
+      "upvote_ratio": 1.0,
+      "text": "Our current AWS workspace setup uses Simple AD, as I couldn't get AD Connector to work (will work on getting this working another time).\n\n\n\nCurrently a Linux workspace (Rocky Linux 8) can use CACs to authenticate to sites in-session, however, on Windows (Windows Server 2022), it doesn't recognize my computer's CAC reader. I have installed ActivID and InstallRoot, the workspace is DCV (formerly WSP).\n\n\n\nThe documentation all talks about how to setup readers with AD Connector so you can log into the workspace with your CAC, but that's not what we're trying to do, just be able to use the reader inside the instance.\n\n\n\nAny suggestions?",
+      "is_original_content": false,
+      "link_flair_text": "technical question",
+      "permalink": "https://reddit.com/r/aws/comments/1rckoel/cacs_in_workspaces/",
+      "domain": "self.aws",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "o6zxsei",
+          "author": "fjleon",
+          "text": "smart card redirection is disabled in windows by default for both presession and insession. you need to enable via GPO\n\nhttps://docs.aws.amazon.com/workspaces/latest/adminguide/group_policy.html#gp_install_template_wsp",
+          "score": 2,
+          "created_utc": "2026-02-23 18:46:39",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o75hoqv",
+              "author": "KrazyMuffin",
+              "text": "Thank you, that worked, I'm dumb 😅",
+              "score": 1,
+              "created_utc": "2026-02-24 15:38:56",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "1rd84jb",
+      "title": "Quantum-Guided Cluster Algorithms for Combinatorial Optimization",
+      "subreddit": "aws",
+      "url": "https://aws.amazon.com/blogs/quantum-computing/quantum-guided-cluster-algorithms-for-combinatorial-optimization/",
+      "author": "donutloop",
+      "created_utc": "2026-02-24 05:55:27",
+      "score": 5,
+      "num_comments": 1,
+      "upvote_ratio": 1.0,
+      "text": "[External Link]",
+      "is_original_content": false,
+      "link_flair_text": "article",
+      "permalink": "https://reddit.com/r/aws/comments/1rd84jb/quantumguided_cluster_algorithms_for/",
+      "domain": "aws.amazon.com",
+      "is_self": false,
+      "comments": [
+        {
+          "id": "o73zfzp",
+          "author": "nucleustt",
+          "text": "What in god's name is this? ELI5",
+          "score": 2,
+          "created_utc": "2026-02-24 09:50:55",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
       "id": "1rctlrt",
       "title": "How Does Karpenter Handle AMI Updates via SSM Parameters? (Triggering Rollouts, Refresh Timing, Best Practices)",
       "subreddit": "aws",
@@ -2468,7 +2070,7 @@
       "author": "LemonPartyRequiem",
       "created_utc": "2026-02-23 20:52:45",
       "score": 4,
-      "num_comments": 2,
+      "num_comments": 3,
       "upvote_ratio": 0.84,
       "text": "I’m trying to configure Karpenter so a `NodePool` uses an `EC2NodeClass` whose AMI is selected via an SSM Parameter that we manage ourselves.\n\nWhat I want to achieve is an automated (and controlled) AMI rollout process:\n\n* Use a Lambda (or another AWS service, if there’s a better fit) to periodically fetch the latest AWS-recommended EKS AMI (per the AWS docs: [https://docs.aws.amazon.com/eks/latest/userguide/retrieve-ami-id.html](https://docs.aws.amazon.com/eks/latest/userguide/retrieve-ami-id.html)).\n* Write that AMI ID into *our own* SSM Parameter Store path.\n* Update the parameter used by our **test** cluster first, let it run for \\~1 week, then update the parameter used by **prod**.\n* Have Karpenter automatically pick up the new AMI from Parameter Store and perform the node replacement/upgrade based on that change.\n\nWhere I’m getting stuck is understanding how `amiSelectorTerms` works when using the `ssmParameter` option (docs I’m referencing: [https://karpenter.sh/docs/concepts/nodeclasses/#specamiselectorterms](https://karpenter.sh/docs/concepts/nodeclasses/#specamiselectorterms)):\n\n* How exactly does Karpenter resolve the AMI from an `ssmParameter` selector term?\n* When does Karpenter re-check that parameter for changes (only at node launch time, periodically, or on some internal resync)?\n* Is there a way to force Karpenter to re-resolve the parameter on a schedule or on demand?\n* What key considerations or pitfalls should I be aware of when trying to implement AMI updates this way (e.g., rollout behavior, node recycling strategy, drift, disruption, caching)?\n\nThe long-term goal is to make AMI updates as simple as updating a single SSM parameter: update test first, validate for a week, then update prod letting Karpenter handle rolling the nodes automatically.",
       "is_original_content": false,
@@ -2494,44 +2096,15 @@
           "created_utc": "2026-02-24 06:57:23",
           "is_submitter": false,
           "replies": []
-        }
-      ]
-    },
-    {
-      "id": "1rckoel",
-      "title": "CACs in Workspaces",
-      "subreddit": "aws",
-      "url": "https://www.reddit.com/r/aws/comments/1rckoel/cacs_in_workspaces/",
-      "author": "KrazyMuffin",
-      "created_utc": "2026-02-23 15:36:47",
-      "score": 4,
-      "num_comments": 2,
-      "upvote_ratio": 0.84,
-      "text": "Our current AWS workspace setup uses Simple AD, as I couldn't get AD Connector to work (will work on getting this working another time).\n\n\n\nCurrently a Linux workspace (Rocky Linux 8) can use CACs to authenticate to sites in-session, however, on Windows (Windows Server 2022), it doesn't recognize my computer's CAC reader. I have installed ActivID and InstallRoot, the workspace is DCV (formerly WSP).\n\n\n\nThe documentation all talks about how to setup readers with AD Connector so you can log into the workspace with your CAC, but that's not what we're trying to do, just be able to use the reader inside the instance.\n\n\n\nAny suggestions?",
-      "is_original_content": false,
-      "link_flair_text": "technical question",
-      "permalink": "https://reddit.com/r/aws/comments/1rckoel/cacs_in_workspaces/",
-      "domain": "self.aws",
-      "is_self": true,
-      "comments": [
+        },
         {
-          "id": "o6zxsei",
-          "author": "fjleon",
-          "text": "smart card redirection is disabled in windows by default for both presession and insession. you need to enable via GPO\n\nhttps://docs.aws.amazon.com/workspaces/latest/adminguide/group_policy.html#gp_install_template_wsp",
+          "id": "o7bbcgk",
+          "author": "EcstaticJellyfish225",
+          "text": "Consider using TAGs for the AMI selector, you should be able to tag AWS provided (and your own) AMIs.  Then you can pre-test an AMI in your dev account, once you are happy with it, you can tag the same AMI in your prod account and it will become available for karpenter to pick up next time a new node is needed (or if using drift detection at any time your disruption budget allows).\n\nAutomating the test cycle and tagging AMIs that pass the test, is also pretty straight forward. Test in a dev account, if the AMI asses the test, by some means tag the same AMI in your prod account. (Maybe setup an SNSTopic triggering a lambda, or something similar).",
           "score": 1,
-          "created_utc": "2026-02-23 18:46:39",
+          "created_utc": "2026-02-25 12:19:03",
           "is_submitter": false,
-          "replies": [
-            {
-              "id": "o75hoqv",
-              "author": "KrazyMuffin",
-              "text": "Thank you, that worked, I'm dumb 😅",
-              "score": 1,
-              "created_utc": "2026-02-24 15:38:56",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
+          "replies": []
         }
       ]
     },
@@ -2544,7 +2117,7 @@
       "created_utc": "2026-02-21 22:38:59",
       "score": 4,
       "num_comments": 0,
-      "upvote_ratio": 0.84,
+      "upvote_ratio": 1.0,
       "text": "Every time I try to setup App Studio on my new account I receive the “Entity Already Exists” error no matter what I do. I’ve confirmed a group exists in IAM and it’s not duplicated anywhere. Pulling my hair out trying to even get off the ground with AWS and can’t figure this out. I’ve deleted and rebuilt the IAM multiple times, and still nothing. Any advice is appreciated! ",
       "is_original_content": false,
       "link_flair_text": "discussion",
@@ -2570,6 +2143,135 @@
       "domain": "github.com",
       "is_self": false,
       "comments": []
+    },
+    {
+      "id": "1ra6gcu",
+      "title": "Help — Can’t delete CloudFront distribution and I’m scared of a huge bill",
+      "subreddit": "aws",
+      "url": "https://www.reddit.com/r/aws/comments/1ra6gcu/help_cant_delete_cloudfront_distribution_and_im/",
+      "author": "SignalDrive3667",
+      "created_utc": "2026-02-20 20:25:35",
+      "score": 4,
+      "num_comments": 7,
+      "upvote_ratio": 0.75,
+      "text": "I created a CloudFront distribution for learning purposes. I’m now trying to clean up my AWS account and delete all resources, but CloudFront won’t let me delete the distribution.\n\nError message:\n“Failed to delete distribution: You can't delete this distribution while it's subscribed to a pricing plan. After you cancel the pricing plan, you can delete the distribution at the end of the monthly billing cycle.”\n\n**The confusing part:** I selected the Free Tier flat-rate plan, so I don’t understand what pricing plan it’s referring to.\n\nWhy am I unable to delete it? Is there something else I need to disable or cancel first?\n\nI’m worried about unexpected charges and want to make sure everything is fully removed. Any guidance on how to safely delete the distribution would be appreciated.",
+      "is_original_content": false,
+      "link_flair_text": "technical question",
+      "permalink": "https://reddit.com/r/aws/comments/1ra6gcu/help_cant_delete_cloudfront_distribution_and_im/",
+      "domain": "self.aws",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "o6hir8f",
+          "author": "pausethelogic",
+          "text": "Reach out to AWS account and billing support. They’ll be able to see what’s in your account and how to remove it so you’re not charged",
+          "score": 2,
+          "created_utc": "2026-02-20 20:28:32",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "o6hjv0v",
+          "author": "Opening-Concert826",
+          "text": "See the cancel pricing plan section here: https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/flat-rate-pricing-plan.html#manage-your-pricing-plans",
+          "score": 2,
+          "created_utc": "2026-02-20 20:34:04",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "o6hrtdz",
+          "author": "vppencilsharpening",
+          "text": "The flat-rate plans are somewhat new, so I'd expect that there is not a lot of great information if your searching the internet.\n\nu/Opening-Concert826 linked the AWS doc that explains how to remove the pricing plan. However there is a chance that you still may need to wait until the end of the billing cycle for the \\[free\\] flat-rate plan to be removed.\n\nTo ensure that the distribution is NOT used (and not incurring costs), you should be able to disable it from the Distributions list in the console. Just check the box next to the distribution and click \\[Disable\\]. Do this in addition to removing the flat-rate plan. \n\nIf you created this to play around with and never publicly advertised the endpoint then it's unlikely you are going to get hit with much usage and it will all likely fall under the free tier.",
+          "score": 2,
+          "created_utc": "2026-02-20 21:13:27",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "o6jxsy8",
+          "author": "WhoseThatUsername",
+          "text": "Pretty sure the 'Free Tier flat-rate plan' is considered a pricing plan, though unclear as to how you'd remove it.",
+          "score": 1,
+          "created_utc": "2026-02-21 05:01:20",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "o6ke6fb",
+          "author": "SilentPugz",
+          "text": "Just a thought, to delete cloudfront you must perform the step to change the stage before the delete. Disabled must be in state.\n\nEdit : state*  # replace stage.",
+          "score": 1,
+          "created_utc": "2026-02-21 07:21:59",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "o6izc92",
+          "author": "llima1987",
+          "text": "In addition to the other answers, the safest way to kill your spending on AWS is to close the entire account. You can always create a new one.",
+          "score": 1,
+          "created_utc": "2026-02-21 01:12:26",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1reb3q4",
+      "title": "AWS Backup Jobs with VSS Errors",
+      "subreddit": "aws",
+      "url": "https://www.reddit.com/r/aws/comments/1reb3q4/aws_backup_jobs_with_vss_errors/",
+      "author": "Budget-Industry-3125",
+      "created_utc": "2026-02-25 11:49:03",
+      "score": 3,
+      "num_comments": 3,
+      "upvote_ratio": 1.0,
+      "text": "Good morning guys,\n\n  \nI've set up AWS Backup Jobs for many of my EC2 Instances. \n\nThere are 20 VMs enabled for backing up their data to AWS, but somehow 9 of them are presenting the following errors:\n\nWindows VSS Backup Job Error encountered, trying for regular backup\n\nI have tried re-installing the backup agent in the vms and updating, but it doesn't seem to be working out. \n\nUpon connecting to the machines, I'm able to find some VSS providers in failed states. However, after restarting them and verifying that they are OK, the job fails again with the same error message.\n\n  \nHas anyone encountered this behaviour before?",
+      "is_original_content": false,
+      "link_flair_text": "discussion",
+      "permalink": "https://reddit.com/r/aws/comments/1reb3q4/aws_backup_jobs_with_vss_errors/",
+      "domain": "self.aws",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "o7bn6tp",
+          "author": "brile_86",
+          "text": "  \nCheck the pre-reqs  \n[https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/application-consistent-snapshots-prereqs.html](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/application-consistent-snapshots-prereqs.html)\n\nTLDR:\n\n* Windows Server 2016\n* .NET Framework version 4.6 or later\n* Windows PowerShell major version 3, 4, or 5 with language mode set to FullLanguage\n* AWS Tools for Windows PowerShell version [3.3.48.0](http://3.3.48.0) or later\n* IAM policy AWSEC2VssSnapshotPolicy (or equivalent permissions) attached (make sure you don't have any restrictive SCP or IAM Policy Boundaries blocking it)\n\n  \nAlso some instances are not supported as too small  \n[https://docs.aws.amazon.com/aws-backup/latest/devguide/windows-backups.html](https://docs.aws.amazon.com/aws-backup/latest/devguide/windows-backups.html)\n\n* t3.nano\n* t3.micro\n* t3a.nano\n* t3a.micro\n* t2.nano\n* t2.micro\n\n",
+          "score": 3,
+          "created_utc": "2026-02-25 13:33:12",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "o7bjqdc",
+          "author": "ReturnOfNogginboink",
+          "text": "This is a Windows issue, not an AWS issue. The error is coming from the Windows volume snapshot service.",
+          "score": 1,
+          "created_utc": "2026-02-25 13:13:16",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "o7cm51j",
+          "author": "[deleted]",
+          "text": "[deleted]",
+          "score": 0,
+          "created_utc": "2026-02-25 16:26:16",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o7co5m1",
+              "author": "gex80",
+              "text": "Why would they contact Veeam support?",
+              "score": 1,
+              "created_utc": "2026-02-25 16:35:23",
+              "is_submitter": false,
+              "replies": []
+            }
+          ]
+        }
+      ]
     }
   ]
 }
