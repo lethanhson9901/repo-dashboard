@@ -1,11 +1,11 @@
 {
   "metadata": {
-    "last_updated": "2026-03-15 03:40:44",
+    "last_updated": "2026-03-15 16:48:40",
     "time_filter": "week",
     "subreddit": "Rag",
     "total_items": 20,
-    "total_comments": 128,
-    "file_size_bytes": 168368
+    "total_comments": 131,
+    "file_size_bytes": 180401
   },
   "items": [
     {
@@ -15,8 +15,8 @@
       "url": "https://www.reddit.com/r/Rag/comments/1rqw1oo/i_had_to_reembed_5_million_documents_because_i/",
       "author": "Silent_Employment966",
       "created_utc": "2026-03-11 14:56:53",
-      "score": 119,
-      "num_comments": 31,
+      "score": 123,
+      "num_comments": 32,
       "upvote_ratio": 0.9,
       "text": "Being Six months into production, recall quality on our domain-specific queries was consistently underperforming. we had `text-embedding-3-large`\n\nso we wanted to changed to openweight `zembed-1` model. \n\n**Why changing models means re-embedding everything**\n\nVectors from different embedding models are not comparable. They don't live in the same vector space a 0.87 cosine similarity from `text-embedding-3-large` means something completely different from a 0.87 from `zembed-1`. You can't migrate incrementally. You can't keep old vectors and mix in new ones. When you switch models, every single vector in your index is invalid and you start from scratch.\n\nAt 5M documents that's not a quick overnight job. It's a production incident.\n\n**The architecture mistake I made**\n\nI'd coupled chunking and embedding into a single pipeline stage. Documents came in, got chunked, got embedded, vectors went into the index. Clean, fast to build, completely wrong for maintainability.\n\nWhen I needed to switch models, I had no stored intermediate state. No chunks sitting somewhere ready to re-embed. I went back to raw documents and ran the entire pipeline again.\n\nThe fix is separating them into two explicit stages with a storage layer in between:\n\n    Stage 1: Document → Chunks → Store raw chunks (persistent)\n    Stage 2: Raw chunks → Embeddings → Vector index\n\nWhen you change models, Stage 1 is already done. You only run Stage 2 again. On 5M documents that's the difference between 18 hours and 2-3 hours.\n\nStore your raw chunks in a separate document store. Postgres, S3, whatever fits your stack. Treat your vector index as a derived artifact that can be rebuilt. Because at some point it will need to be rebuilt.\n\n**Blue-green deployment for vector indexes**\n\nEven with the right architecture, switching models means a rebuild period. The way to handle this without downtime:\n\n    v1 index (text-embedding-3-large) → serving 100% traffic\n    v2 index (zembed-1) → building in background\n    \n    Once v2 complete:\n    → Route 10% traffic to v2\n    → Monitor recall quality metrics\n    → Gradually shift to 100%\n    → Decommission v1\n\nYour chunking layer feeds both indexes during transition. Traffic routing happens at the query layer. No downtime, no big-bang cutover, and if v2 underperforms you roll back without drama.\n\n**Mistakes to Avoid while Choosing the Embedding model**\n\nWe picked an embedding model based on benchmark scores and API convenience. The question that actually matters long-term is: can I fine-tune this model if domain accuracy isn't good enough?\n\n`text-embedding-3-large` is a black box. No fine-tuning, no weight access, no adaptation path. When recall underperforms your only option is switching models entirely and eating the re-embedding cost. I learned that the hard way.\n\nOpen-weight models give you a third option between \"accept mediocre recall\" and \"re-embed everything.\" You fine-tune on your domain and adapt the model you already have. Vectors stay valid. Index stays intact.\n\n**The architectural rule**\n\nTreat embedding model as a dependency you will eventually want to upgrade, not a permanent decision. Build the abstraction layer now while it's cheap. Separating chunk storage from vector storage takes a day to implement correctly.\n\npls don't blindly follow MTEB scores. Switching Cost is real especially when you have millions of embedded documents. \n\n\n\n",
       "is_original_content": false,
@@ -29,7 +29,7 @@
           "id": "o9wncn8",
           "author": "Werister",
           "text": "You're conflating a few different issues in the post.\n\nSwitching embedding models still requires re-embedding the corpus. What your architecture improves is not that, it only avoids rerunning parsing/chunking from raw documents because the chunks are already persisted.\n\nAlso, saying you \"can't migrate incrementally\" is too strong. You can't mix vectors from different models in the same vector space as if they were directly comparable, but you can migrate incrementally at the system level with dual indexes/blue-green rollout.\n\nThe most questionable part is the suggestion that with an open-weight model you could keep old vectors valid after tuning it. In general, fine-tuning an embedding model changes the vector space, so it also requires re-embedding. The exception is a different technique: adapting only the query side to the old space, which is not the same as switching embedding models for free.\n\nSo in the end, the post does not show how to \"avoid re-embedding\", it only shows how to reduce the operational pain once re-embedding is unavoidable.\n",
-          "score": 27,
+          "score": 28,
           "created_utc": "2026-03-11 19:18:11",
           "is_submitter": false,
           "replies": [
@@ -86,7 +86,7 @@
           "id": "o9w0jf9",
           "author": "mwon",
           "text": "But why in the first place you didn’t save the chunks? If not the chunks what  are you feeding the LLM after retrieval? ",
-          "score": 6,
+          "score": 5,
           "created_utc": "2026-03-11 17:31:02",
           "is_submitter": false,
           "replies": [
@@ -113,7 +113,7 @@
               "id": "o9v58g0",
               "author": "Silent_Employment966",
               "text": "direct Simple threshold: benchmark both models on 10% of your corpus first. If the recall gap justifies the infra cost at your query volume, switch",
-              "score": 4,
+              "score": 6,
               "created_utc": "2026-03-11 15:03:08",
               "is_submitter": true,
               "replies": [
@@ -160,7 +160,7 @@
               "id": "o9v6nwu",
               "author": "Silent_Employment966",
               "text": "The chunks you store and the chunks you index are the same. The point is storing them separately from the vectors so when you switch embedding models you re-embed from stored chunks instead of re-processing raw documents from scratch. just 2 different pipeline stages but same data.",
-              "score": 5,
+              "score": 4,
               "created_utc": "2026-03-11 15:10:16",
               "is_submitter": true,
               "replies": [
@@ -168,7 +168,7 @@
                   "id": "o9v7ric",
                   "author": "fabkosta",
                   "text": "I still don't get it. You can simply retrieve every single document in the entire search engine step by step, and then add a new vector without removing the old one. Once every document has a new vector, you switch the query logic. Sure, now you have two vectors stored, but, hey, shouldn't be such a big deal.\n\nObviously, that'd be slow, but that's how things are.\n\nOr, you build an complete second index, then make the switch, if space is not a big consideration to you and you can live with temporarily have that.\n\nAnd, yes, having raw docs in a staging area (cheap mass storage) and re-runnable pipelines with re-tries and dead letter queues and all those things, yes, you need all of those.\n\nAm I missing something?",
-                  "score": 3,
+                  "score": 2,
                   "created_utc": "2026-03-11 15:15:41",
                   "is_submitter": false,
                   "replies": []
@@ -268,6 +268,15 @@
           "replies": []
         },
         {
+          "id": "oaipm7i",
+          "author": "DueKitchen3102",
+          "text": "Thanks for sharing the experience.\n\nMy last week's post  \"RAG Insight: Parsing & Indexing Often Matter More Than Model Size\" is quite relevant to this  \n[https://www.reddit.com/r/Rag/comments/1rodl46/rag\\_insight\\_parsing\\_indexing\\_often\\_matter\\_more/](https://www.reddit.com/r/Rag/comments/1rodl46/rag_insight_parsing_indexing_often_matter_more/) \n\nBasically, one can not hope to achieve a very high accuracy with embedding models alone.  RAG system is basically a small scale search engine, and techniques/tricks for building a good search engine naturally work for improving rag system. \n\nThat post was related to an earlier post on our RAG system on PC with an RTX 5060. We observe the indexing speed is about 0.4 - 2 seconds per PDF (depending how much OCR is needed for each PDF), with an average of 1.2 seconds per PDF. The documents are \\~10-page  double-column ACL papers (roughly equivalent to 15-page \"regular\" PDF). \n\nAssuming 3000 PDFs per hour (72,000 PDF per day). and 5 million such PDFs will take about 70 days, if you only have a laptop with an RTX 5060. Of course, enterprises like your company use much more powerful servers than AI-PC. \n\nAgain, thanks for sharing. ",
+          "score": 1,
+          "created_utc": "2026-03-15 04:13:21",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
           "id": "o9yikew",
           "author": "zilchers",
           "text": "Chucking is the easiest and cheapest part of this. AI slop ",
@@ -285,9 +294,9 @@
       "url": "https://www.reddit.com/r/Rag/comments/1rqq4so/production_rag_is_mostly_infrastructure/",
       "author": "PavelRossinsky",
       "created_utc": "2026-03-11 10:31:44",
-      "score": 65,
+      "score": 68,
       "num_comments": 19,
-      "upvote_ratio": 0.97,
+      "upvote_ratio": 0.99,
       "text": "I recently built and deployed a RAG system for B2B product data.\n\nIt works well. Retrieval quality is solid and users are getting good answers.\n\nBut the part that surprised me was not the retrieval quality. It was how much infrastructure it takes to keep the system running in production.\n\nOur stack currently looks roughly like this:\n\n* AWS cluster running the services\n* Weaviate\n* LiteLLM\n* dedicated embeddings model\n* retrieval model\n* Open WebUI\n* MCP server\n* realtime indexing pipeline\n* auth layer\n* tracking and monitoring\n* testing and deployment pipeline\n\nAll together this means 10+ moving parts that need to be maintained, monitored, updated, and kept in sync. Each has its own configuration, failure modes, and versioning issues.\n\nMost RAG tutorials stop at \"look, it works\".\n\nAlmost nobody talks about what happens after that.\n\nFor example:\n\n* an embeddings model update can quietly degrade retrieval quality\n* the indexing pipeline can fall behind and users start seeing stale data\n* dependency updates break part of the pipeline\n* debugging suddenly spans multiple services instead of one system\n\nNone of this means compound RAG systems are a bad idea. For our use case they absolutely make sense.\n\nBut I do think the industry needs a more honest conversation about the operational cost of these systems.\n\nRight now, everyone is racing to add more components such as rerankers, query decomposition, guardrails, and evaluation layers. The question of whether this complexity is sustainable rarely comes up.\n\nMaybe over time, we will see consolidation toward simpler and more integrated stacks.\n\nCurious what others are running in production.\n\nAm I crazy or are people spending a lot of time just keeping these systems running?\n\nAlso curious how people think about the economics. How much value does a RAG system need to generate to justify the maintenance overhead?",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -299,7 +308,7 @@
           "id": "o9twzbp",
           "author": "AICodeSmith",
           "text": "Nobody talks about it because the people selling RAG tutorials never ran one in production. 10+ moving parts is the norm not the exception and the embeddings drift problem alone has killed more RAG projects than bad retrieval ever did. The honest answer is most companies aren't ready for this operationally and they find out 6 months after launch.",
-          "score": 15,
+          "score": 17,
           "created_utc": "2026-03-11 10:37:27",
           "is_submitter": false,
           "replies": [
@@ -318,7 +327,7 @@
           "id": "o9uoc83",
           "author": "Cotega",
           "text": "Amazing post! When I work with clients building these system, I try to separate RAG into two main components. The retrieval system and the content ingestion system. Almost everyone focuses on the retrieval system, but the fact is that is the easy part and unless you get the content ingestion system (which is where you focus your concerns) correct, it does not matter how good your retrieval system is.\n\nI would also add to your list things like:  \n\\-  BCDR: when things go wrong, the last thing you want to have to do is reprocess and re-embed your content.  \n\\- Security. When you have all these components, it is easy to get the security part wrong, This also includes things like document access control.  \n\\- Scale: It is easy to show a demo of a few documents, with a happy path, but when you have millions of files to process, it is a much different challenge  \n\\- Cost: When you have so many components and a lot of content, costs for these systems (including particularly the retrieval system can get really expensive). It really important to really understand this as there are good options for optimizing this  \n\\- Versioning: As one person commented, how do you handle versioning embeddings? This includes things like better document processing techniques (for example handling new content types such as videos or perhaps images in documents)",
-          "score": 4,
+          "score": 5,
           "created_utc": "2026-03-11 13:36:29",
           "is_submitter": false,
           "replies": [
@@ -453,7 +462,7 @@
       "url": "https://www.reddit.com/r/Rag/comments/1rpkyn9/built_a_rag_system_on_top_of_20_years_of_sports/",
       "author": "devasheesh_07",
       "created_utc": "2026-03-10 02:37:22",
-      "score": 40,
+      "score": 39,
       "num_comments": 23,
       "upvote_ratio": 0.83,
       "text": "Been working on a RAG implementation recently and wanted to share some of what I learned because I hit a few interesting problems that I didn't see discussed much.\n\nThe domain was sports analytics - using RAG to answer complex natural language queries against a large historical dataset of match data, player statistics, and contextual documents going back decades.\n\nThe core challenge was interesting from a RAG perspective.\n\nThe queries coming in were not simple lookups. They were things like:\n\n* How does a specific player perform in evening matches when chasing under a certain target\n* What patterns have historically worked on pitches showing heavy wear after extended play\n* Compare performance metrics across two completely different playing conditions\n\nStandard RAG out of the box struggled with these because the answers required pulling and reasoning across multiple documents at once — not just retrieving the single most relevant chunk.\n\nWhat we tried and how it went:\n\nNaive chunking by document gave poor results. The retrieved chunks had the right words but not the right context. A statistic without its surrounding conditions is basically useless for answering anything meaningful.\n\nSwitched to a hybrid approach - dense retrieval for semantic similarity combined with a structured metadata filter layer on top. The vector search narrows the field and then hard filters on conditions, time period, and event type cut it down further before anything hits the LLM.\n\nQuery decomposition helped a lot for the complex multi-part questions. Breaking one compound question into two or three sub-queries, retrieving separately, then synthesizing at generation time gave noticeably better answers than trying to retrieve for the full question in one shot.\n\nRe-ranking made a meaningful difference. Without it the top retrieved chunks were semantically close but not always the most useful for the actual question being asked. Adding a cross-encoder re-ranking step before generation cleaned this up considerably.\n\nHallucination was the biggest real-world concern. The LLM without proper grounding would confidently state things that were simply wrong. With structured retrieval and explicit source citation built into the prompt the accuracy improved substantially - though not perfectly. It is still an open problem.\n\nThe part that surprised me most:\n\nHow much the quality of the underlying data structure mattered. The retrieval pipeline can only work with what is in the knowledge base. Poorly structured source documents produced poor retrieval regardless of how well the rest of the pipeline was tuned. Cleaning and restructuring the source data had more impact on final answer quality than most of the pipeline experimentation we did.\n\nStill unsolved for me:\n\nRAG over time-series and sequential event data is still the part that feels least figured out. Events in this domain have meaning based on their sequence and surrounding context - not just their individual content. Standard chunking destroys that sequence information. If anyone has tackled this problem I would genuinely like to hear what worked.\n\nAlso curious whether anyone has found a clean way to handle queries that span very different time periods in the same knowledge base - older documents and recent ones need to be weighted differently but getting that balance right without hardcoding rules is tricky.\n\nIf anything here is wrong or could be approached better please say so in the comments -wrote this to learn and still learning.",
@@ -467,7 +476,7 @@
           "id": "o9lq2d1",
           "author": "devasheesh_07",
           "text": "Full breakdown of the whole system including data pipeline, embedding approach, retrieval architecture, and where LLMs, NLP and deep learning each sit across the stack —\n\n[https://www.loghunts.com/cricket-ai-ml-llm-rag-complete-guide-2026](https://www.loghunts.com/cricket-ai-ml-llm-rag-complete-guide-2026)",
-          "score": 5,
+          "score": 4,
           "created_utc": "2026-03-10 02:37:58",
           "is_submitter": true,
           "replies": []
@@ -684,184 +693,15 @@
       ]
     },
     {
-      "id": "1rp5xd1",
-      "title": "Chunking is not a set-and-forget parameter — and most RAG pipelines ignore the PDF extraction step too",
-      "subreddit": "Rag",
-      "url": "https://www.reddit.com/r/Rag/comments/1rp5xd1/chunking_is_not_a_setandforget_parameter_and_most/",
-      "author": "Just-Message-9899",
-      "created_utc": "2026-03-09 17:04:18",
-      "score": 32,
-      "num_comments": 16,
-      "upvote_ratio": 0.97,
-      "text": "NVIDIA recently published [an interesting study on chunking strategies](https://developer.nvidia.com/blog/finding-the-best-chunking-strategy-for-accurate-ai-responses/), showing how the choice of strategy significantly impacts RAG performance depending on the domain and document type. Worth a read.\n\nYet most RAG tooling gives you zero visibility into what your chunks actually look like. You pick a size, set an overlap, and hope for the best.\n\nThere's also a step that gets even less attention: the conversion to Markdown. If your PDF comes out broken — collapsed tables, merged columns, mangled headers — no splitting strategy will save you. You need to validate the text before you chunk it.\n\nI'm building Chunky, an open-source local tool that tries to fix exactly this. The idea is simple: review your Markdown conversion side-by-side with the original PDF, pick a chunking strategy, inspect every chunk visually, edit the bad splits directly, and export clean JSON for your vector store.\n\nIt's still in active development, but it's usable today.\n\nGitHub link: 🐿️ [Chunky](https://github.com/GiovanniPasq/chunky)\n\nFeedback and contributions very welcome :)",
-      "is_original_content": false,
-      "link_flair_text": "Tools & Resources",
-      "permalink": "https://reddit.com/r/Rag/comments/1rp5xd1/chunking_is_not_a_setandforget_parameter_and_most/",
-      "domain": "self.Rag",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "o9jim69",
-          "author": "DespoticLlama",
-          "text": "I wish I had the luxury to inspect each chunk visually , at 30k docs per day, good enough is the goal.",
-          "score": 4,
-          "created_utc": "2026-03-09 19:32:19",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o9jrbi8",
-              "author": "Holiday-Case-4524",
-              "text": "I found the idea interesting, not because it requires checking every single PDF, but because you could sample the most representative ones to determine the best strategy. Often, when building a RAG system in domains such as medicine or law, the documents come from institutions that use the same or very similar templates. Understanding how those documents behave allows you to generalize the approach effectively.",
-              "score": 3,
-              "created_utc": "2026-03-09 20:13:35",
-              "is_submitter": false,
-              "replies": [
-                {
-                  "id": "o9nk179",
-                  "author": "DespoticLlama",
-                  "text": "Yeah, I get it. My industry has no template that they'd all use. Even within a specific customer, the templates they believe are being used often aren't, or have been modified to suit each contributor. ",
-                  "score": 1,
-                  "created_utc": "2026-03-10 11:54:56",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            },
-            {
-              "id": "o9mrzrp",
-              "author": "welcome-overlords",
-              "text": "Yes this is the issue. Im not working with this big sizes but still, it's difficult to inspect tens of thousands of chunks",
-              "score": 1,
-              "created_utc": "2026-03-10 07:44:27",
-              "is_submitter": false,
-              "replies": [
-                {
-                  "id": "o9njn91",
-                  "author": "DespoticLlama",
-                  "text": "Don't i know it. I was looking at chunks several months ago purely by chance the other day and noticed some corruption. Realised/Suspected a dev had vibe coded a fix and broke the chunking, the AI, fixed the tests to make it \"work\". Had to run several days of docs back through the pipeline to clean up the mess. The reputational side I left to the engineering manager to sort out, I was just the messenger. Thankfully my job is to run this at scale, and as cheap as possible.",
-                  "score": 1,
-                  "created_utc": "2026-03-10 11:52:16",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "o9jv2z8",
-          "author": "CapitalShake3085",
-          "text": "I have always noticed similarities between meticulously curating the knowledge base and treating it as if it were the training dataset of a model",
-          "score": 4,
-          "created_utc": "2026-03-09 20:31:48",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o9kx32x",
-          "author": "AvailableMycologist2",
-          "text": "the PDF extraction point is so underrated. i've seen RAG pipelines where people spend days tweaking chunk sizes and embedding models but never once look at what the actual extracted text looks like. garbage in garbage out. the side-by-side comparison idea is clever, will check out chunky",
-          "score": 2,
-          "created_utc": "2026-03-09 23:48:55",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o9mu4me",
-              "author": "Just-Message-9899",
-              "text": "thank you :D",
-              "score": 1,
-              "created_utc": "2026-03-10 08:05:17",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "o9mmrv1",
-          "author": "Time-Dot-1808",
-          "text": "The Markdown conversion step is more important than most people realize. Different extraction libraries handle tables and multi-column layouts very differently, and the failures are usually silent: the text comes through but the structure is lost.\n\nTesting your extractor on a sample of your most problematic documents before picking a chunking strategy saves a lot of downstream debugging. For PDFs with complex layouts, the extraction library choice often matters more than the chunking parameters. The visual inspection approach in Chunky is exactly the right idea.",
-          "score": 2,
-          "created_utc": "2026-03-10 06:53:27",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o9mu2p6",
-              "author": "Just-Message-9899",
-              "text": "thank you for the feedback :D",
-              "score": 1,
-              "created_utc": "2026-03-10 08:04:45",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "o9n061r",
-          "author": "Cute-Willingness1075",
-          "text": "the side by side pdf comparison is exactly what ive wanted, so many times ive debugged bad retrieval only to find the markdown extraction mangled a table into nonsense. cool that its local too, will def check out chunky",
-          "score": 2,
-          "created_utc": "2026-03-10 09:05:30",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o9n6k98",
-              "author": "Just-Message-9899",
-              "text": "thank you, i have a lot of new features to add to the project, stay tuned =)",
-              "score": 1,
-              "created_utc": "2026-03-10 10:06:29",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "o9mkabx",
-          "author": "One_Milk_7025",
-          "text": "I built all in one chunker visualizer in browser with rust wasm.. offline ready. Fully local.. will oss the library too.. \nTry it out - chunker.veristamp.in",
-          "score": 1,
-          "created_utc": "2026-03-10 06:29:40",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o9ms3lq",
-          "author": "EnoughNinja",
-          "text": "Email threads have a parallel version of this problem. A forwarded chain often contains three or four earlier conversations collapsed into one message. Chunking treats it as a single document, even though it's actually multiple threads stitched together\n\nOn top of that, every reply includes the full quoted history below it, so the same content gets duplicated across multiple chunks and retrieval surfaces the quoted copy instead of the original message. The agent can't tell what was actually written at that point in the conversation versus what was just quoted context from earlier.\n\niGPT solves this by reconstructing the thread structure before retrieval, separating forwarded chains from the current conversation and stripping quoted duplication. \n\nDifferent preprocessing problem than PDFs, same principle: garbage structure in, garbage retrieval out.",
-          "score": 1,
-          "created_utc": "2026-03-10 07:45:31",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o9p3zis",
-          "author": "Alex_CTU",
-          "text": "I previously created a similar demo that included a document cleaning pipeline for comparison. This setup allowed users to view three different results side by side: the PDF viewer, the Markdown viewer, and the cleaned viewer, which utilized regular expressions to clean the PDF content. However, I ultimately abandoned the project before completion because I found the Streamlit interface to be unappealing. Later on, I separated the document cleaning process and incorporated it into an Agentic workflow.",
-          "score": 1,
-          "created_utc": "2026-03-10 16:53:08",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oad2vkt",
-          "author": "Pitiful_Storage_8391",
-          "text": "Sampling chunks is a solid approach! It's like trying to find the perfect bite in a new recipe - sometimes you just have to taste test.",
-          "score": 1,
-          "created_utc": "2026-03-14 06:47:36",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
       "id": "1roeddo",
       "title": "I built a benchmark to test if embedding models actually understand meaning and most score below 20%",
       "subreddit": "Rag",
       "url": "https://www.reddit.com/r/Rag/comments/1roeddo/i_built_a_benchmark_to_test_if_embedding_models/",
       "author": "hashiromer",
       "created_utc": "2026-03-08 19:44:43",
-      "score": 30,
-      "num_comments": 27,
-      "upvote_ratio": 0.98,
+      "score": 32,
+      "num_comments": 28,
+      "upvote_ratio": 1.0,
       "text": "I kept running into a frustrating problem with RAG: semantically identical chunks would get low similarity scores, and chunks that shared a lot of words but meant completely different things would rank high. So I built a small adversarial benchmark to quantify how bad this actually is.\n\n**The idea is very simple.** Each test case is a triplet:\n\n* **Anchor:** \"The city councilmen refused the demonstrators a permit because they *feared* violence.\"\n* **Lexical Trap:** \"The city councilmen refused the demonstrators a permit because they *advocated* violence.\" (one word changed, meaning completely flipped)\n* **Semantic Twin:** \"The municipal officials denied the protesters authorization due to their concerns about potential unrest.\" (completely different words, same meaning)\n\nA good embedding model should place the Semantic Twin closer to the Anchor than the Lexical Trap. **Accuracy = % of triplets where the cosine similarity between Anchor and Semantic Twin is higher than the cosine similarity between Anchor and Lexical Trap.**\n\nThe dataset is 126 triplets derived from the Winograd Schema Challenge,  sentences specifically designed so that a single word swap changes meaning in ways that require real-world reasoning to catch.\n\n**Results across 9 models:**\n\n|Model|Accuracy|\n|:-|:-|\n|qwen3-embedding-8b|40.5%|\n|qwen3-embedding-4b|21.4%|\n|gemini-embedding-001|16.7%|\n|e5-large-v2|14.3%|\n|text-embedding-3-large|9.5%|\n|gte-base|8.7%|\n|mistral-embed|7.9%|\n|llama-nemotron-embed|7.1%|\n|paraphrase-MiniLM-L6-v2|7.1%|\n\nHappy to hear thoughts, especially if anyone has ideas for embedding models or techniques that might do better on this. Also open to suggestions for extending the dataset. I am sharing sharing link below, contributions are also welcome.\n\n**EDIT:** Shoutout to u/SteelbadgerMk2 for pointing out a critical nuance! They correctly noted that many classic Winograd pairs don't actually invert the *global meaning* of the sentence when resolving the ambiguity (e.g., \"The trophy doesn't fit into the brown suitcase because it's too \\[small/large\\]\"). In those cases, a good embedding model *should* actually embed them closely together because the overall \"vibe\" or core semantic meaning is the same.\n\nBased on this excellent feedback, I have **filtered the dataset** down to a curated subset of 42 pairs where the single word swap *strictly alters the semantic meaning* of the sentence (like the \"envy/success\" example).\n\nThe benchmark now strictly tests whether embedding models can avoid being fooled by lexical overlap when the *actual meaning* is entirely different. I've re-run the benchmark on this explicitly filtered dataset, and the results have been updated.\n\n**Updated Leaderboard (42 filtered pairs):**\n\n|Rank|Model|Accuracy|Correct / Total|\n|:-|:-|:-|:-|\n|1|qwen/qwen3-embedding-8b|**42.9%**|18 / 42|\n|2|google/gemini-embedding-001|**23.8%**|10 / 42|\n|3|qwen/qwen3-embedding-4b|**23.8%**|10 / 42|\n|4|openai/text-embedding-3-large|**21.4%**|9 / 42|\n|5|mistralai/mistral-embed-2312|**9.5%**|4 / 42|\n|6|sentence-transformers/all-minilm-l6-v2|**7.1%**|3 / 42|",
       "is_original_content": false,
       "link_flair_text": "Showcase",
@@ -1038,6 +878,184 @@
           "created_utc": "2026-03-10 06:53:39",
           "is_submitter": false,
           "replies": []
+        },
+        {
+          "id": "oakey8u",
+          "author": "bobbiins1",
+          "text": "Your benchmark sounds super useful! Issues with semantic similarity are such a headache for storytelling in games too. Looking forward to seeing more results!",
+          "score": 1,
+          "created_utc": "2026-03-15 13:11:43",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1rp5xd1",
+      "title": "Chunking is not a set-and-forget parameter — and most RAG pipelines ignore the PDF extraction step too",
+      "subreddit": "Rag",
+      "url": "https://www.reddit.com/r/Rag/comments/1rp5xd1/chunking_is_not_a_setandforget_parameter_and_most/",
+      "author": "Just-Message-9899",
+      "created_utc": "2026-03-09 17:04:18",
+      "score": 31,
+      "num_comments": 16,
+      "upvote_ratio": 0.95,
+      "text": "NVIDIA recently published [an interesting study on chunking strategies](https://developer.nvidia.com/blog/finding-the-best-chunking-strategy-for-accurate-ai-responses/), showing how the choice of strategy significantly impacts RAG performance depending on the domain and document type. Worth a read.\n\nYet most RAG tooling gives you zero visibility into what your chunks actually look like. You pick a size, set an overlap, and hope for the best.\n\nThere's also a step that gets even less attention: the conversion to Markdown. If your PDF comes out broken — collapsed tables, merged columns, mangled headers — no splitting strategy will save you. You need to validate the text before you chunk it.\n\nI'm building Chunky, an open-source local tool that tries to fix exactly this. The idea is simple: review your Markdown conversion side-by-side with the original PDF, pick a chunking strategy, inspect every chunk visually, edit the bad splits directly, and export clean JSON for your vector store.\n\nIt's still in active development, but it's usable today.\n\nGitHub link: 🐿️ [Chunky](https://github.com/GiovanniPasq/chunky)\n\nFeedback and contributions very welcome :)",
+      "is_original_content": false,
+      "link_flair_text": "Tools & Resources",
+      "permalink": "https://reddit.com/r/Rag/comments/1rp5xd1/chunking_is_not_a_setandforget_parameter_and_most/",
+      "domain": "self.Rag",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "o9jim69",
+          "author": "DespoticLlama",
+          "text": "I wish I had the luxury to inspect each chunk visually , at 30k docs per day, good enough is the goal.",
+          "score": 4,
+          "created_utc": "2026-03-09 19:32:19",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o9jrbi8",
+              "author": "Holiday-Case-4524",
+              "text": "I found the idea interesting, not because it requires checking every single PDF, but because you could sample the most representative ones to determine the best strategy. Often, when building a RAG system in domains such as medicine or law, the documents come from institutions that use the same or very similar templates. Understanding how those documents behave allows you to generalize the approach effectively.",
+              "score": 4,
+              "created_utc": "2026-03-09 20:13:35",
+              "is_submitter": false,
+              "replies": [
+                {
+                  "id": "o9nk179",
+                  "author": "DespoticLlama",
+                  "text": "Yeah, I get it. My industry has no template that they'd all use. Even within a specific customer, the templates they believe are being used often aren't, or have been modified to suit each contributor. ",
+                  "score": 1,
+                  "created_utc": "2026-03-10 11:54:56",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            },
+            {
+              "id": "o9mrzrp",
+              "author": "welcome-overlords",
+              "text": "Yes this is the issue. Im not working with this big sizes but still, it's difficult to inspect tens of thousands of chunks",
+              "score": 1,
+              "created_utc": "2026-03-10 07:44:27",
+              "is_submitter": false,
+              "replies": [
+                {
+                  "id": "o9njn91",
+                  "author": "DespoticLlama",
+                  "text": "Don't i know it. I was looking at chunks several months ago purely by chance the other day and noticed some corruption. Realised/Suspected a dev had vibe coded a fix and broke the chunking, the AI, fixed the tests to make it \"work\". Had to run several days of docs back through the pipeline to clean up the mess. The reputational side I left to the engineering manager to sort out, I was just the messenger. Thankfully my job is to run this at scale, and as cheap as possible.",
+                  "score": 1,
+                  "created_utc": "2026-03-10 11:52:16",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "o9jv2z8",
+          "author": "CapitalShake3085",
+          "text": "I have always noticed similarities between meticulously curating the knowledge base and treating it as if it were the training dataset of a model",
+          "score": 4,
+          "created_utc": "2026-03-09 20:31:48",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "o9kx32x",
+          "author": "AvailableMycologist2",
+          "text": "the PDF extraction point is so underrated. i've seen RAG pipelines where people spend days tweaking chunk sizes and embedding models but never once look at what the actual extracted text looks like. garbage in garbage out. the side-by-side comparison idea is clever, will check out chunky",
+          "score": 2,
+          "created_utc": "2026-03-09 23:48:55",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o9mu4me",
+              "author": "Just-Message-9899",
+              "text": "thank you :D",
+              "score": 1,
+              "created_utc": "2026-03-10 08:05:17",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "o9mmrv1",
+          "author": "Time-Dot-1808",
+          "text": "The Markdown conversion step is more important than most people realize. Different extraction libraries handle tables and multi-column layouts very differently, and the failures are usually silent: the text comes through but the structure is lost.\n\nTesting your extractor on a sample of your most problematic documents before picking a chunking strategy saves a lot of downstream debugging. For PDFs with complex layouts, the extraction library choice often matters more than the chunking parameters. The visual inspection approach in Chunky is exactly the right idea.",
+          "score": 2,
+          "created_utc": "2026-03-10 06:53:27",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o9mu2p6",
+              "author": "Just-Message-9899",
+              "text": "thank you for the feedback :D",
+              "score": 1,
+              "created_utc": "2026-03-10 08:04:45",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "o9n061r",
+          "author": "Cute-Willingness1075",
+          "text": "the side by side pdf comparison is exactly what ive wanted, so many times ive debugged bad retrieval only to find the markdown extraction mangled a table into nonsense. cool that its local too, will def check out chunky",
+          "score": 2,
+          "created_utc": "2026-03-10 09:05:30",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o9n6k98",
+              "author": "Just-Message-9899",
+              "text": "thank you, i have a lot of new features to add to the project, stay tuned =)",
+              "score": 1,
+              "created_utc": "2026-03-10 10:06:29",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "o9mkabx",
+          "author": "One_Milk_7025",
+          "text": "I built all in one chunker visualizer in browser with rust wasm.. offline ready. Fully local.. will oss the library too.. \nTry it out - chunker.veristamp.in",
+          "score": 1,
+          "created_utc": "2026-03-10 06:29:40",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "o9ms3lq",
+          "author": "EnoughNinja",
+          "text": "Email threads have a parallel version of this problem. A forwarded chain often contains three or four earlier conversations collapsed into one message. Chunking treats it as a single document, even though it's actually multiple threads stitched together\n\nOn top of that, every reply includes the full quoted history below it, so the same content gets duplicated across multiple chunks and retrieval surfaces the quoted copy instead of the original message. The agent can't tell what was actually written at that point in the conversation versus what was just quoted context from earlier.\n\niGPT solves this by reconstructing the thread structure before retrieval, separating forwarded chains from the current conversation and stripping quoted duplication. \n\nDifferent preprocessing problem than PDFs, same principle: garbage structure in, garbage retrieval out.",
+          "score": 1,
+          "created_utc": "2026-03-10 07:45:31",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "o9p3zis",
+          "author": "Alex_CTU",
+          "text": "I previously created a similar demo that included a document cleaning pipeline for comparison. This setup allowed users to view three different results side by side: the PDF viewer, the Markdown viewer, and the cleaned viewer, which utilized regular expressions to clean the PDF content. However, I ultimately abandoned the project before completion because I found the Streamlit interface to be unappealing. Later on, I separated the document cleaning process and incorporated it into an Agentic workflow.",
+          "score": 1,
+          "created_utc": "2026-03-10 16:53:08",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oad2vkt",
+          "author": "Pitiful_Storage_8391",
+          "text": "Sampling chunks is a solid approach! It's like trying to find the perfect bite in a new recipe - sometimes you just have to taste test.",
+          "score": 1,
+          "created_utc": "2026-03-14 06:47:36",
+          "is_submitter": false,
+          "replies": []
         }
       ]
     },
@@ -1062,7 +1080,7 @@
           "id": "oaeagbh",
           "author": "hazyhaar",
           "text": "Good call, llm is nothing just on his own datasets.\n\nmaybe systematic call overkill, llm can handle their own need of informations if they know it's avaible. \n\nThen, you can also set a score on the thinking post retrieval, and let you llm have X turn of retrieval to distillate their needs.\n\nYou can also plug it with thinking mods of some llms. \n\nThen, stats per token utility start to grow, and allow lot of things .\n\n",
-          "score": 2,
+          "score": 3,
           "created_utc": "2026-03-14 13:14:28",
           "is_submitter": false,
           "replies": []
@@ -1089,7 +1107,7 @@
           "id": "oa6iznw",
           "author": "Time-Dot-1808",
           "text": "The two-layer approach makes sense for the retrieval efficiency tradeoff. Curious about one edge case: how does the system handle conflicting facts over time? If the agent learns something that contradicts an earlier entry in the markdown index, does it overwrite, version, or accumulate? That's usually where these systems break down in practice.",
-          "score": 0,
+          "score": 1,
           "created_utc": "2026-03-13 06:28:21",
           "is_submitter": false,
           "replies": []
@@ -1106,13 +1124,60 @@
       ]
     },
     {
+      "id": "1ruebyd",
+      "title": "I built an open-source RAG system that actually understands images, tables, and document structure — not just text chunks",
+      "subreddit": "Rag",
+      "url": "https://www.reddit.com/r/Rag/comments/1ruebyd/i_built_an_opensource_rag_system_that_actually/",
+      "author": "Alternative_Job8773",
+      "created_utc": "2026-03-15 13:41:01",
+      "score": 24,
+      "num_comments": 3,
+      "upvote_ratio": 0.93,
+      "text": "I got tired of RAG systems that destroy document structure, ignore images/tables, and give you answers with zero traceability. So I built NexusRAG.\n\n# What's different?\n\nMost RAG pipelines do this:\n\n`Split text → Embed → Retrieve → Generate`\n\nNexusRAG does this:\n\n`Docling structural parsing → Image/Table captioning → Dual-model embedding → 3-way parallel retrieval → Cross-encoder reranking → Agentic streaming with inline citations`\n\n# Key features\n\n|Feature|What it does|\n|:-|:-|\n|**Visual document parsing**|Docling extracts images, tables, formulas — previewed in rich markdown. The system generates LLM descriptions for each visual component so vector search can find them by semantic meaning. Traditional indexing just ignores these.|\n|**Dual embedding**|BAAI/bge-m3 (1024d) for fast vector search + Gemini Embedding (3072d) for knowledge graph extraction|\n|**Knowledge graph**|LightRAG auto-extracts entities and relationships — visualized as an interactive force-directed graph|\n|**Inline citations**|Every answer has clickable citation badges linking back to the exact page and heading in the original document. Reduces hallucination significantly.|\n|**Chain-of-Thought UI**|Shows what the AI is thinking and deciding in real time — no more staring at a blank loading screen for 30s|\n|**Multi-model support**|Works with Gemini (cloud) or Ollama (fully local). Tested with Gemini 3.1 Flash Lite and Qwen3.5 (4B-9B) — both performed great. Thinking mode supported for compatible models.|\n|**System prompt tuning**|Fine-tune the system prompt per model for optimal results|\n\n# The image/table problem solved\n\nThis is the part I'm most proud of. Upload a PDF with charts and tables — the system doesn't just extract text around them. It generates LLM-powered captions for every visual component and embeds those into the same vector space. Search for \"revenue chart\" and it actually finds the chart, creates a citation link back to it. Most RAG systems pretend these don't exist.\n\n# Tech stack\n\n* **Backend:** FastAPI\n* **Frontend:** React 19 + TailwindCSS\n* **Vector DB:** ChromaDB\n* **Knowledge Graph:** LightRAG\n* **Document Parsing:** Docling (IBM)\n* **LLM:** Gemini (cloud) or Ollama (local) — switch with one env variable\n\nFull Docker Compose setup — one command to deploy.\n\n# Coming soon\n\n* Gemini Embedding 2 for multimodal vectorization (native video/audio input)\n* More features in the pipeline\n\n# Links\n\n* GitHub: [https://github.com/LeDat98/NexusRAG](https://github.com/LeDat98/NexusRAG)\n* License. Feedback and PRs welcome.",
+      "is_original_content": false,
+      "link_flair_text": "Tools & Resources",
+      "permalink": "https://reddit.com/r/Rag/comments/1ruebyd/i_built_an_opensource_rag_system_that_actually/",
+      "domain": "self.Rag",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "oakvk2c",
+          "author": "cat47b",
+          "text": "Please could you describe the parallel retrieval approach? As in the flow of what happens when the user sends a query and the system decides what sources to query and how to respond when you get different kinds of data",
+          "score": 2,
+          "created_utc": "2026-03-15 14:47:24",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "oakwqlt",
+              "author": "Alternative_Job8773",
+              "text": "Good question! When a query comes in, two retrieval paths run simultaneously via asyncio.create\\_task:\n\n  Path 1 — Vector Search: Query is embedded with bge-m3 → ChromaDB returns top-20 candidates (intentional over-fetch for reranking later).\n\n  Path 2 — Knowledge Graph: Query keywords are matched against entity names in the LightRAG graph → returns structured facts (entities + relationships), not LLM-generated text — avoids hallucination from the graph layer.\n\n  If KG times out or fails, it gracefully falls back to vector-only. Never blocks.\n\n  After both complete (sequential):  \n  1. Cross-encoder rerank — bge-reranker-v2-m3 scores all 20 (query, chunk) pairs jointly through a transformer → keeps top-8 above relevance threshold  \n  2. Media discovery — finds images/tables on the same pages as retrieved chunks  \n  3. Context assembly — structures everything for the LLM: KG insights → cited chunks → related images/tables  \n  The two paths complement each other: vector search finds semantically similar text, KG finds structurally related entities even when wording is completely different.",
+              "score": 1,
+              "created_utc": "2026-03-15 14:53:40",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "oaks8ae",
+          "author": "Otherwise_Wave9374",
+          "text": "This is the part that matters most to me: AI agents are only useful when the guardrails, review points, and rollback paths are thought through. The upside is real, but so is the blast radius when autonomy is sloppy. I have been reading more grounded ops-focused pieces on that balance lately, including some here: https://www.agentixlabs.com/blog/",
+          "score": -3,
+          "created_utc": "2026-03-15 14:29:29",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
       "id": "1rquqwl",
       "title": "New Manning book! Retrieval Augmented Generation: The Seminal Papers - Understanding the papers behind modern RAG systems (REALM, DPR, FiD, Atlas)",
       "subreddit": "Rag",
       "url": "https://www.reddit.com/r/Rag/comments/1rquqwl/new_manning_book_retrieval_augmented_generation/",
       "author": "ManningBooks",
       "created_utc": "2026-03-11 14:08:14",
-      "score": 22,
+      "score": 23,
       "num_comments": 1,
       "upvote_ratio": 0.97,
       "text": "Hi r/RAG,\n\nStjepan from Manning here. I'm posting on behalf of Manning with mods' approval. We’ve just released a book that digs into the research behind a lot of the systems people here are building.\n\n**Retrieval Augmented Generation: The Seminal Papers** by Ben Auffarth  \n[https://www.manning.com/books/retrieval-augmented-generation-the-seminal-papers](https://hubs.la/Q046m92Y0)\n\nIf you’ve spent time building RAG pipelines, you’ve probably encountered the same experience many of us have: the ecosystem moves quickly, but a lot of the core ideas trace back to a relatively small set of research papers. This book walks through those papers and explains why they matter.\n\nBen looks closely at twelve foundational works that shaped the way modern RAG systems are designed. The book follows the path from early breakthroughs like REALM, RAG, and DPR through later architectures such as FiD and Atlas. Instead of just summarizing the papers, it connects them to the kinds of implementation choices engineers make when building production systems.\n\nAlong the way, it covers things like:\n\n* how retrieval models actually interact with language models\n* why certain architectures perform better for long-context reasoning\n* how systems evaluate their own retrieval quality\n* common failure modes and what causes them\n\nThere are also plenty of diagrams, code snippets, and case studies that tie the research back to practical system design. The goal is to help readers understand the trade-offs behind different RAG approaches so they can diagnose issues and make better decisions in their own pipelines.\n\n**For the** r/RAG **community:**  \nYou can get **50% off** with the code **MLAUFFARTH50RE**.\n\nIf there’s interest from the community, I’d also be happy to bring the author in to answer questions about the papers and the architectures discussed in the book.\n\nIt feels great to be here. Thanks for having us.\n\nCheers,\n\nStjepan",
@@ -1140,9 +1205,9 @@
       "url": "https://www.reddit.com/r/Rag/comments/1rqidoc/how_are_you_handling_exact_verifiable_citations/",
       "author": "JudithFSummers",
       "created_utc": "2026-03-11 03:07:18",
-      "score": 20,
+      "score": 22,
       "num_comments": 19,
-      "upvote_ratio": 0.87,
+      "upvote_ratio": 0.9,
       "text": "Hey everyone,\n\nI’ve been building RAG applications for sectors that have zero tolerance for hallucinations (specifically local government, legal, and higher ed).\n\nOne of the biggest hurdles we ran into wasn't just tuning the retrieval, but the UI/UX of proving the answer to the end user. Just dropping a source link or a text chunk at the bottom wasn't enough for auditability. Users wanted to see the exact passage highlighted directly within the original PDF or document to trust the AI.\n\nTo solve this, my team ended up building our own retrieval engine (Denser Retriever) specifically optimized to map the generated answer back to the exact document coordinates. We wrapped this into a platform called Denser AI (denser.ai).\n\nThe main focus is out-of-the-box verifiable citations—whether it's an internal knowledge base or a public-facing website chatbot, every answer highlights the exact source passage in the uploaded doc. We've currently got a few county governments and universities running it to automate their public FAQs and internal SOP searches.\n\nI'm curious about your architecture choices here:\n\nHow are you handling the UI side of citations for non-technical users?\n\nAre you just returning text chunks, or doing full document highlighting?\n\nWould love any feedback on our approach or the retrieval engine if anyone wants to check it out. Happy to discuss the technical stack!",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -1258,7 +1323,7 @@
           "id": "o9tc4ww",
           "author": "ChapterEquivalent188",
           "text": "https://github.com/2dogsandanerd/RAG_enterprise_core ;) ",
-          "score": 2,
+          "score": 3,
           "created_utc": "2026-03-11 07:19:43",
           "is_submitter": false,
           "replies": [
@@ -1331,7 +1396,7 @@
       "created_utc": "2026-03-12 12:31:34",
       "score": 20,
       "num_comments": 14,
-      "upvote_ratio": 0.96,
+      "upvote_ratio": 0.93,
       "text": "I see many people here testing and building different RAG systems, mainly the retrieval, from vector to PageIndex, etc. Apart from the open source databases and available webui's, is everyone here building/coding their own retrieval/mcp server? As far as i know you either build it yourself or use a paid service?\n\n  \nWhat does your stack look like? (open source tools or self made parts)",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -1343,7 +1408,7 @@
           "id": "oa5snck",
           "author": "No-Consequence-1779",
           "text": "GitHub is littered with rag systems.  Everyone has a better way. Except they don’t. It must be the most recreated thing out there. AI is to blame.  ",
-          "score": 7,
+          "score": 10,
           "created_utc": "2026-03-13 03:03:40",
           "is_submitter": false,
           "replies": [
@@ -1360,7 +1425,7 @@
               "id": "oa8y1t9",
               "author": "Significant-Pay-6476",
               "text": "Yup. I have the best one for local code rag [https://github.com/ktapasya/repo-chat](https://github.com/ktapasya/repo-chat) ",
-              "score": 2,
+              "score": 3,
               "created_utc": "2026-03-13 16:18:22",
               "is_submitter": false,
               "replies": []
@@ -1371,7 +1436,7 @@
           "id": "oa53cno",
           "author": "Global-Club-5045",
           "text": "I first tried the common approach recommended online using embeddings, but the results weren’t very good for my use case. So I ended up rebuilding the system from scratch.\n\nRight now I’m using this approach:  \n[https://github.com/ddmmbb-2/Pure-PHP-RAG-Engine](https://github.com/ddmmbb-2/Pure-PHP-RAG-Engine)\n\nThe repository mainly shows the theoretical architecture. My own implementation has more detailed optimizations, but overall it’s still based on the core ideas proposed in that project.\n\nIf your data consists of many small text fragments like mine, this approach works quite well.",
-          "score": 3,
+          "score": 5,
           "created_utc": "2026-03-13 00:36:31",
           "is_submitter": false,
           "replies": []
@@ -1380,7 +1445,7 @@
           "id": "oa1bhav",
           "author": "Dense_Gate_5193",
           "text": "single docker deploy for most graph-RAG systems. \n\nhttps://github.com/orneryd/NornicDB\n\nMIT Licensed 270+ stars and counting",
-          "score": 5,
+          "score": 7,
           "created_utc": "2026-03-12 13:30:33",
           "is_submitter": false,
           "replies": []
@@ -1462,7 +1527,7 @@
           "id": "oa3goh9",
           "author": "Longjumping-Unit-420",
           "text": "Open source driven by research and backed by benchmarks - [https://github.com/BansheeEmperor/candlekeep](https://github.com/BansheeEmperor/candlekeep)",
-          "score": 0,
+          "score": 1,
           "created_utc": "2026-03-12 19:38:10",
           "is_submitter": false,
           "replies": []
@@ -1476,9 +1541,9 @@
       "url": "https://www.reddit.com/r/Rag/comments/1rqsb2l/gemini_2_is_the_top_model_for_embeddings/",
       "author": "midamurat",
       "created_utc": "2026-03-11 12:24:28",
-      "score": 19,
+      "score": 20,
       "num_comments": 3,
-      "upvote_ratio": 0.93,
+      "upvote_ratio": 0.96,
       "text": "Google released Gemini Embedding 2 (preview). I ran it against 17 models.\n\n* 0.939 NDCG@10 on msmarco, near the top of what I've tracked\n* Dominant on scientific content: 0.871 NDCG@10 on scifact, highest in the benchmark by a wide margin.\n* \\~60% win rate overall across all pairwise matchups\n* Strong vs Voyage 3 Large, Cohere v3, and Jina v5. \n* Competitive with Voyage 4 and zembed-1 on entity retrieval, but those two edge it out on DBPedia\n\nBest all-rounder right now if your content is scientific, technical, or fact-dense. For general business docs, zembed-1 still has an edge.  \n  \nTested on msmarco, fiqa, scifact, DBPedia, ARCD and a couple private datasets. Pairwise Elo with GPT-4 as judge.   \n  \nIf interested, link to full results in comments. ",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -1510,34 +1575,6 @@
           "text": "I made a tool for my defence clients to skip embedding…why are we still embedding??",
           "score": -1,
           "created_utc": "2026-03-11 23:35:26",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
-      "id": "1ro230q",
-      "title": "Open Source Alternative to NotebookLM",
-      "subreddit": "Rag",
-      "url": "https://www.reddit.com/r/Rag/comments/1ro230q/open_source_alternative_to_notebooklm/",
-      "author": "Uiqueblhats",
-      "created_utc": "2026-03-08 11:01:08",
-      "score": 18,
-      "num_comments": 1,
-      "upvote_ratio": 0.88,
-      "text": "For those of you who aren't familiar with SurfSense, SurfSense is an open-source alternative to NotebookLM for teams.\n\nIt connects any LLM to your internal knowledge sources, then lets teams chat, comment, and collaborate in real time. Think of it as a team-first research workspace with citations, connectors, and agentic workflows.\n\nI’m looking for contributors. If you’re into AI agents, RAG, search, browser extensions, or open-source research tooling, would love your help.\n\n**Current features**\n\n* Self-hostable (Docker)\n* 25+ external connectors (search engines, Drive, Slack, Teams, Jira, Notion, GitHub, Discord, and more)\n* Realtime Group Chats\n* Hybrid retrieval (semantic + full-text) with cited answers\n* Deep agent architecture (planning + subagents + filesystem access)\n* Supports 100+ LLMs and 6000+ embedding models (via OpenAI-compatible APIs + LiteLLM)\n* 50+ file formats (including Docling/local parsing options)\n* Podcast generation (multiple TTS providers)\n* Cross-browser extension to save dynamic/authenticated web pages\n* RBAC roles for teams\n\n**Upcoming features**\n\n* Slide creation support\n* Multilingual podcast support\n* Video creation agent\n* Desktop & Mobile app\n\nGitHub: [https://github.com/MODSetter/SurfSense](https://github.com/MODSetter/SurfSense)",
-      "is_original_content": false,
-      "link_flair_text": "Showcase",
-      "permalink": "https://reddit.com/r/Rag/comments/1ro230q/open_source_alternative_to_notebooklm/",
-      "domain": "self.Rag",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "o9zokge",
-          "author": "General_Arrival_9176",
-          "text": "dont mean to be rude, but are people allowed to share their projects here like this? cuz i also have an open source app (IDE) i would want to share?\n\nPlease let me know!)",
-          "score": 1,
-          "created_utc": "2026-03-12 05:31:28",
           "is_submitter": false,
           "replies": []
         }
@@ -1678,15 +1715,63 @@
       ]
     },
     {
+      "id": "1rtt143",
+      "title": "SuperML: A plugin that gives coding agents expert-level ML knowledge with agentic memory (60% improvement vs. Claude Code)",
+      "subreddit": "Rag",
+      "url": "https://www.reddit.com/r/Rag/comments/1rtt143/superml_a_plugin_that_gives_coding_agents/",
+      "author": "alirezamsh",
+      "created_utc": "2026-03-14 19:51:33",
+      "score": 18,
+      "num_comments": 4,
+      "upvote_ratio": 0.87,
+      "text": "Hey everyone, I’ve been working on **SuperML**, an open-source plugin designed to handle ML engineering workflows. I wanted to share it here and get your feedback.\n\nKarpathy’s new autoresearch repo perfectly demonstrated how powerful it is to let agents autonomously iterate on training scripts overnight. SuperML is built completely in line with this vision. It’s a plugin that hooks into your existing coding agents to give them the agentic memory and expert-level ML knowledge needed to make those autonomous runs even more effective.\n\nYou give the agent a task, and the plugin guides it through the loop:\n\n* **Plans & Researches:** Runs deep research across the latest papers, GitHub repos, and articles to formulate the best hypotheses for your specific problem. It then drafts a concrete execution plan tailored directly to your hardware.\n* **Verifies & Debugs:** Validates configs and hyperparameters *before* burning compute, and traces exact root causes if a run fails.\n* **Agentic Memory:** Tracks hardware specs, hypotheses, and lessons learned across sessions. Perfect for overnight loops so agents compound progress instead of repeating errors.\n* **Background Agent** (ml-expert): Routes deep framework questions (vLLM, DeepSpeed, PEFT) to a specialized background agent. Think: end-to-end QLoRA pipelines, vLLM latency debugging, or FSDP vs. ZeRO-3 architecture decisions.\n\n**Benchmarks:** We tested it on 38 complex tasks (Multimodal RAG, Synthetic Data Gen, DPO/GRPO, etc.) and saw roughly a 60% higher success rate compared to Claude Code.\n\n**Repo:** [https://github.com/Leeroo-AI/superml](https://github.com/Leeroo-AI/superml)",
+      "is_original_content": false,
+      "link_flair_text": "Showcase",
+      "permalink": "https://reddit.com/r/Rag/comments/1rtt143/superml_a_plugin_that_gives_coding_agents/",
+      "domain": "self.Rag",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "oai1d56",
+          "author": "CharlesWiltgen",
+          "text": "What's the link to your benchmark suite so we can reproduce the claims?",
+          "score": 5,
+          "created_utc": "2026-03-15 01:29:37",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "oajal96",
+              "author": "alirezamsh",
+              "text": "These are the tasks tested: https://github.com/Leeroo-AI/superml/blob/main/TESTED_TASKS.md",
+              "score": 1,
+              "created_utc": "2026-03-15 07:20:06",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "oakjl20",
+                  "author": "CharlesWiltgen",
+                  "text": "That's just a list, where the test suite?",
+                  "score": 1,
+                  "created_utc": "2026-03-15 13:40:43",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
       "id": "1rqpq88",
       "title": "Exhausting",
       "subreddit": "Rag",
       "url": "https://www.reddit.com/r/Rag/comments/1rqpq88/exhausting/",
       "author": "TechnicalGeologist99",
       "created_utc": "2026-03-11 10:08:40",
-      "score": 17,
+      "score": 16,
       "num_comments": 27,
-      "upvote_ratio": 0.95,
+      "upvote_ratio": 0.91,
       "text": "So my team builds internal software for a company and ATM there has been more interest in AI tools. So we've asked people what they want and built out some use cases. \n\nThough, invariably, during development we often get emails from people all over the business:\n\n- I just heard about copilot, why don't we all have licenses\n- oh, I just found some guy on LinkedIn that has already built what you guys are building! Take a look\n- my mate says AI isn't good anymore, do we really need it?\n- have you seen openclaw?\n- Claude is crazy now, let's build an MCP server for all the data in our business - wait...my mate already built one! \n\nSome exaggeration, but I get multiple emails a week from juniors all the way up to execs and it's both exhausting and demoralising. \n\nI must admit the worst offender is the self proclaimed AI guru that cant tell the difference between agents and system prompts and yet sees every off the shelf SaaS as a golden bullet solution to the worlds problems. \n\nSometimes in this industry I feel like I'm in The Somme while everyone else is having a tea party.\n\n\nAnyone else experience the same? ",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -1698,7 +1783,7 @@
           "id": "o9tuboh",
           "author": "grim-432",
           "text": "Exactly the same, everywhere.\n\nJust wait until you get to the part where 4 different teams spent months building the same tool.",
-          "score": 11,
+          "score": 10,
           "created_utc": "2026-03-11 10:14:40",
           "is_submitter": false,
           "replies": [
@@ -1754,7 +1839,7 @@
           "id": "o9udhi5",
           "author": "bsenftner",
           "text": "And the completely hilarious part is this is the /r/RAG subreddit, and RAG itself does not work. If it did, the foundational models would support it out of the box. RAG is a very expensive way to provide crappy document Q&A. Which if any of you actually did the financial accounting and expense tracking for what an in-house RAG solution costs to make and then to use, you'd not have made a RAG solution.",
-          "score": -3,
+          "score": -2,
           "created_utc": "2026-03-11 12:34:59",
           "is_submitter": false,
           "replies": [
@@ -1941,15 +2026,108 @@
       ]
     },
     {
+      "id": "1rsxih5",
+      "title": "How to make RAG model answer Document-Related Queries ?",
+      "subreddit": "Rag",
+      "url": "https://www.reddit.com/r/Rag/comments/1rsxih5/how_to_make_rag_model_answer_documentrelated/",
+      "author": "SadPassion9201",
+      "created_utc": "2026-03-13 19:43:06",
+      "score": 15,
+      "num_comments": 5,
+      "upvote_ratio": 1.0,
+      "text": "Queries  like -\n\n1. Summarise the page no. 5\n\n2. Total number of page in particular document \n\n3. Give me all the images/table in document\n\nHow can I Make RAG model answer these questions ?",
+      "is_original_content": false,
+      "link_flair_text": "Discussion",
+      "permalink": "https://reddit.com/r/Rag/comments/1rsxih5/how_to_make_rag_model_answer_documentrelated/",
+      "domain": "self.Rag",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "oaagch6",
+          "author": "Ok_Signature_6030",
+          "text": "these are fundamentally different from content retrieval queries — they're structural/metadata queries, so standard chunk-based RAG won't handle them well out of the box.\n\n  \nwhat worked for us: store page-level metadata alongside your chunks (page number, document name, total pages). then route queries through a classifier first — if it's a metadata query ('how many pages', 'summarize page X'), hit the metadata index directly instead of running vector search. for the page summary one, just filter chunks by page\\_number=5 and pass those to the LLM.\n\n  \nfor images and tables, you'll need a parsing step before ingestion — something like docling or [unstructured.io](http://unstructured.io) to extract tables/images with their page locations, then store that as structured data you can query directly.",
+          "score": 7,
+          "created_utc": "2026-03-13 20:39:26",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "oacfyiz",
+              "author": "Important-Dance-5349",
+              "text": "This is correct. Just store metadata about the document and use an LLM to classify the query. Simple! ;)",
+              "score": 1,
+              "created_utc": "2026-03-14 03:33:42",
+              "is_submitter": false,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "oadel17",
+          "author": "Infamous_Ad5702",
+          "text": "I don’t embed or chunk. My tool makes an index. That’s how I handle it…can show you?",
+          "score": 1,
+          "created_utc": "2026-03-14 08:44:13",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oadfie7",
+          "author": "Time-Dot-1808",
+          "text": "The metadata routing approach above is right. One thing to add: for \"summarize page 5\" specifically, you want to be careful about chunk boundaries. If your chunking strategy splits aggressively, page 5 content might be split across chunk boundaries. Storing a page_text field (full page) alongside your chunks and using that when the query specifies a page number is cleaner than trying to reassemble from partial chunks.\n\nFor the table/image case: if you have the budget to run a vision model at ingestion time, extracting table content as structured text (markdown tables work well) before embedding gives much better retrieval than trying to handle it post-hoc.",
+          "score": 1,
+          "created_utc": "2026-03-14 08:53:34",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oadv4kj",
+          "author": "-balon-",
+          "text": "Meta data question classifier and then run tools to search for the document and then tools for chunks filtered by pages, sections, split intervals.",
+          "score": 1,
+          "created_utc": "2026-03-14 11:23:28",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1rqg5x2",
+      "title": "Gemini Embedding 2 -- multimodal embedding model",
+      "subreddit": "Rag",
+      "url": "https://www.reddit.com/r/Rag/comments/1rqg5x2/gemini_embedding_2_multimodal_embedding_model/",
+      "author": "raul3820",
+      "created_utc": "2026-03-11 01:28:41",
+      "score": 13,
+      "num_comments": 1,
+      "upvote_ratio": 1.0,
+      "text": "New embedding model from Google\n\n[https://blog.google/innovation-and-ai/models-and-research/gemini-models/gemini-embedding-2/](https://blog.google/innovation-and-ai/models-and-research/gemini-models/gemini-embedding-2/)",
+      "is_original_content": false,
+      "link_flair_text": "Tools & Resources",
+      "permalink": "https://reddit.com/r/Rag/comments/1rqg5x2/gemini_embedding_2_multimodal_embedding_model/",
+      "domain": "self.Rag",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "o9s26gl",
+          "author": "fabier",
+          "text": "$0.20 / m tokens vs the older model which is $0.15 / m tokens.",
+          "score": 2,
+          "created_utc": "2026-03-11 01:47:20",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
       "id": "1rorxuz",
       "title": "Advice on RAG systems",
       "subreddit": "Rag",
       "url": "https://www.reddit.com/r/Rag/comments/1rorxuz/advice_on_rag_systems/",
       "author": "Anthonyy232",
       "created_utc": "2026-03-09 05:44:19",
-      "score": 13,
+      "score": 12,
       "num_comments": 20,
-      "upvote_ratio": 0.94,
+      "upvote_ratio": 1.0,
       "text": "Hi everyone, new project but I know nothing about RAG haha. Looking to get a starting point and some pointers/advice about approach.\n\nContext: We need a agentic agent backed by RAG to supplement an LLM so that it can take context from our documents and help us answer questions and suggest good questions. The nature of the field is medical services and the documents will be device manuals, SOPs, medical billing coding, and clinical procedures/steps. Essentially the work flow would be asking the chatbot questions like \"How do you do XYZ for condition ABC\" or \"what is this error code Y on device X\". We may also want it to do like \"Suggest some questions based on having condition ABC\". Document size is relatively small right now, probably tens to hundreds, but I imagine it will get larger.\n\nFrom some basic research reading on this subreddit, I looked into graph based RAG but it seems like a lot of people say it's not a good idea for production due to speed and/or cost (although strong points seem like good knowledge-base connection and less hallucination). So far, my plan is a hybrid retrieval with dense vectors for semantic and sparse for keywords using Qdrant and reciprocal rank fusion with bge-m3 reranker and parent-child.\n\nThe pipeline would probably be something like PHI scrubbing (unlikely but still need to have), intent routing, retrieval, re-ranking, then using a LLM to synthesis (probably instructor + pydantic).\n\nI also briefly looked into some kind of LLM tagging with synonyms, but not really sure. For agentic frameworks, looked into a couple like langchain, langgraph, llama, but seems like consensus is to roll your own with the raw LLM APIs?\n\nI'm sure the plan is pretty average to bad since I'm very new to this, so any advice or guiding points would greatly appreciated, or tips on what libraries to use or not use and whether I should be changing my approach.",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -2139,65 +2317,121 @@
       ]
     },
     {
-      "id": "1rsxih5",
-      "title": "How to make RAG model answer Document-Related Queries ?",
+      "id": "1rtgkqu",
+      "title": "RAG is in its \"Pre-Git\" era: Why the context window is a buffer, not memory.",
       "subreddit": "Rag",
-      "url": "https://www.reddit.com/r/Rag/comments/1rsxih5/how_to_make_rag_model_answer_documentrelated/",
-      "author": "SadPassion9201",
-      "created_utc": "2026-03-13 19:43:06",
-      "score": 13,
-      "num_comments": 5,
-      "upvote_ratio": 0.9,
-      "text": "Queries  like -\n\n1. Summarise the page no. 5\n\n2. Total number of page in particular document \n\n3. Give me all the images/table in document\n\nHow can I Make RAG model answer these questions ?",
+      "url": "https://www.reddit.com/r/Rag/comments/1rtgkqu/rag_is_in_its_pregit_era_why_the_context_window/",
+      "author": "CatNo2950",
+      "created_utc": "2026-03-14 11:03:33",
+      "score": 12,
+      "num_comments": 17,
+      "upvote_ratio": 0.68,
+      "text": "Most RAG stacks today are essentially just plumbing. We shovel fragments into a token buffer and hope the model sorts it out. If your architecture disappears when you clear the context window, you don’t have an architecture - you have a pile of patches.\n\n**Key points:**\n\n* **The \"Summary\" Trap:** Carrying state forward through recursive summaries is just playing a game with a slightly longer fuse. It’s not durable.\n* **Context vs. State:** The context window is a temporary, compiled projection of the world, not the world itself.\n* **The Fix:** Move the \"source of truth\" (entities, relationships, constraints) outside the model into a durable, versioned layer.\n\n**TL;DR:** The prompt is a lens, not a database. If we want reliable AI systems, we need to build the world state outside the window using typed structures and provenance, rather than relying on ephemeral prose.\n\n**Full article:** [https://engineeredworldmodel.substack.com/p/stop-treating-the-context-window](https://engineeredworldmodel.substack.com/p/stop-treating-the-context-window)",
       "is_original_content": false,
       "link_flair_text": "Discussion",
-      "permalink": "https://reddit.com/r/Rag/comments/1rsxih5/how_to_make_rag_model_answer_documentrelated/",
+      "permalink": "https://reddit.com/r/Rag/comments/1rtgkqu/rag_is_in_its_pregit_era_why_the_context_window/",
       "domain": "self.Rag",
       "is_self": true,
       "comments": [
         {
-          "id": "oaagch6",
-          "author": "Ok_Signature_6030",
-          "text": "these are fundamentally different from content retrieval queries — they're structural/metadata queries, so standard chunk-based RAG won't handle them well out of the box.\n\n  \nwhat worked for us: store page-level metadata alongside your chunks (page number, document name, total pages). then route queries through a classifier first — if it's a metadata query ('how many pages', 'summarize page X'), hit the metadata index directly instead of running vector search. for the page summary one, just filter chunks by page\\_number=5 and pass those to the LLM.\n\n  \nfor images and tables, you'll need a parsing step before ingestion — something like docling or [unstructured.io](http://unstructured.io) to extract tables/images with their page locations, then store that as structured data you can query directly.",
-          "score": 7,
-          "created_utc": "2026-03-13 20:39:26",
+          "id": "oady7fg",
+          "author": "bsenftner",
+          "text": "I think you need to explain more. Your post is a lot of declarative statements without reasoning why. That why should be the main content of your post.",
+          "score": 8,
+          "created_utc": "2026-03-14 11:49:13",
           "is_submitter": false,
           "replies": [
             {
-              "id": "oacfyiz",
-              "author": "Important-Dance-5349",
-              "text": "This is correct. Just store metadata about the document and use an LLM to classify the query. Simple! ;)",
+              "id": "oafu0hh",
+              "author": "CatNo2950",
+              "text": "Fair call, let me unpack the \"why\". Structurally, it comes down to architecture vs. human cognitive bias.\n\nFrom a computational mechanics standpoint, an LLM is essentially a giant Markov model. It flawlessly approximates the surface statistics of language and code, but it lacks actual internal causal states (what Shalizi calls an epsilon-machine).\n\nBecause it lacks causal states, a context window isn't \"memory\" - it’s just a temporary, dissipative compute buffer. If you wipe the context, the state dies completely. It can't hibernate or \"scale to zero\".\n\nSo why do we keep trying to treat LLMs like state machines? Because of how our brains work. The model outputs syntactically perfect code, which drops our brain's prediction error to zero. Our minds automatically (and falsely) project a \"motivating context\" or engineering intent onto the model that physically isn't there.\n\nTo build reliable agents, we have to decouple the stateless compiler (the LLM) from the actual state graph",
+              "score": 2,
+              "created_utc": "2026-03-14 18:10:16",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "oai5tai",
+                  "author": "jrochkind",
+                  "text": "Is this written by an LLM?",
+                  "score": 4,
+                  "created_utc": "2026-03-15 01:58:12",
+                  "is_submitter": false,
+                  "replies": []
+                },
+                {
+                  "id": "oajah7s",
+                  "author": "TenshiS",
+                  "text": "It's definitely not just a giant Markov model, that's a knowledge gap or misunderstanding on your part. \n\nIt's been proven multiple times already that LLMs build internal states that model world concepts. They can deduce, for example, that to place a book on top of eggs you need at least 3 or 4 eggs for balance, without having seen anything even remotely similar in their training data.\n\nThat makes everything else you assume wrong due to your flawed internal causal state.",
+                  "score": 2,
+                  "created_utc": "2026-03-15 07:19:01",
+                  "is_submitter": false,
+                  "replies": []
+                },
+                {
+                  "id": "oagb8ob",
+                  "author": "CharlesWiltgen",
+                  "text": "> *Because it lacks causal states, a context window isn't \"memory\"…*\n\nThe context window is literally the only memory an LLM model has beyond the model itself. Augmenting that memory from wherever (the specifics don't matter) is why RAG works.",
+                  "score": 1,
+                  "created_utc": "2026-03-14 19:38:48",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "oae060p",
+          "author": "Pretty_Calendar_7871",
+          "text": "Anything that doesn't rethink the fundamental architecture of Transformer models will always be a band-aid. We'll need to find ways to naturally embed prompts and context into the model itself in a modular, extendible fashion.\n\nI personally find DeepSeek's research very promising lately: [https://deepseek.ai/blog/deepseek-v4-next-move](https://deepseek.ai/blog/deepseek-v4-next-move)",
+          "score": 3,
+          "created_utc": "2026-03-14 12:04:32",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "oafda4z",
+              "author": "wonker007",
+              "text": "Exactly what I've been thinking. But the different context cache management, Radix and the whole mess of band-aids is compounding the problem by continuously moving the goalposts. Working on something that might give the illusion of an infinite context window, but this is borderline science, not engineering. 😩 \n\nWhat is important is to realize and define what LLMs (and other models) are at their core: Each have an intended purpose and must be used within the boundaries of said purpose. Only then can we start to think about solving the context problem.",
+              "score": 3,
+              "created_utc": "2026-03-14 16:45:49",
+              "is_submitter": false,
+              "replies": []
+            },
+            {
+              "id": "oaft5vj",
+              "author": "CatNo2950",
+              "text": "Transformers are indeed hitting a structural wall, but DeepSeek V4 is actually a perfect example of treating the symptom rather than the disease. It is a brilliant mathematical optimization, but it's an optimization of a dissipative system. It doesn't shift the fundamental topology.\n\nMoving \"syntax and facts\" into an external Engram lookup or compressing the Markov chain just makes the generation of surface statistics cheaper. It’s an extensive scaling approach. It doesn't create causal states or solve the Frame/Symbol Grounding problem. It simply makes the illusion of intelligence more economically viable at scale.\n\nDeepSeek V4 is optimizing the proxy metric. Expanding the context window or tweaking attention mechanisms without introducing deterministic causal states just increases the blast radius when the system inevitably hits external friction (edge cases). You can't patch a lack of causal reasoning with a cheaper token lookup.  \n  \nMy personal fundamental direction on solving this topological divide is detailed here: [https://engineeredworldmodel.substack.com/p/the-engineered-world-model](https://engineeredworldmodel.substack.com/p/the-engineered-world-model)",
+              "score": 2,
+              "created_utc": "2026-03-14 18:05:56",
+              "is_submitter": true,
+              "replies": []
+            },
+            {
+              "id": "oagm1et",
+              "author": "IllBorder5409",
+              "text": "You mean Engram? It’s contradictory, a persistent memory that cannot exist without being in the context window in the first place. This would still require RAG for it to even exist in the first place and would still lead to context window bloating in the long run.\n\nI personally believe context window is the storage/SSD and persistent memory is the RAM. In future years these should be expected to scale upwards with also being performative. It could potentially take years, but this way context window will be almost be eternal like for example say maybe 100 million tokens or even perhaps billions and we could have multiple short 1 million persistent memories according to our needs. \n\n",
               "score": 1,
-              "created_utc": "2026-03-14 03:33:42",
+              "created_utc": "2026-03-14 20:37:11",
               "is_submitter": false,
               "replies": []
             }
           ]
         },
         {
-          "id": "oadel17",
-          "author": "Infamous_Ad5702",
-          "text": "I don’t embed or chunk. My tool makes an index. That’s how I handle it…can show you?",
+          "id": "oagni0f",
+          "author": "IllBorder5409",
+          "text": "Context window is the memory not a buffer. Just think about it we scaled from 4096 tokens as context window in 2022 to 1M tokens context window in just 4 years. It’s going to keep scaling upwards. ",
           "score": 1,
-          "created_utc": "2026-03-14 08:44:13",
+          "created_utc": "2026-03-14 20:45:01",
           "is_submitter": false,
           "replies": []
         },
         {
-          "id": "oadfie7",
+          "id": "oajrewo",
           "author": "Time-Dot-1808",
-          "text": "The metadata routing approach above is right. One thing to add: for \"summarize page 5\" specifically, you want to be careful about chunk boundaries. If your chunking strategy splits aggressively, page 5 content might be split across chunk boundaries. Storing a page_text field (full page) alongside your chunks and using that when the query specifies a page number is cleaner than trying to reassemble from partial chunks.\n\nFor the table/image case: if you have the budget to run a vision model at ingestion time, extracting table content as structured text (markdown tables work well) before embedding gives much better retrieval than trying to handle it post-hoc.",
+          "text": "The \"buffer not memory\" framing is useful but the implied fix is harder than the post makes it sound.\n\nThe concrete version of \"move state outside the model into a durable versioned layer\" is: you need to define what gets persisted, in what schema, and how the model retrieves exactly the right subset of it at query time. That's not a solved problem. Most teams that try this end up either persisting too much (retrieval noise) or too little (gaps in reasoning).\n\nThe git analogy is apt in one sense: git didn't solve version control by making a better patch format, it solved it by making the graph structure explicit. The equivalent in RAG/agent systems is making the semantic structure of the world model explicit rather than leaving it implicit in embeddings. That's the actual hard part.\n\nThe \"summary trap\" point is real though. Compression loses information in unpredictable ways, and you usually don't know what you lost until a query hits the gap.",
           "score": 1,
-          "created_utc": "2026-03-14 08:53:34",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oadv4kj",
-          "author": "-balon-",
-          "text": "Meta data question classifier and then run tools to search for the document and then tools for chunks filtered by pages, sections, split intervals.",
-          "score": 1,
-          "created_utc": "2026-03-14 11:23:28",
+          "created_utc": "2026-03-15 10:02:26",
           "is_submitter": false,
           "replies": []
         }
@@ -2210,9 +2444,9 @@
       "url": "https://www.reddit.com/r/Rag/comments/1rrnse7/whats_the_best_and_most_popular_model_right_now/",
       "author": "marwan_rashad5",
       "created_utc": "2026-03-12 11:07:34",
-      "score": 12,
+      "score": 10,
       "num_comments": 9,
-      "upvote_ratio": 1.0,
+      "upvote_ratio": 0.87,
       "text": "Hey everyone,\nI’m currently working on a project where I want to build a chatbot that can answer questions based on a large amount of internal data from a company/organization.\nMost of the users will be Arabic speakers, so strong Arabic understanding is really important (both Modern Standard Arabic and possibly dialects).\nI’m trying to figure out what the best and most popular models right now for Arabic are. I don’t mind if the model is large or requires good infrastructure — performance and Arabic quality matter more for this use case.\nThe plan is to use it with something like a RAG pipeline so it can answer questions based on the company’s documents.\nFor people who have worked with Arabic LLMs or tested them in production:\nWhich models actually perform well in Arabic?\nAre there any models specifically trained or optimized for Arabic that you would recommend?\nAny suggestions or experiences would be really helpful. Thanks!",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -2301,127 +2535,6 @@
           "text": "For strong Arabic support, check out AraBERT or GigaBERT - both have solid MSA and dialect capabilities. Perfect for a chatbot with an Arabic-speaking audience!",
           "score": 1,
           "created_utc": "2026-03-14 03:55:05",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
-      "id": "1rodl46",
-      "title": "RAG Insight: Parsing & Indexing Often Matter More Than Model Size",
-      "subreddit": "Rag",
-      "url": "https://www.reddit.com/r/Rag/comments/1rodl46/rag_insight_parsing_indexing_often_matter_more/",
-      "author": "DueKitchen3102",
-      "created_utc": "2026-03-08 19:15:21",
-      "score": 11,
-      "num_comments": 5,
-      "upvote_ratio": 0.87,
-      "text": "Many RAG pipelines today roughly follow this pattern:\n\n* chunk documents\n* generate embeddings\n* retrieve top-k\n* rely on a large LLM to infer everything from the raw chunks\n\nThis works well for prototypes. But once document collections become large and messy (PDFs, tables, mixed layouts, etc.), the limitations start to appear.\n\nThere are roughly two different philosophies when building RAG systems.\n\n**First approach — LLM-heavy**\n\ndocuments → chunk → embedding → retrieve → large LLM does most of the inference\n\nThe assumption here is that the LLM should recover structure, meaning, and reasoning from relatively raw text chunks.\n\n**Second approach — indexing-heavy**\n\ndocuments → parsing → structure extraction → richer indexing → retrieval → smaller LLM reasoning\n\nThis approach pushes much more intelligence into the **parsing and indexing stages**:\n\n* document structure recovery\n* table extraction and indexing\n* metadata and folder-aware indexing\n* more precise retrieval\n\nWhen the retrieved context is already well structured and highly relevant, the LLM mainly focuses on **reasoning rather than reconstruction**.\n\nAn interesting side effect is that **model size becomes less critical**. Even relatively small or quantized models can perform surprisingly well for many document QA tasks when retrieval quality is high.\n\nOf course, larger models still help for deeper reasoning or complex transformations. But for large-scale document QA over real-world documents, indexing quality often becomes the bigger lever.\n\nThis post was partially motivated by a thoughtful question in a previous thread:\n\n>\n\nOriginal discussion:  \n[https://www.reddit.com/r/Rag/comments/1rnm45d/comment/o9c5u6l/](https://www.reddit.com/r/Rag/comments/1rnm45d/comment/o9c5u6l/)",
-      "is_original_content": false,
-      "link_flair_text": "Discussion",
-      "permalink": "https://reddit.com/r/Rag/comments/1rodl46/rag_insight_parsing_indexing_often_matter_more/",
-      "domain": "self.Rag",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "o9d7ct7",
-          "author": "Ok-Regret3392",
-          "text": "Huzzah! It totally is. ",
-          "score": 2,
-          "created_utc": "2026-03-08 19:36:45",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o9d9fb0",
-              "author": "DueKitchen3102",
-              "text": "Thanks",
-              "score": 1,
-              "created_utc": "2026-03-08 19:47:34",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "o9gbky9",
-          "author": "Cute-Willingness1075",
-          "text": "100% agree, garbage in garbage out applies so hard to RAG. ive seen pipelines where switching to better pdf parsing and table extraction made a bigger diffrence than upgrading from a 7b to a 70b model. the retrieval quality ceiling is usually set way before the llm even sees the chunks",
-          "score": 2,
-          "created_utc": "2026-03-09 07:51:20",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o9gkuol",
-          "author": "Time-Dot-1808",
-          "text": "The indexing-heavy approach also tends to be more debuggable. When something fails in an LLM-heavy pipeline, it's hard to trace whether the problem was retrieval quality, the prompt, or the model. When parsing and indexing are rigorous, you can inspect what the LLM actually received and trace failures back to specific chunks.\n\nThe harder production problem is that real document collections are rarely uniform. Mixed formats with inconsistent parsing needs is usually where the clean indexing-heavy approach starts to bend.",
-          "score": 2,
-          "created_utc": "2026-03-09 09:25:13",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "o9uyl84",
-          "author": "frustyy_",
-          "text": "Will be trying this in our ingestion-to-retrieval pipeline, thanks!",
-          "score": 2,
-          "created_utc": "2026-03-11 14:29:46",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
-      "id": "1rqg5x2",
-      "title": "Gemini Embedding 2 -- multimodal embedding model",
-      "subreddit": "Rag",
-      "url": "https://www.reddit.com/r/Rag/comments/1rqg5x2/gemini_embedding_2_multimodal_embedding_model/",
-      "author": "raul3820",
-      "created_utc": "2026-03-11 01:28:41",
-      "score": 11,
-      "num_comments": 1,
-      "upvote_ratio": 1.0,
-      "text": "New embedding model from Google\n\n[https://blog.google/innovation-and-ai/models-and-research/gemini-models/gemini-embedding-2/](https://blog.google/innovation-and-ai/models-and-research/gemini-models/gemini-embedding-2/)",
-      "is_original_content": false,
-      "link_flair_text": "Tools & Resources",
-      "permalink": "https://reddit.com/r/Rag/comments/1rqg5x2/gemini_embedding_2_multimodal_embedding_model/",
-      "domain": "self.Rag",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "o9s26gl",
-          "author": "fabier",
-          "text": "$0.20 / m tokens vs the older model which is $0.15 / m tokens.",
-          "score": 2,
-          "created_utc": "2026-03-11 01:47:20",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
-      "id": "1rtt143",
-      "title": "SuperML: A plugin that gives coding agents expert-level ML knowledge with agentic memory (60% improvement vs. Claude Code)",
-      "subreddit": "Rag",
-      "url": "https://www.reddit.com/r/Rag/comments/1rtt143/superml_a_plugin_that_gives_coding_agents/",
-      "author": "alirezamsh",
-      "created_utc": "2026-03-14 19:51:33",
-      "score": 10,
-      "num_comments": 1,
-      "upvote_ratio": 0.81,
-      "text": "Hey everyone, I’ve been working on **SuperML**, an open-source plugin designed to handle ML engineering workflows. I wanted to share it here and get your feedback.\n\nKarpathy’s new autoresearch repo perfectly demonstrated how powerful it is to let agents autonomously iterate on training scripts overnight. SuperML is built completely in line with this vision. It’s a plugin that hooks into your existing coding agents to give them the agentic memory and expert-level ML knowledge needed to make those autonomous runs even more effective.\n\nYou give the agent a task, and the plugin guides it through the loop:\n\n* **Plans & Researches:** Runs deep research across the latest papers, GitHub repos, and articles to formulate the best hypotheses for your specific problem. It then drafts a concrete execution plan tailored directly to your hardware.\n* **Verifies & Debugs:** Validates configs and hyperparameters *before* burning compute, and traces exact root causes if a run fails.\n* **Agentic Memory:** Tracks hardware specs, hypotheses, and lessons learned across sessions. Perfect for overnight loops so agents compound progress instead of repeating errors.\n* **Background Agent** (ml-expert): Routes deep framework questions (vLLM, DeepSpeed, PEFT) to a specialized background agent. Think: end-to-end QLoRA pipelines, vLLM latency debugging, or FSDP vs. ZeRO-3 architecture decisions.\n\n**Benchmarks:** We tested it on 38 complex tasks (Multimodal RAG, Synthetic Data Gen, DPO/GRPO, etc.) and saw roughly a 60% higher success rate compared to Claude Code.\n\n**Repo:** [https://github.com/Leeroo-AI/superml](https://github.com/Leeroo-AI/superml)",
-      "is_original_content": false,
-      "link_flair_text": "Showcase",
-      "permalink": "https://reddit.com/r/Rag/comments/1rtt143/superml_a_plugin_that_gives_coding_agents/",
-      "domain": "self.Rag",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "oai1d56",
-          "author": "CharlesWiltgen",
-          "text": "What's the link to your benchmark suite so we can reproduce the claims?",
-          "score": 2,
-          "created_utc": "2026-03-15 01:29:37",
           "is_submitter": false,
           "replies": []
         }
