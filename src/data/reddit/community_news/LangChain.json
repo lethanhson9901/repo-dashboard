@@ -1,11 +1,11 @@
 {
   "metadata": {
-    "last_updated": "2026-03-17 09:07:59",
+    "last_updated": "2026-03-17 17:28:56",
     "time_filter": "week",
     "subreddit": "LangChain",
     "total_items": 20,
-    "total_comments": 84,
-    "file_size_bytes": 151410
+    "total_comments": 89,
+    "file_size_bytes": 164215
   },
   "items": [
     {
@@ -17,7 +17,7 @@
       "created_utc": "2026-03-13 12:37:59",
       "score": 31,
       "num_comments": 33,
-      "upvote_ratio": 0.91,
+      "upvote_ratio": 0.94,
       "text": "I started messing around with voice agents on Dograh for my own use and it got addictive pretty fast.The first one was basic. Just a phone agent answering a few common questions.\n\nThen I kept adding things. Now the agent pulls data from APIs during the call, drops a short summary after the call, and sends a Slack ping if something important comes up. All from a single phone conversation.\n\nThen I just kept going. One qualifies inbound leads. One handles basic support. One calls people back when we miss them. One collects info before a human takes over (still figuring out where exactly to put that one tbh).\n\nOnce you start building these, you begin to see phone calls differently. Every call starts to look like something you can program. Now I keep thinking of new ones to build. Not even sure I need all of them. \n\nAnyone else building voice agents for yourself? What's the weirdest or most useful thing you've built?",
       "is_original_content": false,
       "link_flair_text": null,
@@ -29,7 +29,7 @@
           "id": "oab4k8j",
           "author": "wt1j",
           "text": "Please share your tech stack and model choices. I want to troll the 20+ spam calls I get every day. I figure the longer I keep every agent on the line, the more I'm costing them. It's the ultimate revenge. ",
-          "score": 4,
+          "score": 3,
           "created_utc": "2026-03-13 22:46:19",
           "is_submitter": false,
           "replies": [
@@ -37,7 +37,7 @@
               "id": "oaccu9c",
               "author": "Slight_Republic_4242",
               "text": "We are using Deepgram for speech-to-text, ElevenLabs for text-to-speech, and Gemini-2.5-flash as the LLM. Dograh handles the voice pipeline and orchestration.\n\nIn our workflow we use features like campaign calls and webhooks to trigger different actions during calls. We also use Langfuse to track LLM performance, manage conversation flows, and monitor our voice AI agents in production.\n\nFor telephony we mainly use Twilio, and we like that Dograh’s dialer is fairly mature for handling calls.",
-              "score": 4,
+              "score": 5,
               "created_utc": "2026-03-14 03:12:13",
               "is_submitter": true,
               "replies": [
@@ -219,6 +219,157 @@
       ]
     },
     {
+      "id": "1rsdtno",
+      "title": "Replace sequential tool calls with code execution — LLM writes TypeScript that calls your tools in one shot",
+      "subreddit": "LangChain",
+      "url": "https://www.reddit.com/r/LangChain/comments/1rsdtno/replace_sequential_tool_calls_with_code_execution/",
+      "author": "UnchartedFr",
+      "created_utc": "2026-03-13 04:37:39",
+      "score": 22,
+      "num_comments": 15,
+      "upvote_ratio": 0.96,
+      "text": "If you're building agents with LangChain, you've hit this: the LLM calls a tool, waits for the result, reads it, calls the next tool, waits, reads, calls the next. **Every intermediate result passes through the model.** 3 tools = 3 round-trips = 3x the latency and token cost.\n\n    # What happens today with sequential tool calling:\n    # Step 1: LLM → getWeather(\"Tokyo\")    → result back to LLM    (tokens + latency)\n    # Step 2: LLM → getWeather(\"Paris\")    → result back to LLM    (tokens + latency)\n    # Step 3: LLM → compare(tokyo, paris)  → result back to LLM    (tokens + latency)\n\nThere's a better pattern. Instead of the LLM making tool calls one by one, it **writes code** that calls them all:\n\n    const tokyo = await getWeather(\"Tokyo\");\n    const paris = await getWeather(\"Paris\");\n    tokyo.temp < paris.temp ? \"Tokyo is colder\" : \"Paris is colder\";\n\n**One round-trip.** The comparison logic stays in the code — it never passes back through the model. Cloudflare, Anthropic, HuggingFace, and Pydantic are all converging on this pattern:\n\n* [Code Mode](https://blog.cloudflare.com/code-mode/) (Cloudflare)\n* [Programmatic Tool Calling](https://platform.claude.com/docs/en/agents-and-tools/tool-use/programmatic-tool-calling) (Anthropic)\n* [SmolAgents](https://github.com/huggingface/smolagents) (HuggingFace)\n* [Monty](https://github.com/pydantic/monty) (Pydantic) — Python subset interpreter for this use case\n\n# The missing piece: safely running the code\n\nYou can't `eval()` LLM output. Docker adds **200-500ms** per execution — brutal in an agent loop. And neither Docker nor V8 supports **pausing execution mid-function** when the code hits `await` on a slow tool.\n\nI built [Zapcode](https://github.com/TheUncharted/zapcode) — a **sandboxed TypeScript interpreter in Rust** with Python bindings. Think of it as a **LangChain tool that runs LLM-generated code safely**.\n\n    pip install zapcode\n\n# How to use it with LangChain\n\n# As a custom tool\n\n    from zapcode import Zapcode\n    from langchain_core.tools import StructuredTool\n    \n    # Your existing tools\n    def get_weather(city: str) -> dict:\n        return requests.get(f\"https://api.weather.com/{city}\").json()\n    \n    def search_flights(origin: str, dest: str, date: str) -> list:\n        return flight_api.search(origin, dest, date)\n    \n    TOOLS = {\n        \"getWeather\": get_weather,\n        \"searchFlights\": search_flights,\n    }\n    \n    def execute_code(code: str) -> str:\n        \"\"\"Execute TypeScript code in a sandbox with access to registered tools.\"\"\"\n        sandbox = Zapcode(\n            code,\n            external_functions=list(TOOLS.keys()),\n            time_limit_ms=10_000,\n        )\n        state = sandbox.start()\n    \n        while state.get(\"suspended\"):\n            fn = TOOLS[state[\"function_name\"]]\n            result = fn(*state[\"args\"])\n            state = state[\"snapshot\"].resume(result)\n    \n        return str(state[\"output\"])\n    \n    # Expose as a LangChain tool\n    zapcode_tool = StructuredTool.from_function(\n        func=execute_code,\n        name=\"execute_typescript\",\n        description=(\n            \"Execute TypeScript code that can call these functions with await:\\n\"\n            \"- getWeather(city: string) → { condition, temp }\\n\"\n            \"- searchFlights(from: string, to: string, date: string) → Array<{ airline, price }>\\n\"\n            \"Last expression = output. No markdown fences.\"\n        ),\n    )\n    \n    # Use in your agent\n    agent = create_react_agent(llm, [zapcode_tool], prompt)\n\nNow instead of calling `getWeather` and `searchFlights` as separate tools (multiple round-trips), the LLM writes **one code block** that calls both and computes the answer.\n\n# With the Anthropic SDK directly\n\n    import anthropic\n    from zapcode import Zapcode\n    \n    SYSTEM = \"\"\"\\\n    Write TypeScript to answer the user's question.\n    Available functions (use await):\n    - getWeather(city: string) → { condition, temp }\n    - searchFlights(from: string, to: string, date: string) → Array<{ airline, price }>\n    Last expression = output. No markdown fences.\"\"\"\n    \n    client = anthropic.Anthropic()\n    response = client.messages.create(\n        model=\"claude-sonnet-4-20250514\",\n        max_tokens=1024,\n        system=SYSTEM,\n        messages=[{\"role\": \"user\", \"content\": \"Cheapest flight from the colder city?\"}],\n    )\n    \n    code = response.content[0].text\n    \n    sandbox = Zapcode(code, external_functions=[\"getWeather\", \"searchFlights\"])\n    state = sandbox.start()\n    \n    while state.get(\"suspended\"):\n        result = TOOLS[state[\"function_name\"]](*state[\"args\"])\n        state = state[\"snapshot\"].resume(result)\n    \n    print(state[\"output\"])\n\n# What this gives you over sequential tool calling\n\n|\\---|**Sequential tools**|**Code execution (Zapcode)**|\n|:-|:-|:-|\n|**Round-trips**|One per tool call|**One for all tools**|\n|**Intermediate logic**|Back through the LLM|**Stays in code**|\n|**Composability**|Limited to tool chaining|**Full: loops, conditionals, .map()**|\n|**Token cost**|Grows with each step|**Fixed**|\n|**Cold start**|N/A|**\\~2 µs**|\n|**Pause/resume**|No|**Yes — snapshot <2 KB**|\n\n# Snapshot/resume for long-running tools\n\nThis is where Zapcode really shines for agent workflows. When the code calls an external function, the VM **suspends** and the state serializes to **<2 KB**. You can:\n\n* Store the snapshot in **Redis, Postgres, S3**\n* Resume **later**, in a **different process or worker**\n* Handle **human-in-the-loop** approval steps without keeping a process alive\n\n\n\n    from zapcode import ZapcodeSnapshot\n    \n    state = sandbox.start()\n    \n    if state.get(\"suspended\"):\n        # Serialize — store wherever you want\n        snapshot_bytes = state[\"snapshot\"].dump()\n        redis.set(f\"task:{task_id}\", snapshot_bytes)\n    \n        # Later, when the tool result arrives (webhook, manual approval, etc.):\n        snapshot_bytes = redis.get(f\"task:{task_id}\")\n        restored = ZapcodeSnapshot.load(snapshot_bytes)\n        final = restored.resume(tool_result)\n\n# Security\n\nThe sandbox is **deny-by-default** — important when you're running code from an LLM:\n\n* **No filesystem, network, or env vars** — doesn't exist in the core crate\n* **No eval/import/require** — blocked at parse time\n* **Resource limits** — memory (32 MB), time (5s), stack depth (512), allocations (100k)\n* **65 adversarial tests** — prototype pollution, constructor escapes, JSON bombs, etc.\n* **Zero** `unsafe` in the Rust core\n\n# Benchmarks (cold start, no caching)\n\n|Benchmark|Time|\n|:-|:-|\n|**Simple expression**|**2.1 µs**|\n|**Function call**|**4.6 µs**|\n|**Async/await**|**3.1 µs**|\n|**Loop** (100 iterations)|**77.8 µs**|\n|**Fibonacci(10)** — 177 calls|**138.4 µs**|\n\nIt's **experimental** and under active development. Also has bindings for **Node.js, Rust, and WASM**.\n\nWould love feedback from LangChain users — especially on how this fits into existing **AgentExecutor** or **LangGraph** workflows.\n\nGitHub: [https://github.com/TheUncharted/zapcode](https://github.com/TheUncharted/zapcode)",
+      "is_original_content": false,
+      "link_flair_text": "Resources",
+      "permalink": "https://reddit.com/r/LangChain/comments/1rsdtno/replace_sequential_tool_calls_with_code_execution/",
+      "domain": "self.LangChain",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "oa6kzzu",
+          "author": "RestaurantHefty322",
+          "text": "The latency reduction is real for the embarrassingly parallel case (fire 3 independent API calls at once). We saw similar gains just batching tool calls with asyncio on the orchestrator side without needing a code interpreter.\n\nWhere this falls apart in practice is the branching case. Most of our agent workflows look like \"call tool A, look at the result, decide whether to call B or C.\" The LLM can't write that decision logic ahead of time because it doesn't know what A will return. So you end up with a hybrid - batch the independent calls, go back to the model for the branching decisions.\n\nThe sandbox execution time matters too. If you're adding even 50ms per code execution in a loop that runs 10-15 times per task, that's nearly a second of overhead just from the interpreter. We tried a similar approach with a Python sandbox and the cold start was the killer - ended up going back to direct tool dispatch for anything latency-sensitive.",
+          "score": 4,
+          "created_utc": "2026-03-13 06:47:15",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "oa6lti8",
+              "author": "UnchartedFr",
+              "text": "Did you try Monty from Pydantic ?",
+              "score": 1,
+              "created_utc": "2026-03-13 06:54:58",
+              "is_submitter": true,
+              "replies": []
+            },
+            {
+              "id": "oa6pbw7",
+              "author": "tasoyla",
+              "text": "So why not give the LLM the output schema ",
+              "score": 1,
+              "created_utc": "2026-03-13 07:28:37",
+              "is_submitter": false,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "oa6jva8",
+          "author": "wt1j",
+          "text": "Parallel tool calling is potentially slower if you assume that, using the program-generation approach, the program that the LLM outputs will make any needed API calls and output directly to the user. For many tool calls, the tool result affects reasoning, which means it needs to be sent BACK to the LLM so that the LLM can decide what to do next. \n\nIf tool output affects reasoning, then you have:\n\nParallel tool calling;\n\nLLM outputs tool call -> tool calls in parallel -> LLM reads tool calls output and does whatever is next. \n\nProgram calling:\n\nLLM outputs program -> Program calls APIs in parallel -> LLM reads program output and does whatever is next.\n\n  \nWith parallel tool calling you don't have to worry about containerization. You have the added benefit of tools themselves being self-documenting and guiding the LLM in execution vs total freedom to write the program any way it wants and you're relying on your system prompt to guide the LLM. \n\nHaving said all that, I'm incredibly intrigued by this idea. I'm working on an agent that could really benefit from this approach and I'm incredibly curious to see what it does if I give it this kind of freedom to innovate with a well documented API. \n\nThanks for posting.",
+          "score": 3,
+          "created_utc": "2026-03-13 06:36:33",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "oa6lnkl",
+              "author": "UnchartedFr",
+              "text": "Interesting insight, It will also feed my ideas/thoughts :)   \n  \nIn fact, I thought about this kind of feedback loop : for example I noticed that depending of the model, the generated code could fail. So I created a flag \"autoFix\", so the model can read the error and regenerate a new code.   \nAlso, I'm reworking the code so it can handle the Promise.all to handle parallel tool call even if it's a simple event loop behind.  \nBut I must admit I don't know yet how it affects models and their reasoning :)",
+              "score": 2,
+              "created_utc": "2026-03-13 06:53:25",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "oa7dqkv",
+          "author": "ricklopor",
+          "text": "also noticed that the token cost savings aren't always as clean as the 3x math suggests. when the LLM is writing the code itself, you're spending tokens on the code generation step, and if the model, hallucinates a tool signature or writes subtly broken async logic, you're back to debugging cycles that eat into whatever you saved. in my experience the pattern works really well for predictable, well-documented tool sets but gets.",
+          "score": 3,
+          "created_utc": "2026-03-13 11:10:13",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "oadig3n",
+              "author": "IllEntertainment585",
+              "text": "yeah the 3x math never holds up in production. tbh the biggest token sink for us isn't the initial code gen call — it's the retry loop when generated code fails. we're running ~6 agents and i've watched a single bad codegen spiral into 8-10 recovery calls before it either succeeds or we cut losses. that's where the real cost hides. hallucination debugging is brutal too, especially when the agent confidently produces code that \"looks right\" but silently corrupts data. we added a pre-execution static check layer which helped, but it added latency. what kind of tasks are you running the code execution on? curious if failure rate varies a lot by domain",
+              "score": 1,
+              "created_utc": "2026-03-14 09:23:26",
+              "is_submitter": false,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "oa6s6j3",
+          "author": "Infamous_Kraken",
+          "text": "Wait so isn’t LLM making any deduction or something based on the response of tool x before calling tool x+1 ? \n",
+          "score": 1,
+          "created_utc": "2026-03-13 07:56:19",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "oa6u2j3",
+              "author": "UnchartedFr",
+              "text": "In traditional tool-use, the flow is:  \nLLM → call tool A → LLM reasons about result → call tool B → LLM reasons → ...  \nEach arrow is a full LLM round-trip. Expensive and slow.\n\nWith LLM writing code, they reasons about how tool results should influence the next call  \nIt just does it at code-generation time rather than at execution time. You go from N round-trips to 1.",
+              "score": 1,
+              "created_utc": "2026-03-13 08:14:21",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "oalzfsx",
+                  "author": "Infamous_Kraken",
+                  "text": "So then the use case for this technique is not entirely replacing the LLM round trips loops bcoz in some cases the reasoning heavily depends on how the tool 1 responded before we can call tool 2 and there’s chance of variability ",
+                  "score": 1,
+                  "created_utc": "2026-03-15 18:06:03",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "oa7zzbm",
+          "author": "CourtsDigital",
+          "text": "the main benefit of programmatic tool calling (PTC) is not latency, but decreasing the context passed to the agent. each tool increases the amount of context an LLM needs to reason over, which increases the potential for hallucinations when running longer, multi-step tasks. \n\nanother benefit is the ability to prevent sensitive data from being passed to the LLM directly. you can inject variables into the code sandbox that the agent never sees, and thus can’t be leaked into its memory/tracing/logs/parent company’s training data.\n\nthat being said, PTC is not a magic wand and must be constructed carefully to prevent hallucinations in code generation creating fake variables, query params, api endpoints etc\n\nthis approach was invented/popularized by Anthropic and you can read more about how to implement their findings here: https://platform.claude.com/docs/en/agents-and-tools/tool-use/programmatic-tool-calling",
+          "score": 1,
+          "created_utc": "2026-03-13 13:30:14",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oackj3v",
+          "author": "VehicleNo6682",
+          "text": "Wait what about if llm calls tool for intent classification.",
+          "score": 1,
+          "created_utc": "2026-03-14 04:06:25",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oadl6t4",
+          "author": "stunning_man_007",
+          "text": "This is a solid optimization! I've been doing something similar with ReAct agents - the latency adds up fast when you're doing multiple round-trips. Curious how you handle errors when the generated code blows up though - do you fall back to sequential or have a retry mechanism?",
+          "score": 1,
+          "created_utc": "2026-03-14 09:51:14",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "oae4fnc",
+              "author": "UnchartedFr",
+              "text": "I did a quick hack and added an autoFix + number of retries flags : it return the results, to create a feedback loop so the LLM can fix its code :)  \nSince the code is very fast it doesn't matter if it retries 3-5 times  \nI will try to enhance this when I'll have time",
+              "score": 1,
+              "created_utc": "2026-03-14 12:35:18",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        }
+      ]
+    },
+    {
       "id": "1rtrjqe",
       "title": "Standard RAG fails terribly on legal contracts. I built a GraphRAG approach using Neo4j & Llama-3. Looking for chunking advice!",
       "subreddit": "LangChain",
@@ -227,7 +378,7 @@
       "created_utc": "2026-03-14 18:53:00",
       "score": 21,
       "num_comments": 29,
-      "upvote_ratio": 0.96,
+      "upvote_ratio": 0.93,
       "text": "Hey everyone,\n\nI was recently studying IT Law and realized standard Vector DB RAG setups completely lose context on complex legal documents. They fetch similar text but miss logical conditions like \"A violation of Article 5 triggers Article 18.\"\n\nTo solve this, I built an end-to-end GraphRAG pipeline. Instead of just chunking and embedding, I use Llama-3 (via Groq for speed) to extract entities and relationships (e.g., Clause -> CONFLICTS\\_WITH -> Clause) and store them in Neo4j.\n\n**The Stack:** FastAPI + Neo4j + Llama-3 + Next.js (Dockerized on a VPS)\n\n**My issue/question:** \\> Legal text is dense. Currently, I'm doing semantic chunking before passing it to the LLM for relationship extraction. Has anyone found a better chunking strategy specifically for feeding legal/dense data into a Knowledge Graph?\n\n*(For context on how the queries work, I open-sourced the whole thing here:* [`github.com/leventtcaan/graphrag-contract-ai`](http://github.com/leventtcaan/graphrag-contract-ai) *and there is a live demo in my linkedin post, if you want to try it my LinkedIn is* [*https://www.linkedin.com/in/leventcanceylan/*](https://www.linkedin.com/in/leventcanceylan/) *I will be so happy to contact with you:))*",
       "is_original_content": false,
       "link_flair_text": null,
@@ -287,7 +438,7 @@
           "id": "oagdwuv",
           "author": "Ok_Diver9921",
           "text": "EinSof93 is right that semantic chunking won't save you with legal text. Legal docs already have explicit structural hierarchy - articles, sections, clauses, sub-clauses. Use that structure as your chunk boundaries instead of trying to infer them. Parse the heading numbering (Article 1, Section 1.1, etc.) and keep each clause as a unit with its parent reference in metadata.\n\nThe cross-reference problem you mentioned (Article 5 triggers Article 18) is exactly where the graph approach pays off - extract those explicit references as edges during entity extraction, don't rely on embedding similarity to find them. One thing I'd add: the \"Definitions\" article that most contracts have should be injected as context into every query, not just retrieved when relevant. Defined terms change the meaning of everything downstream and embedding search will miss that constantly. For the token burn during preprocessing, batch by document section not by page - pages split mid-clause and create garbage chunks.",
-          "score": 3,
+          "score": 2,
           "created_utc": "2026-03-14 19:53:08",
           "is_submitter": false,
           "replies": [
@@ -438,166 +589,15 @@
       ]
     },
     {
-      "id": "1rsdtno",
-      "title": "Replace sequential tool calls with code execution — LLM writes TypeScript that calls your tools in one shot",
-      "subreddit": "LangChain",
-      "url": "https://www.reddit.com/r/LangChain/comments/1rsdtno/replace_sequential_tool_calls_with_code_execution/",
-      "author": "UnchartedFr",
-      "created_utc": "2026-03-13 04:37:39",
-      "score": 21,
-      "num_comments": 15,
-      "upvote_ratio": 0.96,
-      "text": "If you're building agents with LangChain, you've hit this: the LLM calls a tool, waits for the result, reads it, calls the next tool, waits, reads, calls the next. **Every intermediate result passes through the model.** 3 tools = 3 round-trips = 3x the latency and token cost.\n\n    # What happens today with sequential tool calling:\n    # Step 1: LLM → getWeather(\"Tokyo\")    → result back to LLM    (tokens + latency)\n    # Step 2: LLM → getWeather(\"Paris\")    → result back to LLM    (tokens + latency)\n    # Step 3: LLM → compare(tokyo, paris)  → result back to LLM    (tokens + latency)\n\nThere's a better pattern. Instead of the LLM making tool calls one by one, it **writes code** that calls them all:\n\n    const tokyo = await getWeather(\"Tokyo\");\n    const paris = await getWeather(\"Paris\");\n    tokyo.temp < paris.temp ? \"Tokyo is colder\" : \"Paris is colder\";\n\n**One round-trip.** The comparison logic stays in the code — it never passes back through the model. Cloudflare, Anthropic, HuggingFace, and Pydantic are all converging on this pattern:\n\n* [Code Mode](https://blog.cloudflare.com/code-mode/) (Cloudflare)\n* [Programmatic Tool Calling](https://platform.claude.com/docs/en/agents-and-tools/tool-use/programmatic-tool-calling) (Anthropic)\n* [SmolAgents](https://github.com/huggingface/smolagents) (HuggingFace)\n* [Monty](https://github.com/pydantic/monty) (Pydantic) — Python subset interpreter for this use case\n\n# The missing piece: safely running the code\n\nYou can't `eval()` LLM output. Docker adds **200-500ms** per execution — brutal in an agent loop. And neither Docker nor V8 supports **pausing execution mid-function** when the code hits `await` on a slow tool.\n\nI built [Zapcode](https://github.com/TheUncharted/zapcode) — a **sandboxed TypeScript interpreter in Rust** with Python bindings. Think of it as a **LangChain tool that runs LLM-generated code safely**.\n\n    pip install zapcode\n\n# How to use it with LangChain\n\n# As a custom tool\n\n    from zapcode import Zapcode\n    from langchain_core.tools import StructuredTool\n    \n    # Your existing tools\n    def get_weather(city: str) -> dict:\n        return requests.get(f\"https://api.weather.com/{city}\").json()\n    \n    def search_flights(origin: str, dest: str, date: str) -> list:\n        return flight_api.search(origin, dest, date)\n    \n    TOOLS = {\n        \"getWeather\": get_weather,\n        \"searchFlights\": search_flights,\n    }\n    \n    def execute_code(code: str) -> str:\n        \"\"\"Execute TypeScript code in a sandbox with access to registered tools.\"\"\"\n        sandbox = Zapcode(\n            code,\n            external_functions=list(TOOLS.keys()),\n            time_limit_ms=10_000,\n        )\n        state = sandbox.start()\n    \n        while state.get(\"suspended\"):\n            fn = TOOLS[state[\"function_name\"]]\n            result = fn(*state[\"args\"])\n            state = state[\"snapshot\"].resume(result)\n    \n        return str(state[\"output\"])\n    \n    # Expose as a LangChain tool\n    zapcode_tool = StructuredTool.from_function(\n        func=execute_code,\n        name=\"execute_typescript\",\n        description=(\n            \"Execute TypeScript code that can call these functions with await:\\n\"\n            \"- getWeather(city: string) → { condition, temp }\\n\"\n            \"- searchFlights(from: string, to: string, date: string) → Array<{ airline, price }>\\n\"\n            \"Last expression = output. No markdown fences.\"\n        ),\n    )\n    \n    # Use in your agent\n    agent = create_react_agent(llm, [zapcode_tool], prompt)\n\nNow instead of calling `getWeather` and `searchFlights` as separate tools (multiple round-trips), the LLM writes **one code block** that calls both and computes the answer.\n\n# With the Anthropic SDK directly\n\n    import anthropic\n    from zapcode import Zapcode\n    \n    SYSTEM = \"\"\"\\\n    Write TypeScript to answer the user's question.\n    Available functions (use await):\n    - getWeather(city: string) → { condition, temp }\n    - searchFlights(from: string, to: string, date: string) → Array<{ airline, price }>\n    Last expression = output. No markdown fences.\"\"\"\n    \n    client = anthropic.Anthropic()\n    response = client.messages.create(\n        model=\"claude-sonnet-4-20250514\",\n        max_tokens=1024,\n        system=SYSTEM,\n        messages=[{\"role\": \"user\", \"content\": \"Cheapest flight from the colder city?\"}],\n    )\n    \n    code = response.content[0].text\n    \n    sandbox = Zapcode(code, external_functions=[\"getWeather\", \"searchFlights\"])\n    state = sandbox.start()\n    \n    while state.get(\"suspended\"):\n        result = TOOLS[state[\"function_name\"]](*state[\"args\"])\n        state = state[\"snapshot\"].resume(result)\n    \n    print(state[\"output\"])\n\n# What this gives you over sequential tool calling\n\n|\\---|**Sequential tools**|**Code execution (Zapcode)**|\n|:-|:-|:-|\n|**Round-trips**|One per tool call|**One for all tools**|\n|**Intermediate logic**|Back through the LLM|**Stays in code**|\n|**Composability**|Limited to tool chaining|**Full: loops, conditionals, .map()**|\n|**Token cost**|Grows with each step|**Fixed**|\n|**Cold start**|N/A|**\\~2 µs**|\n|**Pause/resume**|No|**Yes — snapshot <2 KB**|\n\n# Snapshot/resume for long-running tools\n\nThis is where Zapcode really shines for agent workflows. When the code calls an external function, the VM **suspends** and the state serializes to **<2 KB**. You can:\n\n* Store the snapshot in **Redis, Postgres, S3**\n* Resume **later**, in a **different process or worker**\n* Handle **human-in-the-loop** approval steps without keeping a process alive\n\n\n\n    from zapcode import ZapcodeSnapshot\n    \n    state = sandbox.start()\n    \n    if state.get(\"suspended\"):\n        # Serialize — store wherever you want\n        snapshot_bytes = state[\"snapshot\"].dump()\n        redis.set(f\"task:{task_id}\", snapshot_bytes)\n    \n        # Later, when the tool result arrives (webhook, manual approval, etc.):\n        snapshot_bytes = redis.get(f\"task:{task_id}\")\n        restored = ZapcodeSnapshot.load(snapshot_bytes)\n        final = restored.resume(tool_result)\n\n# Security\n\nThe sandbox is **deny-by-default** — important when you're running code from an LLM:\n\n* **No filesystem, network, or env vars** — doesn't exist in the core crate\n* **No eval/import/require** — blocked at parse time\n* **Resource limits** — memory (32 MB), time (5s), stack depth (512), allocations (100k)\n* **65 adversarial tests** — prototype pollution, constructor escapes, JSON bombs, etc.\n* **Zero** `unsafe` in the Rust core\n\n# Benchmarks (cold start, no caching)\n\n|Benchmark|Time|\n|:-|:-|\n|**Simple expression**|**2.1 µs**|\n|**Function call**|**4.6 µs**|\n|**Async/await**|**3.1 µs**|\n|**Loop** (100 iterations)|**77.8 µs**|\n|**Fibonacci(10)** — 177 calls|**138.4 µs**|\n\nIt's **experimental** and under active development. Also has bindings for **Node.js, Rust, and WASM**.\n\nWould love feedback from LangChain users — especially on how this fits into existing **AgentExecutor** or **LangGraph** workflows.\n\nGitHub: [https://github.com/TheUncharted/zapcode](https://github.com/TheUncharted/zapcode)",
-      "is_original_content": false,
-      "link_flair_text": "Resources",
-      "permalink": "https://reddit.com/r/LangChain/comments/1rsdtno/replace_sequential_tool_calls_with_code_execution/",
-      "domain": "self.LangChain",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "oa6kzzu",
-          "author": "RestaurantHefty322",
-          "text": "The latency reduction is real for the embarrassingly parallel case (fire 3 independent API calls at once). We saw similar gains just batching tool calls with asyncio on the orchestrator side without needing a code interpreter.\n\nWhere this falls apart in practice is the branching case. Most of our agent workflows look like \"call tool A, look at the result, decide whether to call B or C.\" The LLM can't write that decision logic ahead of time because it doesn't know what A will return. So you end up with a hybrid - batch the independent calls, go back to the model for the branching decisions.\n\nThe sandbox execution time matters too. If you're adding even 50ms per code execution in a loop that runs 10-15 times per task, that's nearly a second of overhead just from the interpreter. We tried a similar approach with a Python sandbox and the cold start was the killer - ended up going back to direct tool dispatch for anything latency-sensitive.",
-          "score": 3,
-          "created_utc": "2026-03-13 06:47:15",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "oa6lti8",
-              "author": "UnchartedFr",
-              "text": "Did you try Monty from Pydantic ?",
-              "score": 1,
-              "created_utc": "2026-03-13 06:54:58",
-              "is_submitter": true,
-              "replies": []
-            },
-            {
-              "id": "oa6pbw7",
-              "author": "tasoyla",
-              "text": "So why not give the LLM the output schema ",
-              "score": 1,
-              "created_utc": "2026-03-13 07:28:37",
-              "is_submitter": false,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "oa6jva8",
-          "author": "wt1j",
-          "text": "Parallel tool calling is potentially slower if you assume that, using the program-generation approach, the program that the LLM outputs will make any needed API calls and output directly to the user. For many tool calls, the tool result affects reasoning, which means it needs to be sent BACK to the LLM so that the LLM can decide what to do next. \n\nIf tool output affects reasoning, then you have:\n\nParallel tool calling;\n\nLLM outputs tool call -> tool calls in parallel -> LLM reads tool calls output and does whatever is next. \n\nProgram calling:\n\nLLM outputs program -> Program calls APIs in parallel -> LLM reads program output and does whatever is next.\n\n  \nWith parallel tool calling you don't have to worry about containerization. You have the added benefit of tools themselves being self-documenting and guiding the LLM in execution vs total freedom to write the program any way it wants and you're relying on your system prompt to guide the LLM. \n\nHaving said all that, I'm incredibly intrigued by this idea. I'm working on an agent that could really benefit from this approach and I'm incredibly curious to see what it does if I give it this kind of freedom to innovate with a well documented API. \n\nThanks for posting.",
-          "score": 3,
-          "created_utc": "2026-03-13 06:36:33",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "oa6lnkl",
-              "author": "UnchartedFr",
-              "text": "Interesting insight, It will also feed my ideas/thoughts :)   \n  \nIn fact, I thought about this kind of feedback loop : for example I noticed that depending of the model, the generated code could fail. So I created a flag \"autoFix\", so the model can read the error and regenerate a new code.   \nAlso, I'm reworking the code so it can handle the Promise.all to handle parallel tool call even if it's a simple event loop behind.  \nBut I must admit I don't know yet how it affects models and their reasoning :)",
-              "score": 2,
-              "created_utc": "2026-03-13 06:53:25",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "oa7dqkv",
-          "author": "ricklopor",
-          "text": "also noticed that the token cost savings aren't always as clean as the 3x math suggests. when the LLM is writing the code itself, you're spending tokens on the code generation step, and if the model, hallucinates a tool signature or writes subtly broken async logic, you're back to debugging cycles that eat into whatever you saved. in my experience the pattern works really well for predictable, well-documented tool sets but gets.",
-          "score": 3,
-          "created_utc": "2026-03-13 11:10:13",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "oadig3n",
-              "author": "IllEntertainment585",
-              "text": "yeah the 3x math never holds up in production. tbh the biggest token sink for us isn't the initial code gen call — it's the retry loop when generated code fails. we're running ~6 agents and i've watched a single bad codegen spiral into 8-10 recovery calls before it either succeeds or we cut losses. that's where the real cost hides. hallucination debugging is brutal too, especially when the agent confidently produces code that \"looks right\" but silently corrupts data. we added a pre-execution static check layer which helped, but it added latency. what kind of tasks are you running the code execution on? curious if failure rate varies a lot by domain",
-              "score": 1,
-              "created_utc": "2026-03-14 09:23:26",
-              "is_submitter": false,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "oa6s6j3",
-          "author": "Infamous_Kraken",
-          "text": "Wait so isn’t LLM making any deduction or something based on the response of tool x before calling tool x+1 ? \n",
-          "score": 1,
-          "created_utc": "2026-03-13 07:56:19",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "oa6u2j3",
-              "author": "UnchartedFr",
-              "text": "In traditional tool-use, the flow is:  \nLLM → call tool A → LLM reasons about result → call tool B → LLM reasons → ...  \nEach arrow is a full LLM round-trip. Expensive and slow.\n\nWith LLM writing code, they reasons about how tool results should influence the next call  \nIt just does it at code-generation time rather than at execution time. You go from N round-trips to 1.",
-              "score": 1,
-              "created_utc": "2026-03-13 08:14:21",
-              "is_submitter": true,
-              "replies": [
-                {
-                  "id": "oalzfsx",
-                  "author": "Infamous_Kraken",
-                  "text": "So then the use case for this technique is not entirely replacing the LLM round trips loops bcoz in some cases the reasoning heavily depends on how the tool 1 responded before we can call tool 2 and there’s chance of variability ",
-                  "score": 1,
-                  "created_utc": "2026-03-15 18:06:03",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "oa7zzbm",
-          "author": "CourtsDigital",
-          "text": "the main benefit of programmatic tool calling (PTC) is not latency, but decreasing the context passed to the agent. each tool increases the amount of context an LLM needs to reason over, which increases the potential for hallucinations when running longer, multi-step tasks. \n\nanother benefit is the ability to prevent sensitive data from being passed to the LLM directly. you can inject variables into the code sandbox that the agent never sees, and thus can’t be leaked into its memory/tracing/logs/parent company’s training data.\n\nthat being said, PTC is not a magic wand and must be constructed carefully to prevent hallucinations in code generation creating fake variables, query params, api endpoints etc\n\nthis approach was invented/popularized by Anthropic and you can read more about how to implement their findings here: https://platform.claude.com/docs/en/agents-and-tools/tool-use/programmatic-tool-calling",
-          "score": 1,
-          "created_utc": "2026-03-13 13:30:14",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oackj3v",
-          "author": "VehicleNo6682",
-          "text": "Wait what about if llm calls tool for intent classification.",
-          "score": 1,
-          "created_utc": "2026-03-14 04:06:25",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oadl6t4",
-          "author": "stunning_man_007",
-          "text": "This is a solid optimization! I've been doing something similar with ReAct agents - the latency adds up fast when you're doing multiple round-trips. Curious how you handle errors when the generated code blows up though - do you fall back to sequential or have a retry mechanism?",
-          "score": 1,
-          "created_utc": "2026-03-14 09:51:14",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "oae4fnc",
-              "author": "UnchartedFr",
-              "text": "I did a quick hack and added an autoFix + number of retries flags : it return the results, to create a feedback loop so the LLM can fix its code :)  \nSince the code is very fast it doesn't matter if it retries 3-5 times  \nI will try to enhance this when I'll have time",
-              "score": 1,
-              "created_utc": "2026-03-14 12:35:18",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        }
-      ]
-    },
-    {
       "id": "1ruglv9",
       "title": "I built an open-source RAG system that actually understands images, tables, and document structure — not just text chunks",
       "subreddit": "LangChain",
       "url": "https://v.redd.it/ol4pujuo68pg1",
       "author": "Alternative_Job8773",
       "created_utc": "2026-03-15 15:14:58",
-      "score": 19,
+      "score": 18,
       "num_comments": 8,
-      "upvote_ratio": 1.0,
+      "upvote_ratio": 0.96,
       "text": "[External Link]",
       "is_original_content": false,
       "link_flair_text": "Resources",
@@ -683,88 +683,15 @@
       ]
     },
     {
-      "id": "1rtdpjv",
-      "title": "Built a production autonomous trading agent - lessons on tool calling, memory, and guardrails in financial AI",
-      "subreddit": "LangChain",
-      "url": "https://www.reddit.com/r/LangChain/comments/1rtdpjv/built_a_production_autonomous_trading_agent/",
-      "author": "ok-hacker",
-      "created_utc": "2026-03-14 08:05:34",
-      "score": 16,
-      "num_comments": 6,
-      "upvote_ratio": 0.87,
-      "text": "I've been shipping a production AI trading agent on Solana for the past year and wanted to share the architecture lessons since this community focuses on practical agentic systems.\n\n\n\nThe core loop: market data in, reasoning layer evaluates conditions, tool calls to execute or skip trades, position tracking updates memory, risk monitors check thresholds, loop repeats every few seconds.\n\n\n\nWhat I learned the hard way:\n\n\n\nTool calling discipline matters more than model quality. If your agent can call execute\\_trade at the wrong time because the prompt isn't tight enough, you'll lose money before you realize it. We ended up building a custom DSL layer that acts as a guardrail on top of the LLM calls - the model reasons, but execution only happens through validated, schema-checked function calls.\n\n\n\nMemory design is the hardest part. The agent needs short-term memory (what did I just do, what position am I in) and long-term pattern memory (what setups have worked in this market regime). We use different storage backends for each - Redis for hot state, SQLite for historical patterns.\n\n\n\nHuman override is non-negotiable. You need kill switches that don't go through the agent at all. Direct wallet-level controls, not just prompt instructions.\n\n\n\nThe product is live at [andmilo.com](http://andmilo.com) if anyone is curious about the implementation. Happy to discuss the architecture specifics.",
-      "is_original_content": false,
-      "link_flair_text": null,
-      "permalink": "https://reddit.com/r/LangChain/comments/1rtdpjv/built_a_production_autonomous_trading_agent/",
-      "domain": "self.LangChain",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "oadxm8h",
-          "author": "benevolent001",
-          "text": "I am doing something similar, I am solo dev and doing for 1 market and I do for day trading purpose\n\nI have pipeline of websocket > processing pipeline > metrics > LLMs reasoning > human > broker trades\n\nI had to throttle the LLM layer to cut the costs down and use caching based on similar past trends.\n\nDo you have any diagram about your flow that explains what you do in each component?",
-          "score": 2,
-          "created_utc": "2026-03-14 11:44:33",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oadc43f",
-          "author": "k_sai_krishna",
-          "text": "Interesting setup. I think the point about tool calling discipline is very true, especially in trading where one wrong action can become expensive very fast.\nI also agree about memory design. Short term state and long term pattern memory are very different, so using different storage for them makes sense.\nAnd yes, human override feels necessary in this kind of system. A direct kill switch outside the agent is much safer.",
-          "score": 1,
-          "created_utc": "2026-03-14 08:18:56",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oadufrz",
-          "author": "RestaurantHefty322",
-          "text": "The DSL guardrail layer is smart. We landed on something similar after a scary incident where the model \"reasoned\" its way into calling a destructive action with perfect logic but wrong context. Schema validation alone wasn't enough - we added a pre-execution step that checks the proposed action against the current state snapshot, basically a lightweight assertion layer between reasoning and execution.\n\nOn memory - the two-backend split is exactly right. One thing we found is you also need a decay mechanism for the long-term patterns. Market regimes shift and old patterns actively mislead the model. We ended up adding a confidence weight that drops over time unless the pattern keeps getting reinforced by new data. Without that, the agent was making decisions based on correlations from 6 months ago that no longer held.\n\nCurious about your kill switch implementation. We went with a separate process that monitors position size and drawdown independently of the agent - it can freeze the wallet even if the agent process is hung or in a bad loop. Having it go through a completely different code path from the agent was key.",
-          "score": 1,
-          "created_utc": "2026-03-14 11:17:26",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oaezxs7",
-          "author": "NexusVoid_AI",
-          "text": "the kill switch observation is the one that matters most and it generalizes beyond trading. any agent with real-world execution capability needs intervention paths that bypass the agent entirely. if your only way to stop it is through the same system that's misbehaving you don't actually have control. direct wallet-level controls is the right instinct, same principle applies anywhere an agent can take irreversible actions.\n\n",
-          "score": 1,
-          "created_utc": "2026-03-14 15:37:26",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oajt4cw",
-          "author": "HoneydewAsleep255",
-          "text": "really appreciate the breakdown — the memory architecture split (redis for hot state, sqlite for historical patterns) is a pattern i see more and more in production agents. makes sense for latency reasons too since the agent shouldn't be doing a full db scan on every loop iteration.\n\n\n\none thing i've been thinking about with this kind of setup: how do you handle memory drift over time? like if the agent builds up a pattern model from historical trades, but market regime shifts, does the older memory start working against it? curious if you have any mechanism to weight recency or deprecate stale patterns automatically.\n\n\n\nalso the kill switch point is super valid. direct wallet-level controls bypassing the agent entirely is the right call — prompt injection or hallucinated tool calls at the execution layer in a financial context is a very bad time.",
-          "score": 1,
-          "created_utc": "2026-03-15 10:18:41",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oalf4az",
-          "author": "Formally-Fresh",
-          "text": "I don’t agree with the memory part. Great if that supports  your strategy specifically  but the goal is pure determinism not context bloat.",
-          "score": 1,
-          "created_utc": "2026-03-15 16:26:46",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
       "id": "1rsz4m1",
       "title": "[help wanted] Need to learn agentic ai stuff, langchain, langgraph; looking for resources.",
       "subreddit": "LangChain",
       "url": "https://www.reddit.com/r/LangChain/comments/1rsz4m1/help_wanted_need_to_learn_agentic_ai_stuff/",
       "author": "irohanrajput",
       "created_utc": "2026-03-13 20:42:35",
-      "score": 16,
+      "score": 17,
       "num_comments": 9,
-      "upvote_ratio": 1.0,
+      "upvote_ratio": 0.96,
       "text": "i've built few ai agents, but still, there's some lack of clarity.\n\nI tried reading LangGraph docs, but couldn't understand what, where to start.  \nCan anyone help me find good resources to learn? (I hate YouTube tutorials, but if there's something really good, I'm in)",
       "is_original_content": false,
       "link_flair_text": null,
@@ -851,15 +778,211 @@
       ]
     },
     {
+      "id": "1rtdpjv",
+      "title": "Built a production autonomous trading agent - lessons on tool calling, memory, and guardrails in financial AI",
+      "subreddit": "LangChain",
+      "url": "https://www.reddit.com/r/LangChain/comments/1rtdpjv/built_a_production_autonomous_trading_agent/",
+      "author": "ok-hacker",
+      "created_utc": "2026-03-14 08:05:34",
+      "score": 16,
+      "num_comments": 6,
+      "upvote_ratio": 0.87,
+      "text": "I've been shipping a production AI trading agent on Solana for the past year and wanted to share the architecture lessons since this community focuses on practical agentic systems.\n\n\n\nThe core loop: market data in, reasoning layer evaluates conditions, tool calls to execute or skip trades, position tracking updates memory, risk monitors check thresholds, loop repeats every few seconds.\n\n\n\nWhat I learned the hard way:\n\n\n\nTool calling discipline matters more than model quality. If your agent can call execute\\_trade at the wrong time because the prompt isn't tight enough, you'll lose money before you realize it. We ended up building a custom DSL layer that acts as a guardrail on top of the LLM calls - the model reasons, but execution only happens through validated, schema-checked function calls.\n\n\n\nMemory design is the hardest part. The agent needs short-term memory (what did I just do, what position am I in) and long-term pattern memory (what setups have worked in this market regime). We use different storage backends for each - Redis for hot state, SQLite for historical patterns.\n\n\n\nHuman override is non-negotiable. You need kill switches that don't go through the agent at all. Direct wallet-level controls, not just prompt instructions.\n\n\n\nThe product is live at [andmilo.com](http://andmilo.com) if anyone is curious about the implementation. Happy to discuss the architecture specifics.",
+      "is_original_content": false,
+      "link_flair_text": null,
+      "permalink": "https://reddit.com/r/LangChain/comments/1rtdpjv/built_a_production_autonomous_trading_agent/",
+      "domain": "self.LangChain",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "oadxm8h",
+          "author": "benevolent001",
+          "text": "I am doing something similar, I am solo dev and doing for 1 market and I do for day trading purpose\n\nI have pipeline of websocket > processing pipeline > metrics > LLMs reasoning > human > broker trades\n\nI had to throttle the LLM layer to cut the costs down and use caching based on similar past trends.\n\nDo you have any diagram about your flow that explains what you do in each component?",
+          "score": 2,
+          "created_utc": "2026-03-14 11:44:33",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oadc43f",
+          "author": "k_sai_krishna",
+          "text": "Interesting setup. I think the point about tool calling discipline is very true, especially in trading where one wrong action can become expensive very fast.\nI also agree about memory design. Short term state and long term pattern memory are very different, so using different storage for them makes sense.\nAnd yes, human override feels necessary in this kind of system. A direct kill switch outside the agent is much safer.",
+          "score": 1,
+          "created_utc": "2026-03-14 08:18:56",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oadufrz",
+          "author": "RestaurantHefty322",
+          "text": "The DSL guardrail layer is smart. We landed on something similar after a scary incident where the model \"reasoned\" its way into calling a destructive action with perfect logic but wrong context. Schema validation alone wasn't enough - we added a pre-execution step that checks the proposed action against the current state snapshot, basically a lightweight assertion layer between reasoning and execution.\n\nOn memory - the two-backend split is exactly right. One thing we found is you also need a decay mechanism for the long-term patterns. Market regimes shift and old patterns actively mislead the model. We ended up adding a confidence weight that drops over time unless the pattern keeps getting reinforced by new data. Without that, the agent was making decisions based on correlations from 6 months ago that no longer held.\n\nCurious about your kill switch implementation. We went with a separate process that monitors position size and drawdown independently of the agent - it can freeze the wallet even if the agent process is hung or in a bad loop. Having it go through a completely different code path from the agent was key.",
+          "score": 1,
+          "created_utc": "2026-03-14 11:17:26",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oaezxs7",
+          "author": "NexusVoid_AI",
+          "text": "the kill switch observation is the one that matters most and it generalizes beyond trading. any agent with real-world execution capability needs intervention paths that bypass the agent entirely. if your only way to stop it is through the same system that's misbehaving you don't actually have control. direct wallet-level controls is the right instinct, same principle applies anywhere an agent can take irreversible actions.\n\n",
+          "score": 1,
+          "created_utc": "2026-03-14 15:37:26",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oajt4cw",
+          "author": "HoneydewAsleep255",
+          "text": "really appreciate the breakdown — the memory architecture split (redis for hot state, sqlite for historical patterns) is a pattern i see more and more in production agents. makes sense for latency reasons too since the agent shouldn't be doing a full db scan on every loop iteration.\n\n\n\none thing i've been thinking about with this kind of setup: how do you handle memory drift over time? like if the agent builds up a pattern model from historical trades, but market regime shifts, does the older memory start working against it? curious if you have any mechanism to weight recency or deprecate stale patterns automatically.\n\n\n\nalso the kill switch point is super valid. direct wallet-level controls bypassing the agent entirely is the right call — prompt injection or hallucinated tool calls at the execution layer in a financial context is a very bad time.",
+          "score": 1,
+          "created_utc": "2026-03-15 10:18:41",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oalf4az",
+          "author": "Formally-Fresh",
+          "text": "I don’t agree with the memory part. Great if that supports  your strategy specifically  but the goal is pure determinism not context bloat.",
+          "score": 1,
+          "created_utc": "2026-03-15 16:26:46",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1rvzds0",
+      "title": "Build agents with Raw python or use frameworks like langgraph?",
+      "subreddit": "LangChain",
+      "url": "https://www.reddit.com/r/LangChain/comments/1rvzds0/build_agents_with_raw_python_or_use_frameworks/",
+      "author": "Feisty-Promise-78",
+      "created_utc": "2026-03-17 06:56:38",
+      "score": 15,
+      "num_comments": 11,
+      "upvote_ratio": 0.89,
+      "text": "If you've built or are building a multi-agent application right now, are you using plain Python from scratch, or a framework like LangGraph, CrewAI, AutoGen, or something similar?\n\nI'm especially interested in what startup teams are doing. Do most reach for an off-the-shelf agent framework to move faster, or do they build their own in-house system in Python for better control?\n\nWhat's your approach and why? Curious to hear real experiences\n\nEDIT: My use-case is to build a Deep research agent. I m building this as a side-project to showcase my skills to land a founding engineer role at a startup",
+      "is_original_content": false,
+      "link_flair_text": "Question | Help",
+      "permalink": "https://reddit.com/r/LangChain/comments/1rvzds0/build_agents_with_raw_python_or_use_frameworks/",
+      "domain": "self.LangChain",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "oaw35c9",
+          "author": "Jorgestar29",
+          "text": "Using a framework saves you time, if you need:  \n\\- HITL  \n\\- Dependency injection to tools  \n\\- Tracing  \n\\- REACT Loop  \n\\- Chat session management\n\nEtc\n\nI tried a lot of frameworks (Haystack, Langchain, ADK, OpenAI Agents SDK, Pydantic AI) and, most of them will cover your needs, but the default agent in langchain feels better because of the Middleware system and the idea of writting plug-ins instead of just tools/prompts.\n\nDo not use Langgraph, its like using a sledgehammer to crack a nut... Go for the generic agent framework and leave the complexity of building state machines behind... you can cover 90% of langgraph features with pure python code without wasting hours debugging.",
+          "score": 6,
+          "created_utc": "2026-03-17 07:13:24",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "oax1lls",
+              "author": "kikkoman23",
+              "text": "So instead of Langgraph, you’re building this workflow yourself? \n\nThe whole interrupt/resume and subgraphs is tricky if you don’t understand its nuisances. And yeah I think just adding properties to manage your workflow can work and when you call an endpoint just add code based on state and route or do what it needs to. \n\nMaybe simplifying it. \n\nBut curious what issues you ran into with Langgraph?",
+              "score": 2,
+              "created_utc": "2026-03-17 12:13:19",
+              "is_submitter": false,
+              "replies": [
+                {
+                  "id": "oax5fv0",
+                  "author": "Jorgestar29",
+                  "text": "All the workflows I’ve developed, in my opinion, are quite simple, and using LG often feels like an unnecessary obstacle.  \nI don’t really use interrupts or checkpoints in workflows. I understand their value, but I don’t think building an entire graph is always justified.\n\nFor example, in a simple refine–critic loop, I think it’s much more readable to write:\n\n    for _ in range(max_turns):\n        refined = await refine(refined, critic_res)\n        critic_res = await critic(refined)\n        \n        if critic_res.completed:\n            return refined\n\nrather than creating **two nodes**, plus a routing node, a state to store the results of each node, and a builder function to assemble the graph.  \nLooking at the code above, it’s immediately clear that the output of `critic()` feeds into `refine()` and that the output is compatible with `critic()`.\n\nWith nodes, on the other hand, I have to locate the graph-building step, identify the node definitions, check which nodes are connected, etc. It feels unnecessarily complicated because the logic is split across multiple components.\n\nAnother thing I dislike is the `Send()` type for parallelizing operations. I much prefer a simple pattern like this:\n\n    async def parallel_research(topics: list[str]):\n        results = await asyncio.gather(*[start_research(topic) for topic in topics])\n        merged = await merge_research(results)\n        return merged, results\n\ninstead of building a node, defining an aggregation function in the state, creating a second merge node, and so on.\n\nI know there is a functional API, but i do not longer get paid to use Langgraph, so i haven't had the opportunity to try it in a real project. ",
+                  "score": 2,
+                  "created_utc": "2026-03-17 12:37:18",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            },
+            {
+              "id": "oaw3h2g",
+              "author": "Feisty-Promise-78",
+              "text": "Thanks for sharing your learnings. My use-case is to build a Deep research agent. I m building this as a side-project to showcase my skills to land a founding engineer role at a startup",
+              "score": 1,
+              "created_utc": "2026-03-17 07:16:33",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "oawblnm",
+          "author": "BarracudaExpensive03",
+          "text": "I tried both, and a framework is better. There is so much additional planning you need to do if you want to implement something from scratch. Frameworks remove that extra hassle, just get the dependency right and off you go.",
+          "score": 7,
+          "created_utc": "2026-03-17 08:37:33",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "oaxi4vv",
+              "author": "Scrapple_Joe",
+              "text": "This.  I had a framework we built before there were stable frameworks out there and once they caught up to what we had we switched.  Much easier to focus on your product than to maintain a library at the same time.",
+              "score": 4,
+              "created_utc": "2026-03-17 13:48:14",
+              "is_submitter": false,
+              "replies": [
+                {
+                  "id": "oaxw13w",
+                  "author": "BarracudaExpensive03",
+                  "text": "What problem were you trying to solve, may I ask? Was it related to a business or purely an academic endeavor?",
+                  "score": 1,
+                  "created_utc": "2026-03-17 14:58:11",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "oaxs1ki",
+          "author": "Axirohq",
+          "text": "Most teams start with a framework, then slowly remove it.\n\nFrameworks (LangGraph, AutoGen, etc.) are great for prototyping orchestration. But once agents hit real workloads, teams usually want tighter control over:\n\n* memory\n* retries / failure handling\n* tool execution\n* cost + latency\n\nSo the common path is: framework → custom orchestration in Python.\n\nFor a deep research agent, plain Python + good retrieval + persistent memory usually goes a long way.\n\n(Disclaimer: I work on agent memory infrastructure.)",
+          "score": 1,
+          "created_utc": "2026-03-17 14:38:18",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "oaxw11y",
+              "author": "Feisty-Promise-78",
+              "text": "Thanks",
+              "score": 1,
+              "created_utc": "2026-03-17 14:58:11",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "oayild2",
+          "author": "wheres-my-swingline",
+          "text": "Don’t listen to these people\n\nAgents run tools in loop to achieve a goal, that’s it\n\nYou will need to handroll some of the scaffolding that framework training wheels give you out of the box, but I promise you that it’s worthwhile (and you will have a much better understanding of how these things work)",
+          "score": 1,
+          "created_utc": "2026-03-17 16:43:26",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oawd4cs",
+          "author": "MuninnW",
+          "text": "A framework is definitely necessary. You can choose different frameworks based on your specific scenario to save a lot of trouble. The principle behind an Agent is simple, but the engineering details are far more complex than you might imagine.",
+          "score": 0,
+          "created_utc": "2026-03-17 08:52:28",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
       "id": "1rv2vs8",
       "title": "LangGraph's human-in-the-loop has a double execution problem",
       "subreddit": "LangChain",
       "url": "https://blog.raed.dev/posts/langgraph-hitl",
       "author": "raedslab",
       "created_utc": "2026-03-16 07:27:55",
-      "score": 15,
+      "score": 13,
       "num_comments": 1,
-      "upvote_ratio": 1.0,
+      "upvote_ratio": 0.94,
       "text": "[External Link]",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -915,7 +1038,7 @@
                   "id": "o9uhpb0",
                   "author": "floswamp",
                   "text": "Screenshot of Windows 5 please. ",
-                  "score": 4,
+                  "score": 5,
                   "created_utc": "2026-03-11 12:59:37",
                   "is_submitter": false,
                   "replies": []
@@ -928,7 +1051,7 @@
           "id": "o9w6e5v",
           "author": "Last-Spring-1773",
           "text": "Great use case — this is exactly the kind of scenario where local RAG shines over cloud APIs, especially with sensitive company docs.\n\n**Model:** Llama 3.1 8B quantized (Q4\\_K\\_M) is the workhorse for this. Handles document Q&A well, runs comfortably on 32GB. If you can get 64GB, Qwen 2.5 72B or Llama 3.1 70B quantized gives noticeably better comprehension on complex product docs.\n\n**Stack:** Ollama (model runtime) + ChromaDB or Qdrant (local vector store) + Open WebUI (chat interface your call center team would actually use). For the RAG pipeline, LlamaIndex handles document chunking, embedding, and retrieval well out of the box. Use `nomic-embed-text` via Ollama for embeddings — runs locally, no API keys needed.\n\n**The flow:** Documents get chunked → embedded locally → stored in the vector DB → employee asks a question → relevant chunks retrieved → fed to the LLM as context → answer generated. Nothing ever leaves your network.\n\nI actually built something for this exact scenario — [VaultMind](https://github.com/airblackbox/VaultMind). It's a local chatbot where you feed it your docs and it only knows what you tell it. Might save you some plumbing on the RAG setup. Worth a look if you want a quick starting point before building something more custom.   \n  \n[https://airblackbox.ai/vaultmind](https://airblackbox.ai/vaultmind) ",
-          "score": 5,
+          "score": 4,
           "created_utc": "2026-03-11 17:58:29",
           "is_submitter": false,
           "replies": [
@@ -1072,9 +1195,9 @@
       "url": "https://www.reddit.com/r/LangChain/comments/1ruogxv/a_suggestion_about_this_sub/",
       "author": "KalZaxSea",
       "created_utc": "2026-03-15 20:15:59",
-      "score": 11,
+      "score": 12,
       "num_comments": 9,
-      "upvote_ratio": 0.77,
+      "upvote_ratio": 0.8,
       "text": "I like using langchain and I wanted to discuss with the people here. But nearly all of the posts are promotion of users their own products or MVP's. \n\nI fall once the trap most of the posts starts with question and then explain how their product solves them. And most of them are AI slop and doesnt suggest a real value.\n\nAs I said I want to be part of this community and I want to see here what people do / think about langchain, not what they promote.\n\nIt would be lovely if we can prevent / reduce amount of promotion here. ",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -1086,7 +1209,7 @@
           "id": "oamttve",
           "author": "tomtomau",
           "text": "You’re absolutely right. It’s not X, it’s Y! That’s why I built Z\n\n/s",
-          "score": 7,
+          "score": 8,
           "created_utc": "2026-03-15 20:37:37",
           "is_submitter": false,
           "replies": []
@@ -1149,7 +1272,7 @@
           "id": "oamrlyj",
           "author": "1glasspaani",
           "text": "I like seeing what people build. Maybe we add a flair for projects?",
-          "score": 1,
+          "score": 0,
           "created_utc": "2026-03-15 20:26:33",
           "is_submitter": false,
           "replies": [
@@ -1167,15 +1290,81 @@
       ]
     },
     {
+      "id": "1rvc3wv",
+      "title": "I built a crash recovery layer for LangGraph — your agent won't send the same email twice",
+      "subreddit": "LangChain",
+      "url": "https://www.reddit.com/r/LangChain/comments/1rvc3wv/i_built_a_crash_recovery_layer_for_langgraph_your/",
+      "author": "carlosssssy",
+      "created_utc": "2026-03-16 15:10:17",
+      "score": 12,
+      "num_comments": 5,
+      "upvote_ratio": 0.88,
+      "text": "[](https://github.com/xudong963/effect-log/blob/master/blog/show-hn.md#show-hn-effect-log--your-ai-agent-crashed-after-sending-the-email-now-what)Here's a scenario. Your AI agent is running a 5-step task. Step 3 sends an email to your CEO. Step 4 records that the email was sent. The process crashes between step 3 and step 4.\n\nNow what?\n\nThe email was sent. There's no record of it. You restart the agent. It replays from the beginning. The CEO gets the email twice.\n\nThis problem — ensuring exactly-once side effects across crashes — was solved decades ago in databases with write-ahead logs, and later in distributed systems with durable execution engines like Temporal. AI agent frameworks are starting to address it, but at the wrong level of abstraction. LangGraph, for example, checkpoints graph state between nodes and recently added a `tasks` API to persist individual operation results. But checkpointing and recovery are semantic-blind — a read and an email send get the same treatment. If you want to prevent an email from being re-sent on recovery, you wrap it in a task. If you want a database read to re-execute for fresh data, you... also wrap it in a task, but differently. There's no declaration that drives this automatically.\n\nI built [effect-log](https://github.com/xudong963/effect-log) to fix this.\n\n# The Key Insight: Not All Side Effects Are Equal\n\n[](https://github.com/xudong963/effect-log/blob/master/blog/show-hn.md#the-key-insight-not-all-side-effects-are-equal)\n\nMost recovery systems treat all operations the same — either replay everything or checkpoint opaquely. But a read and a payment are fundamentally different, and a crash recovery system should treat them differently.\n\neffect-log requires every tool to declare its **effect kind** at registration time. There are five:\n\n|EffectKind|What It Means|Examples|\n|:-|:-|:-|\n|`ReadOnly`|Pure read, no mutation|File reads, DB queries, GET requests|\n|`IdempotentWrite`|Safe to replay with same key|PUT/upsert, Stripe charges with idempotency keys|\n|`Compensatable`|Reversible — has a known undo|Creating a VM (undo: delete it), booking a seat (undo: cancel)|\n|`IrreversibleWrite`|Cannot be undone once done|Sending emails, fund transfers, deployments|\n|`ReadThenWrite`|Reads state, then mutates based on what was read|Read-modify-write cycles|\n\nThis classification is the single piece of metadata that drives all recovery behavior. You declare it once per tool, and the system handles the rest.\n\n# How It Works\n\n[](https://github.com/xudong963/effect-log/blob/master/blog/show-hn.md#how-it-works)\n\neffect-log maintains a write-ahead log with two record types:\n\n1. **Intent** — written *before* a tool executes (what we're about to do)\n2. **Completion** — written *after* it finishes (what happened)\n\nAn intent without a matching completion is the signature of a crash. That gap is what triggers the recovery engine.\n\n    from effect_log import EffectKind, EffectLog, ToolDef\n    \n    tools = [\n        ToolDef(\"fetch_data\",  EffectKind.ReadOnly,         fetch_data_fn),\n        ToolDef(\"send_email\",  EffectKind.IrreversibleWrite, send_email_fn),\n        ToolDef(\"upsert_db\",   EffectKind.IdempotentWrite,   upsert_fn),\n    ]\n    \n    # Normal execution\n    log = EffectLog(execution_id=\"task-001\", tools=tools, storage=\"sqlite:///effects.db\")\n    \n    data = log.execute(\"fetch_data\",  {\"source\": \"https://api.example.com/daily-report\"})\n    log.execute(\"send_email\",  {\"to\": \"ceo@co.com\", \"subject\": data[\"title\"], \"body\": data[\"report\"]})\n    log.execute(\"upsert_db\",   {\"id\": data[\"report_id\"], \"status\": \"sent\", \"sent_to\": \"ceo@co.com\"})\n\nNotice how the output of `fetch_data` flows into `send_email` and `upsert_db`. This is the normal case — each step depends on the previous one.\n\nIf the process crashes after `send_email` but before `upsert_db`, recovery looks like this:\n\n    # Recovery — same code, just add recover=True\n    log = EffectLog(execution_id=\"task-001\", tools=tools,\n                    storage=\"sqlite:///effects.db\", recover=True)\n    \n    # Step 1: ReadOnly + completed → Replayed (re-fetches fresh data from the API)\n    data = log.execute(\"fetch_data\",  {\"source\": \"https://api.example.com/daily-report\"})\n    \n    # Step 2: IrreversibleWrite + completed → SEALED (returns stored result, function never called)\n    log.execute(\"send_email\",  {\"to\": \"ceo@co.com\", \"subject\": data[\"title\"], \"body\": data[\"report\"]})\n    \n    # Step 3: IdempotentWrite + no completion → Executes normally (picks up where we left off)\n    log.execute(\"upsert_db\",   {\"id\": data[\"report_id\"], \"status\": \"sent\", \"sent_to\": \"ceo@co.com\"})\n\nThree tools, three different recovery behaviors — all driven by the effect kind declared at registration time. `fetch_data` re-executes for fresh data because reads are safe to repeat. `send_email` returns the sealed result from the first run — the function is never called again, no duplicate email. `upsert_db` executes normally because it never ran in the first place.\n\n# The Recovery Matrix\n\n[](https://github.com/xudong963/effect-log/blob/master/blog/show-hn.md#the-recovery-matrix)\n\nThe recovery engine is a pure function — no I/O, no side effects. It takes an intent record, an optional completion record, and returns one of four actions:\n\n    pub fn recovery_strategy(\n        record: &IntentRecord,\n        completion: Option<&CompletionRecord>,\n        read_policy: ReadRecoveryPolicy,\n    ) -> RecoveryAction {\n        match (&record.effect_kind, completion) {\n            // Completed effects → return sealed result\n            (EffectKind::IrreversibleWrite, Some(_)) => ReturnSealed,\n            (EffectKind::IdempotentWrite, Some(_))   => ReturnSealed,\n            (EffectKind::Compensatable, Some(_))     => ReturnSealed,\n            (EffectKind::ReadThenWrite, Some(_))     => ReturnSealed,\n    \n            // ReadOnly completed → depends on policy\n            (EffectKind::ReadOnly, Some(_)) => match read_policy {\n                ReplayFresh  => Replay,       // get fresh data\n                ReturnSealed => ReturnSealed, // consistency with downstream writes\n            },\n    \n            // No completion = crashed during execution\n            (EffectKind::ReadOnly, None)          => Replay,\n            (EffectKind::IdempotentWrite, None)   => Replay,\n            (EffectKind::Compensatable, None)     => CompensateThenReplay,\n            (EffectKind::IrreversibleWrite, None) => RequireHumanReview,\n            (EffectKind::ReadThenWrite, None)     => RequireHumanReview,\n        }\n    }\n\nThe entire recovery logic fits in one screen. Every branch is exhaustive. Every combination of (effect kind, completion status) maps to exactly one action.\n\n# The Hardest Design Decision: Honest Uncertainty\n\n[](https://github.com/xudong963/effect-log/blob/master/blog/show-hn.md#the-hardest-design-decision-honest-uncertainty)\n\nWhen an `IrreversibleWrite` has an intent record but no completion, effect-log does not guess. It does not retry. It returns `RequireHumanReview`.\n\nWhy? Because we genuinely don't know what happened. The email might have been sent (SMTP accepted it, then we crashed before writing the completion). Or the process might have crashed before the email left. There is no way to tell from the local log alone.\n\nThis is the [Two Generals' Problem](https://en.wikipedia.org/wiki/Two_Generals%27_Problem). You cannot distinguish \"succeeded then crashed\" from \"crashed before succeeding\" without an acknowledgment that was itself lost in the crash.\n\nMost systems either silently retry (risking duplicates) or silently skip (risking data loss). effect-log chooses a third path: *admit uncertainty and ask a human*. This is the most important design decision in the entire system.\n\nFor `Compensatable` effects, we have a better option: call the registered undo function first, then replay. If you crash while creating a VM, we delete the possibly-created VM, then create a fresh one. This is safe because the compensation is designed to be idempotent — deleting a non-existent VM is a no-op.\n\n# What This Is NOT\n\n[](https://github.com/xudong963/effect-log/blob/master/blog/show-hn.md#what-this-is-not)\n\nI want to be explicit about scope, because the most common reaction to projects like this is \"just use Temporal.\"\n\n**Not a workflow engine.** effect-log doesn't schedule, order, or coordinate tool calls. Your agent framework (LangGraph, CrewAI, OpenAI SDK, whatever) owns control flow. effect-log just logs and recovers tool calls within that flow.\n\n**Not distributed transactions.** No two-phase commit, no consensus protocol. effect-log runs in-process with a local SQLite WAL.\n\n**Not a replacement for Temporal or Restate.** If you already run Temporal, great — effect-log could be a complementary semantic layer. Temporal knows step 5 completed; effect-log knows step 5 was an irreversible email send and shouldn't be replayed.\n\n# Architecture\n\n[](https://github.com/xudong963/effect-log/blob/master/blog/show-hn.md#architecture)\n\n    Agent Framework (LangGraph / CrewAI / OpenAI SDK / custom)\n             │\n        ┌────▼────┐\n        │effect-log│ ← 5 effect kinds × recovery matrix\n        └────┬────┘\n             │ Intent (before) / Completion (after)\n        ┌────▼────┐\n        │ Storage  │ ← SQLite (default), in-memory (test), pluggable\n        └─────────┘\n    \n\nCore is \\~1200 lines of Rust. Python bindings via PyO3. SQLite with WAL mode for durability. The storage trait is pluggable — you could back it with RocksDB, S3, or Restate's journal.\n\nEach tool call gets a monotonically increasing sequence number within an execution. Recovery matches resumed calls to WAL entries by `(execution_id, sequence_number)`, not by argument hashing. This avoids subtle bugs when the agent re-derives arguments slightly differently on the second run (floating-point formatting, key ordering, etc.).\n\n# Current Status\n\n[](https://github.com/xudong963/effect-log/blob/master/blog/show-hn.md#current-status)\n\n**What works today:**\n\n* Rust core library with full recovery engine\n* SQLite and in-memory storage backends\n* Python bindings (PyO3 + maturin)\n* Middleware for LangGraph, OpenAI Agents SDK, CrewAI\n* Parallel tool call support\n* Idempotency key deduplication\n* Crash recovery end-to-end demo\n\n**What's coming:**\n\n* TypeScript bindings (napi-rs) for Vercel AI SDK\n* RocksDB and S3 storage backends\n* Auto-inference of effect kind from HTTP methods (GET → ReadOnly, PUT → IdempotentWrite, etc.)\n\n# The Bet\n\n[](https://github.com/xudong963/effect-log/blob/master/blog/show-hn.md#the-bet)\n\nI'm betting that as AI agents move from demos to production, side-effect reliability becomes a hard requirement. Today, most agent frameworks assume tool calls are pure functions. They're not. A `send_email` call that executes twice because of a restart is not a bug in the agent's logic — it's a bug in the infrastructure.\n\nThe five-way classification isn't original. Database people will recognize it as a simplification of transaction isolation levels. Distributed systems people will see echoes of saga patterns. The contribution is packaging this into a library that an AI agent developer can adopt in ten minutes.\n\n**Code:** [https://github.com/xudong963/effect-log](https://github.com/xudong963/effect-log)\n\nI'd love feedback on the classification model — are five kinds the right number? Are there tool types that don't fit cleanly? And if you're building agents that take real-world actions, I'm curious what failure modes you've hit.",
+      "is_original_content": false,
+      "link_flair_text": null,
+      "permalink": "https://reddit.com/r/LangChain/comments/1rvc3wv/i_built_a_crash_recovery_layer_for_langgraph_your/",
+      "domain": "self.LangChain",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "oarf3cm",
+          "author": "carlosssssy",
+          "text": "I do like your feedback!",
+          "score": 2,
+          "created_utc": "2026-03-16 15:15:26",
+          "is_submitter": true,
+          "replies": []
+        },
+        {
+          "id": "oat0ofw",
+          "author": "ReplacementKey3492",
+          "text": "we hit this exact crash pattern last year on a multi-step email+calendar workflow. ended up building something similar manually - tracking side effects in a separate table before executing them.\n\nthe WAL framing is right. one thing worth checking: idempotency key generation scope. we had a subtle bug where retrying within the same run window regenerated the key per-restart rather than per-step, which defeated the whole thing. is yours keyed per-step or per-run?",
+          "score": 1,
+          "created_utc": "2026-03-16 19:48:12",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "oax6i1w",
+              "author": "carlosssssy",
+              "text": "That's almost exactly the bug we designed around — appreciate you sharing it.   \n  \nTo answer directly: idempotency keys are scoped per-step, not per-run. The key is computed from the tool's input arguments via a user-supplied function (idempotency\\_key\\_fn(&input)), then stored on the IntentRecord in the WAL before execution.   \n  \nOn restart/recovery, the system recomputes the key from the current input and looks it up against the WAL by (execution\\_id, idempotency\\_key) — if a prior completion exists with that key, it returns the sealed result immediately without re-executing.   \n  \nSo the flow is:   \n1. Agent calls execute(\"upsert\\_event\", {id: \"evt-123\", ...})   \n2. idempotency\\_key\\_fn extracts \"evt-123\" from input   \n3. WAL check: any prior intent with key \"evt-123\" in this execution? - Yes + completed → return sealed response (no re-execution) - Yes + no completion → crashed mid-flight, replay (safe because idempotent) - No → write intent, execute, write completion   \n4. On restart: same key is recomputed from the same input, same WAL lookup fires The key never changes between restarts because it's derived from the input args, not from run metadata or timestamps. That's exactly the bug you hit — if the key incorporates any per-restart state (retry counter, timestamp, new UUID), it becomes a different key and the dedup breaks silently.",
+              "score": 1,
+              "created_utc": "2026-03-17 12:43:39",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "oat8de3",
+          "author": "Dense-Coyote-2375",
+          "text": "This is exactly the kind of unsexy but critical infrastructure the agent space needs right now. We see so many demos of agents doing cool things, but the moment you put them in production, duplicate side effects (like sending emails twice or double-charging APIs) become a massive headache.The five-way EffectKind classification is elegant — I especially appreciate the honest design decision around IrreversibleWrite with no completion record. Admitting uncertainty and routing to RequireHumanReview rather than silently retrying or skipping is the right call, even if it feels less \"magical.\"Did you implement the state checkpointing entirely within the LangGraph state, or is effect-log maintaining its own separate WAL independent of LangGraph's built-in checkpointer? I've been looking at integrating Temporal with LangGraph for exactly this problem, but a lightweight native layer like this sounds much cleaner for most use cases that don't need full distributed workflow orchestration.",
+          "score": 0,
+          "created_utc": "2026-03-16 20:24:49",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "oax5sqj",
+              "author": "carlosssssy",
+              "text": "Thanks for the kind words! You're right that this is the boring-but-essential plumbing — we kept seeing teams build impressive agent demos that would silently double-charge or send duplicate emails the moment anything went sideways in production.   \n  \nTo answer your question: effect-log maintains its own separate WAL, completely independent of LangGraph's built-in checkpointer. It uses a cursor-based two-record design (IntentRecord written before execution, CompletionRecord written after).   \n  \nThe gap between the two is what detects crashes. Storage is pluggable — SQLite in WAL mode by default, but the EffectStore trait can be backed by anything.   \n  \nWe deliberately kept it decoupled from any framework's internal state for two reasons:   \n1. Framework-agnostic — the same WAL works across LangGraph, CrewAI, OpenAI Agents SDK, Pydantic AI, Anthropic Claude API, and Bub. No framework lock-in.   \n2. Semantic, not positional — LangGraph's checkpointer knows graph state but doesn't understand what kind of side effect a tool represents. effect-log adds that semantic layer (the 5-way classification) so recovery decisions are based on the nature of the operation, not just \"did this node run.\"",
+              "score": 1,
+              "created_utc": "2026-03-17 12:39:28",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        }
+      ]
+    },
+    {
       "id": "1rtop6d",
       "title": "SuperML: A plugin that gives coding agents expert-level ML knowledge with agentic memory (60% improvement vs. Claude Code)",
       "subreddit": "LangChain",
       "url": "https://www.reddit.com/r/LangChain/comments/1rtop6d/superml_a_plugin_that_gives_coding_agents/",
       "author": "alirezamsh",
       "created_utc": "2026-03-14 17:03:18",
-      "score": 10,
+      "score": 9,
       "num_comments": 3,
-      "upvote_ratio": 0.92,
+      "upvote_ratio": 0.91,
       "text": "Hey everyone, I’ve been working on **SuperML**, an open-source plugin designed to handle ML engineering workflows. I wanted to share it here and get your feedback.\n\nKarpathy’s new autoresearch repo perfectly demonstrated how powerful it is to let agents autonomously iterate on training scripts overnight. SuperML is built completely in line with this vision. It’s a plugin that hooks into your existing coding agents to give them the agentic memory and expert-level ML knowledge needed to make those autonomous runs even more effective.\n\nYou give the agent a task, and the plugin guides it through the loop:\n\n* **Plans & Researches:** Runs deep research across the latest papers, GitHub repos, and articles to formulate the best hypotheses for your specific problem. It then drafts a concrete execution plan tailored directly to your hardware.\n* **Verifies & Debugs:** Validates configs and hyperparameters *before* burning compute, and traces exact root causes if a run fails.\n* **Agentic Memory:** Tracks hardware specs, hypotheses, and lessons learned across sessions. Perfect for overnight loops so agents compound progress instead of repeating errors.\n* **Background Agent** (ml-expert): Routes deep framework questions (vLLM, DeepSpeed, PEFT) to a specialized background agent. Think: end-to-end QLoRA pipelines, vLLM latency debugging, or FSDP vs. ZeRO-3 architecture decisions.\n\n**Benchmarks:** We tested it on 38 complex tasks (Multimodal RAG, Synthetic Data Gen, DPO/GRPO, etc.) and saw roughly a 60% higher success rate compared to Claude Code.\n\n**Repo:** [https://github.com/Leeroo-AI/superml](https://github.com/Leeroo-AI/superml)",
       "is_original_content": false,
       "link_flair_text": null,
@@ -1221,9 +1410,9 @@
       "url": "https://www.reddit.com/r/LangChain/comments/1ruwea6/we_added_googles_gemini_embedding_2_to_our_rag/",
       "author": "gabbr0",
       "created_utc": "2026-03-16 01:42:43",
-      "score": 10,
+      "score": 9,
       "num_comments": 3,
-      "upvote_ratio": 1.0,
+      "upvote_ratio": 0.92,
       "text": "We decided to add **Gemini Embedding 2** into our RAG pipeline to support text, images, audio, and video embeds.\n\nWe put together a example based on our implementation:    \n**Example**: [github.com/gabmichels/gemini-multimodal-search](https://github.com/gabmichels/gemini-multimodal-search)\n\nAnd we put together a small public workspace to see how it works. You can check our the pages that have the images and then query for the images.  \n**Live demo:** [multimodal-search-demo.kiori.co](https://multimodal-search-demo.kiori.co/)\n\nThe Github Repo is also fully ingested into the demo page. So you can also ask questions about the example repo there.  \n  \nA few limitations we ran into and still are exploring how to tackle this: audio embedding caps at 80 seconds, video at 128 seconds (longer files fall back to transcript search). Tiny text in images doesn't match well, OCR still wins there.\n\nWrote up the details if anyone wants to go deeper. architecture, cost trade-offs, what works and what doesn't: [kiori.co/en/blog/multimodal-embeddings-knowledge-systems](https://www.kiori.co/en/blog/multimodal-embeddings-knowledge-systems)",
       "is_original_content": false,
       "link_flair_text": null,
@@ -1253,99 +1442,63 @@
       ]
     },
     {
-      "id": "1rvc3wv",
-      "title": "I built a crash recovery layer for LangGraph — your agent won't send the same email twice",
+      "id": "1rqbfip",
+      "title": "I built a free static analyzer that catches prompt injection, jailbreaks, and PII leaks in your source code before they hit production",
       "subreddit": "LangChain",
-      "url": "https://www.reddit.com/r/LangChain/comments/1rvc3wv/i_built_a_crash_recovery_layer_for_langgraph_your/",
-      "author": "carlosssssy",
-      "created_utc": "2026-03-16 15:10:17",
-      "score": 10,
-      "num_comments": 4,
-      "upvote_ratio": 0.92,
-      "text": "[](https://github.com/xudong963/effect-log/blob/master/blog/show-hn.md#show-hn-effect-log--your-ai-agent-crashed-after-sending-the-email-now-what)Here's a scenario. Your AI agent is running a 5-step task. Step 3 sends an email to your CEO. Step 4 records that the email was sent. The process crashes between step 3 and step 4.\n\nNow what?\n\nThe email was sent. There's no record of it. You restart the agent. It replays from the beginning. The CEO gets the email twice.\n\nThis problem — ensuring exactly-once side effects across crashes — was solved decades ago in databases with write-ahead logs, and later in distributed systems with durable execution engines like Temporal. AI agent frameworks are starting to address it, but at the wrong level of abstraction. LangGraph, for example, checkpoints graph state between nodes and recently added a `tasks` API to persist individual operation results. But checkpointing and recovery are semantic-blind — a read and an email send get the same treatment. If you want to prevent an email from being re-sent on recovery, you wrap it in a task. If you want a database read to re-execute for fresh data, you... also wrap it in a task, but differently. There's no declaration that drives this automatically.\n\nI built [effect-log](https://github.com/xudong963/effect-log) to fix this.\n\n# The Key Insight: Not All Side Effects Are Equal\n\n[](https://github.com/xudong963/effect-log/blob/master/blog/show-hn.md#the-key-insight-not-all-side-effects-are-equal)\n\nMost recovery systems treat all operations the same — either replay everything or checkpoint opaquely. But a read and a payment are fundamentally different, and a crash recovery system should treat them differently.\n\neffect-log requires every tool to declare its **effect kind** at registration time. There are five:\n\n|EffectKind|What It Means|Examples|\n|:-|:-|:-|\n|`ReadOnly`|Pure read, no mutation|File reads, DB queries, GET requests|\n|`IdempotentWrite`|Safe to replay with same key|PUT/upsert, Stripe charges with idempotency keys|\n|`Compensatable`|Reversible — has a known undo|Creating a VM (undo: delete it), booking a seat (undo: cancel)|\n|`IrreversibleWrite`|Cannot be undone once done|Sending emails, fund transfers, deployments|\n|`ReadThenWrite`|Reads state, then mutates based on what was read|Read-modify-write cycles|\n\nThis classification is the single piece of metadata that drives all recovery behavior. You declare it once per tool, and the system handles the rest.\n\n# How It Works\n\n[](https://github.com/xudong963/effect-log/blob/master/blog/show-hn.md#how-it-works)\n\neffect-log maintains a write-ahead log with two record types:\n\n1. **Intent** — written *before* a tool executes (what we're about to do)\n2. **Completion** — written *after* it finishes (what happened)\n\nAn intent without a matching completion is the signature of a crash. That gap is what triggers the recovery engine.\n\n    from effect_log import EffectKind, EffectLog, ToolDef\n    \n    tools = [\n        ToolDef(\"fetch_data\",  EffectKind.ReadOnly,         fetch_data_fn),\n        ToolDef(\"send_email\",  EffectKind.IrreversibleWrite, send_email_fn),\n        ToolDef(\"upsert_db\",   EffectKind.IdempotentWrite,   upsert_fn),\n    ]\n    \n    # Normal execution\n    log = EffectLog(execution_id=\"task-001\", tools=tools, storage=\"sqlite:///effects.db\")\n    \n    data = log.execute(\"fetch_data\",  {\"source\": \"https://api.example.com/daily-report\"})\n    log.execute(\"send_email\",  {\"to\": \"ceo@co.com\", \"subject\": data[\"title\"], \"body\": data[\"report\"]})\n    log.execute(\"upsert_db\",   {\"id\": data[\"report_id\"], \"status\": \"sent\", \"sent_to\": \"ceo@co.com\"})\n\nNotice how the output of `fetch_data` flows into `send_email` and `upsert_db`. This is the normal case — each step depends on the previous one.\n\nIf the process crashes after `send_email` but before `upsert_db`, recovery looks like this:\n\n    # Recovery — same code, just add recover=True\n    log = EffectLog(execution_id=\"task-001\", tools=tools,\n                    storage=\"sqlite:///effects.db\", recover=True)\n    \n    # Step 1: ReadOnly + completed → Replayed (re-fetches fresh data from the API)\n    data = log.execute(\"fetch_data\",  {\"source\": \"https://api.example.com/daily-report\"})\n    \n    # Step 2: IrreversibleWrite + completed → SEALED (returns stored result, function never called)\n    log.execute(\"send_email\",  {\"to\": \"ceo@co.com\", \"subject\": data[\"title\"], \"body\": data[\"report\"]})\n    \n    # Step 3: IdempotentWrite + no completion → Executes normally (picks up where we left off)\n    log.execute(\"upsert_db\",   {\"id\": data[\"report_id\"], \"status\": \"sent\", \"sent_to\": \"ceo@co.com\"})\n\nThree tools, three different recovery behaviors — all driven by the effect kind declared at registration time. `fetch_data` re-executes for fresh data because reads are safe to repeat. `send_email` returns the sealed result from the first run — the function is never called again, no duplicate email. `upsert_db` executes normally because it never ran in the first place.\n\n# The Recovery Matrix\n\n[](https://github.com/xudong963/effect-log/blob/master/blog/show-hn.md#the-recovery-matrix)\n\nThe recovery engine is a pure function — no I/O, no side effects. It takes an intent record, an optional completion record, and returns one of four actions:\n\n    pub fn recovery_strategy(\n        record: &IntentRecord,\n        completion: Option<&CompletionRecord>,\n        read_policy: ReadRecoveryPolicy,\n    ) -> RecoveryAction {\n        match (&record.effect_kind, completion) {\n            // Completed effects → return sealed result\n            (EffectKind::IrreversibleWrite, Some(_)) => ReturnSealed,\n            (EffectKind::IdempotentWrite, Some(_))   => ReturnSealed,\n            (EffectKind::Compensatable, Some(_))     => ReturnSealed,\n            (EffectKind::ReadThenWrite, Some(_))     => ReturnSealed,\n    \n            // ReadOnly completed → depends on policy\n            (EffectKind::ReadOnly, Some(_)) => match read_policy {\n                ReplayFresh  => Replay,       // get fresh data\n                ReturnSealed => ReturnSealed, // consistency with downstream writes\n            },\n    \n            // No completion = crashed during execution\n            (EffectKind::ReadOnly, None)          => Replay,\n            (EffectKind::IdempotentWrite, None)   => Replay,\n            (EffectKind::Compensatable, None)     => CompensateThenReplay,\n            (EffectKind::IrreversibleWrite, None) => RequireHumanReview,\n            (EffectKind::ReadThenWrite, None)     => RequireHumanReview,\n        }\n    }\n\nThe entire recovery logic fits in one screen. Every branch is exhaustive. Every combination of (effect kind, completion status) maps to exactly one action.\n\n# The Hardest Design Decision: Honest Uncertainty\n\n[](https://github.com/xudong963/effect-log/blob/master/blog/show-hn.md#the-hardest-design-decision-honest-uncertainty)\n\nWhen an `IrreversibleWrite` has an intent record but no completion, effect-log does not guess. It does not retry. It returns `RequireHumanReview`.\n\nWhy? Because we genuinely don't know what happened. The email might have been sent (SMTP accepted it, then we crashed before writing the completion). Or the process might have crashed before the email left. There is no way to tell from the local log alone.\n\nThis is the [Two Generals' Problem](https://en.wikipedia.org/wiki/Two_Generals%27_Problem). You cannot distinguish \"succeeded then crashed\" from \"crashed before succeeding\" without an acknowledgment that was itself lost in the crash.\n\nMost systems either silently retry (risking duplicates) or silently skip (risking data loss). effect-log chooses a third path: *admit uncertainty and ask a human*. This is the most important design decision in the entire system.\n\nFor `Compensatable` effects, we have a better option: call the registered undo function first, then replay. If you crash while creating a VM, we delete the possibly-created VM, then create a fresh one. This is safe because the compensation is designed to be idempotent — deleting a non-existent VM is a no-op.\n\n# What This Is NOT\n\n[](https://github.com/xudong963/effect-log/blob/master/blog/show-hn.md#what-this-is-not)\n\nI want to be explicit about scope, because the most common reaction to projects like this is \"just use Temporal.\"\n\n**Not a workflow engine.** effect-log doesn't schedule, order, or coordinate tool calls. Your agent framework (LangGraph, CrewAI, OpenAI SDK, whatever) owns control flow. effect-log just logs and recovers tool calls within that flow.\n\n**Not distributed transactions.** No two-phase commit, no consensus protocol. effect-log runs in-process with a local SQLite WAL.\n\n**Not a replacement for Temporal or Restate.** If you already run Temporal, great — effect-log could be a complementary semantic layer. Temporal knows step 5 completed; effect-log knows step 5 was an irreversible email send and shouldn't be replayed.\n\n# Architecture\n\n[](https://github.com/xudong963/effect-log/blob/master/blog/show-hn.md#architecture)\n\n    Agent Framework (LangGraph / CrewAI / OpenAI SDK / custom)\n             │\n        ┌────▼────┐\n        │effect-log│ ← 5 effect kinds × recovery matrix\n        └────┬────┘\n             │ Intent (before) / Completion (after)\n        ┌────▼────┐\n        │ Storage  │ ← SQLite (default), in-memory (test), pluggable\n        └─────────┘\n    \n\nCore is \\~1200 lines of Rust. Python bindings via PyO3. SQLite with WAL mode for durability. The storage trait is pluggable — you could back it with RocksDB, S3, or Restate's journal.\n\nEach tool call gets a monotonically increasing sequence number within an execution. Recovery matches resumed calls to WAL entries by `(execution_id, sequence_number)`, not by argument hashing. This avoids subtle bugs when the agent re-derives arguments slightly differently on the second run (floating-point formatting, key ordering, etc.).\n\n# Current Status\n\n[](https://github.com/xudong963/effect-log/blob/master/blog/show-hn.md#current-status)\n\n**What works today:**\n\n* Rust core library with full recovery engine\n* SQLite and in-memory storage backends\n* Python bindings (PyO3 + maturin)\n* Middleware for LangGraph, OpenAI Agents SDK, CrewAI\n* Parallel tool call support\n* Idempotency key deduplication\n* Crash recovery end-to-end demo\n\n**What's coming:**\n\n* TypeScript bindings (napi-rs) for Vercel AI SDK\n* RocksDB and S3 storage backends\n* Auto-inference of effect kind from HTTP methods (GET → ReadOnly, PUT → IdempotentWrite, etc.)\n\n# The Bet\n\n[](https://github.com/xudong963/effect-log/blob/master/blog/show-hn.md#the-bet)\n\nI'm betting that as AI agents move from demos to production, side-effect reliability becomes a hard requirement. Today, most agent frameworks assume tool calls are pure functions. They're not. A `send_email` call that executes twice because of a restart is not a bug in the agent's logic — it's a bug in the infrastructure.\n\nThe five-way classification isn't original. Database people will recognize it as a simplification of transaction isolation levels. Distributed systems people will see echoes of saga patterns. The contribution is packaging this into a library that an AI agent developer can adopt in ten minutes.\n\n**Code:** [https://github.com/xudong963/effect-log](https://github.com/xudong963/effect-log)\n\nI'd love feedback on the classification model — are five kinds the right number? Are there tool types that don't fit cleanly? And if you're building agents that take real-world actions, I'm curious what failure modes you've hit.",
+      "url": "https://www.reddit.com/r/LangChain/comments/1rqbfip/i_built_a_free_static_analyzer_that_catches/",
+      "author": "meghal86",
+      "created_utc": "2026-03-10 22:17:51",
+      "score": 9,
+      "num_comments": 10,
+      "upvote_ratio": 1.0,
+      "text": "If you're building LLM apps with LangChain, you're writing prompt strings in your source code. Those strings can contain:\n\n* Jailbreak patterns (`\"act as DAN with no restrictions\"`)\n* Unbounded personas (`\"act as an expert\"` with no constraints)\n* PII/API key exposure (`sk-...` hardcoded in a prompt)\n* RAG injection vectors (`{user_input}` passed raw to retrieval)\n* Base64 and Unicode homoglyph evasion attempts\n\nNone of that gets caught at runtime. It ships silently.\n\nI built **PromptSonar** — a free, local, zero-API-call static scanner that runs in VS Code, the CLI, and GitHub Actions. It scans your TypeScript, Python, Go, Rust, Java, and C# source files for prompt vulnerabilities using Tree-sitter AST + regex, maps findings to OWASP LLM Top 10, and gives you a 7-pillar health score.\n\n**What it detects (21 rules across 7 pillars):**\n\n* 🔴 CRITICAL: Jailbreak resets, jailbreak modes, API key exposure, PII patterns\n* 🟠 HIGH: Unbounded personas, unbounded access scope, RAG injection, bias indicators\n* 🟡 MEDIUM: Missing output format, token waste, vague instructions\n* 🔵 LOW: Missing persona, no few-shot examples, no chain-of-thought\n\n**Evasion detection (verified):**\n\n* Base64 encoded jailbreaks — decoded before pattern match ✅\n* Cyrillic homoglyph substitution (`Іgnore аll prevіous іnstructions`) ✅\n* Zero-width character injection (U+200B) ✅\n\n**Three ways to use it:**\n\n1. VS Code extension — squiggles + hover + one-click fixes as you type\n2. CLI — `promptsonar scan ./src --json --fail-on=critical`\n3. GitHub Action — blocks PRs that introduce critical findings, posts findings table as PR comment, uploads SARIF to GitHub Security tab\n\nEverything runs locally. Zero telemetry. Zero LLM calls during scan.\n\n**Links:**\n\n* VS Code Marketplace: [https://marketplace.visualstudio.com/items?itemName=promptsonar-tools.promptsonar](https://marketplace.visualstudio.com/items?itemName=promptsonar-tools.promptsonar)\n* npm: `npx` u/promptsonar`/cli scan ./src`\n* GitHub: [https://github.com/meghal86/promptsonar](https://github.com/meghal86/promptsonar)\n\nHappy to answer questions about how the detection works or what's on the roadmap.",
       "is_original_content": false,
       "link_flair_text": null,
-      "permalink": "https://reddit.com/r/LangChain/comments/1rvc3wv/i_built_a_crash_recovery_layer_for_langgraph_your/",
+      "permalink": "https://reddit.com/r/LangChain/comments/1rqbfip/i_built_a_free_static_analyzer_that_catches/",
       "domain": "self.LangChain",
       "is_self": true,
       "comments": [
         {
-          "id": "oarf3cm",
-          "author": "carlosssssy",
-          "text": "I do like your feedback!",
-          "score": 1,
-          "created_utc": "2026-03-16 15:15:26",
-          "is_submitter": true,
-          "replies": []
-        },
-        {
-          "id": "oarfnpg",
-          "author": "carlosssssy",
-          "text": "Also, there is a PR working on \"Auto-classify EffectKind\"\n\n[https://github.com/xudong963/effect-log/pull/8](https://github.com/xudong963/effect-log/pull/8)",
-          "score": 1,
-          "created_utc": "2026-03-16 15:18:11",
-          "is_submitter": true,
-          "replies": []
-        },
-        {
-          "id": "oat0ofw",
-          "author": "ReplacementKey3492",
-          "text": "we hit this exact crash pattern last year on a multi-step email+calendar workflow. ended up building something similar manually - tracking side effects in a separate table before executing them.\n\nthe WAL framing is right. one thing worth checking: idempotency key generation scope. we had a subtle bug where retrying within the same run window regenerated the key per-restart rather than per-step, which defeated the whole thing. is yours keyed per-step or per-run?",
-          "score": 1,
-          "created_utc": "2026-03-16 19:48:12",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oat8de3",
-          "author": "Dense-Coyote-2375",
-          "text": "This is exactly the kind of unsexy but critical infrastructure the agent space needs right now. We see so many demos of agents doing cool things, but the moment you put them in production, duplicate side effects (like sending emails twice or double-charging APIs) become a massive headache.The five-way EffectKind classification is elegant — I especially appreciate the honest design decision around IrreversibleWrite with no completion record. Admitting uncertainty and routing to RequireHumanReview rather than silently retrying or skipping is the right call, even if it feels less \"magical.\"Did you implement the state checkpointing entirely within the LangGraph state, or is effect-log maintaining its own separate WAL independent of LangGraph's built-in checkpointer? I've been looking at integrating Temporal with LangGraph for exactly this problem, but a lightweight native layer like this sounds much cleaner for most use cases that don't need full distributed workflow orchestration.",
-          "score": 0,
-          "created_utc": "2026-03-16 20:24:49",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
-      "id": "1rpuoxz",
-      "title": "My LangChain agent used to repeat the same mistakes every run. Added persistent memory — now it learns from failures automatically.",
-      "subreddit": "LangChain",
-      "url": "https://www.reddit.com/r/LangChain/comments/1rpuoxz/my_langchain_agent_used_to_repeat_the_same/",
-      "author": "No_Advertising2536",
-      "created_utc": "2026-03-10 11:45:16",
-      "score": 9,
-      "num_comments": 5,
-      "upvote_ratio": 0.91,
-      "text": "**Problem:** Built an agent with LangChain. Works great for one session. Next session — starts from zero. Makes the same wrong API calls, tries the same broken approaches, forgets everything I told it.\n\n`ConversationBufferMemory` doesn't help — it only works within a single session.\n\nI added **Mengram** as a persistent memory layer. Now after every run:\n\nPython\n\n    from mengram import Mengram\n    \n    m = Mengram()  # Free API key at mengram.io\n    \n    # After agent finishes — store what happened\n    m.add([\n        {\"role\": \"user\", \"content\": \"Deploy to prod\"},\n        {\"role\": \"assistant\", \"content\": \"Failed — forgot DB migrations. Fixed by adding pre-deploy step.\"},\n    ])\n    \n    # Next run — agent recalls past experience\n    context = m.search_all(\"deploy to production\")\n    # → returns facts, past failures, and evolved step-by-step workflows\n    \n\n**The part that surprised me:** It doesn't just store raw text. It extracts 3 types of memory modeled after human cognition:\n\n|**Type**|**What it remembers**|**Example**|\n|:-|:-|:-|\n|**Facts**|Preferences, configs|\"Uses Python 3.12, deploys to Railway\"|\n|**Episodes**|What happened|\"Deploy failed March 5, OOM on build step\"|\n|**Procedures**|Workflows that evolve|v1 failed → v2 adds migration check → works|\n\nWhen a procedure fails, it **auto-updates**. Next run, the agent uses the fixed version without me doing anything manually.\n\n**Real world result:** One user connected this to an autonomous agent running 24/7. After 50+ cycles, the agent's success rate went up significantly — it learned which approaches work for different edge cases and stopped repeating \"dead-end\" strategies.\n\nDrop-in LangChain retriever included. Open source (Apache 2.0).\n\n**GitHub:**[https://github.com/alibaizhanov/mengram](https://github.com/alibaizhanov/mengram)\n\n**Docs:**[https://mengram.io](https://mengram.io/)",
-      "is_original_content": false,
-      "link_flair_text": "Resources",
-      "permalink": "https://reddit.com/r/LangChain/comments/1rpuoxz/my_langchain_agent_used_to_repeat_the_same/",
-      "domain": "self.LangChain",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "o9nvsad",
-          "author": "ar_tyom2000",
-          "text": "That's an interesting approach to enhancing your agent! I built [LangGraphics](https://github.com/proactive-agent/langgraphics) specifically for scenarios like this, so you can visualize your LangChain agent's execution path and understand why it fails. It provides a real-time visualization of your agent's decision-making process, showing which branches were taken and where it got stuck. This might help fine-tune that persistent memory implementation.",
-          "score": 1,
-          "created_utc": "2026-03-10 13:08:30",
+          "id": "o9r9uw6",
+          "author": "Additional_Round6721",
+          "text": "Static analysis at the source level is the right first line of defense catching hardcoded API keys and jailbreak patterns before they ship is a problem worth solving.\nThe gap it doesn't close: prompt content that looks clean in source but becomes dangerous at runtime. User-controlled inputs, dynamic RAG injections, tool call outputs that arrive as valid-looking JSON but with hallucinated parameters. None of that exists in your source files to scan.\nStatic + runtime together is the right architecture. You catch what you can see at write-time, then certify what the agent actually produces before it executes. Curious whether you've thought about the runtime side or intentionally scoped to pre-deploy only.",
+          "score": 2,
+          "created_utc": "2026-03-10 23:10:57",
           "is_submitter": false,
           "replies": [
             {
-              "id": "o9oa9er",
-              "author": "No_Advertising2536",
-              "text": "Cool project! Visualization and memory actually complement each other well — you debug why the agent failed, we make sure it remembers the fix so it doesn't fail the same way twice. The combo of seeing the execution path+ storing the lesson learned would be powerful for complex agents.",
+              "id": "o9scu9n",
+              "author": "meghal86",
+              "text": "This is exactly right and I’d rather acknowledge it directly than oversell what static analysis can do.\nStatic catches what exists at write-time: hardcoded patterns, structural issues, evasion attempts in source. It doesn’t see what gets constructed at runtime from user input, RAG retrievals, or tool call outputs. That gap is real and it’s documented in the Known Limitations section.\nThe intended architecture is layered — static analysis as the pre-deploy gate (what this tool does), runtime interception as the production guard (what something like a prompt firewall or output validator does). Neither replaces the other.\nRuntime is on the roadmap. The design I’m working toward is a lightweight SDK that instruments your LLM calls and applies the same rule engine to actual prompt content at execution time — before it hits the model and before the response is consumed. The static scanner generates a Prompt SBOM (CycloneDX format) that the runtime layer can use as a baseline to detect drift between what was reviewed and what actually executes. ",
+              "score": 1,
+              "created_utc": "2026-03-11 02:47:16",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "o9rnj3e",
+          "author": "StillBeginning1096",
+          "text": "Thanks for sharing. Curious whether you have any metrics around detection accuracy broken down by rule, specifically false positive and true positive rates etc.\n\nI work with Google's Model Armor at work, which acts as a screening layer around the model, it intercepts prompts before they reach the LLM and screens responses on the way out. When the product is turned up to full detection, it flags nearly everything as false positives. \n\nSo accuracy metrics are something I always look for now. It may be an apples and oranges comparison, but I hate dealing with Sonar fixes especially when you're puzzled why the code was flagged. Thanks again for sharing.",
+          "score": 1,
+          "created_utc": "2026-03-11 00:25:58",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o9sco9f",
+              "author": "meghal86",
+              "text": "Great question and totally fair bar to hold this to. Current measured false positive rates on the validation suite:\n\t∙\tC1/C2 jailbreak rules: ~4% FP — the main source is variable names like ignoreErrors() or ignoredFields which the detector filters by checking whether the string is actually a prompt context\n\t∙\tC3 API key: ~2% FP — short sk- strings under 20 chars are excluded, and keys in API client config (not prompt strings) are not flagged\n\t∙\tH1 unbounded persona: ~8% FP — this is the noisiest rule, fires on act as without constraints, working on tightening the constraint window\n\t∙\tH4 RAG injection: ~3% FP — suppressed when validated, sanitized, or filtered appears within 100 chars of the match\nThe Model Armor comparison is fair to raise but you’re right it’s apples and oranges — runtime interception at full sensitivity is a different problem than pre-deploy static analysis. The goal here is zero friction for clean code, not exhaustive coverage. Closer to ESLint than a WAF.\nFalse negative rate (things it misses) is the more honest limitation — concatenated string assembly and runtime-constructed prompts are explicitly out of scope for v1. That’s documented in the README Known Limitations.\nI’m working on publishing a formal accuracy report with per-rule TP/FP/FN numbers. Will share when it’s ready.",
               "score": 2,
-              "created_utc": "2026-03-10 14:27:03",
+              "created_utc": "2026-03-11 02:46:17",
               "is_submitter": true,
               "replies": [
                 {
-                  "id": "o9obfcb",
-                  "author": "ar_tyom2000",
-                  "text": "Yeah! It's a standalone library with a single-line integration (no refactoring required). I was recommending that you use it for debugging your agent workflow, but you can integrate it as a feature to mengram :)",
+                  "id": "o9sgsky",
+                  "author": "StillBeginning1096",
+                  "text": "Really appreciate the transparency on the per-rule FP rates. That's exactly the kind of detail that builds confidence in a tool like this. The H1 unbounded persona rule at 8% makes sense as the noisiest one, that's a hard pattern to disambiguate statically.\n\nYour point about false negatives being the more honest limitation is well taken. In our setup prompts are assembled dynamically at runtime from multiple sources, so static analysis can only catch what's visible in the source. That's exactly where runtime screening like Model Armor fills the gap. The two approaches are complementary.\n\nLooking forward to the formal accuracy report. Will definitely be taking this for a spin.",
                   "score": 1,
-                  "created_utc": "2026-03-10 14:33:05",
+                  "created_utc": "2026-03-11 03:11:21",
                   "is_submitter": false,
                   "replies": []
                 }
@@ -1354,21 +1507,31 @@
           ]
         },
         {
-          "id": "o9o2lfg",
-          "author": "Ni2021",
-          "text": "Learning from failures is the right goal. The key question is how you weight old failures vs recent ones — a mistake from 30 days ago might not be relevant anymore, but a mistake from yesterday definitely is.\n\n\n\nOne approach that works well: ACT-R activation scoring. Instead of treating all stored failures equally, each memory has an activation based on when and how often it was accessed: B = ln(Σ t\\_k\\^(-0.5)). Recent, frequently-recalled failures surface first. Old ones that never came up again naturally decay.\n\n\n\nThis also prevents the \"memory bloat\" problem where you accumulate thousands of failure memories and retrieval gets noisy. The cognitive decay acts as a natural garbage collector.\n\n\n\nHow are you handling retrieval ranking as the failure memory grows?",
+          "id": "o9ysp3y",
+          "author": "Whole-Net-8262",
+          "text": "Static analysis for prompt security is an underserved gap. Most teams only discover these issues when something breaks in production, if they discover them at all. The OWASP LLM Top 10 mapping and the evasion detection (especially homoglyph and zero-width character injection) are the parts that stand out here.\n\nThe GitHub Action integration is the right place for this. Security checks that don't block PRs don't get taken seriously.\n\nOne thing worth pairing with this: catching bad prompts before they ship is necessary but not sufficient. You also need to know whether prompt changes actually improve or degrade your pipeline's eval metrics. Teams using `rapidfireai` can run multi-config evals across prompt variants systematically, so once PromptSonar gives your prompt a clean bill of health, you're not just shipping something safe but something you've actually measured performs better than what it replaced.\n\nGood tooling. The local, zero-telemetry constraint will matter a lot for enterprise adoption.\n\n",
           "score": 1,
-          "created_utc": "2026-03-10 13:46:42",
+          "created_utc": "2026-03-12 01:54:41",
           "is_submitter": false,
           "replies": [
             {
-              "id": "o9oaogm",
-              "author": "No_Advertising2536",
-              "text": "Great question — we actually implement something very close to ACT-R.\n\n**For Semantic Memory (facts):** We use a decay function inspired by the Ebbinghaus forgetting curve:\n\n`importance * e^(-0.03 * days)`, plus a frequency boost from `log(1 + access_count)`.\n\nEvery retrieval resets the decay clock. This way, old, never-accessed facts naturally sink to the bottom, while frequently-recalled ones stay \"sharp\" and top-of-mind.\n\n**For Procedural Memory:** We take a different approach: instead of decaying old failures, procedures **evolve**. A failure triggers a new version with the fix baked in — so the lesson is absorbed into the workflow itself, not just stored as a loose event.\n\n**The result:** This combo handles the \"memory bloat\" problem you mentioned. Decay acts as a natural garbage collection for facts, while procedure evolution compresses failures into improved, production-ready workflows.",
+              "id": "o9yyqrr",
+              "author": "meghal86",
+              "text": "Really appreciate this — the \"security checks that don't block \nPRs don't get taken seriously\" framing is exactly right, and \nit's why the GitHub Action was a day-one deliverable rather \nthan an afterthought.\n\nYour point about eval metrics is the natural next layer. \nPromptSonar answers \"is this prompt safe to ship?\" — it \ndoesn't answer \"is this prompt better than what it replaces?\" \nThose are complementary questions and a complete workflow \nneeds both gates. Will check out rapidfireai for that piece.\n\nThe enterprise zero-telemetry constraint keeps coming up. \nMost teams I've talked to have data governance requirements \nthat make cloud-scanning a non-starter before they even \nevaluate features. Running locally removes that blocker \nentirely.\n\nWhat eval metrics are you tracking most closely for prompt \nchanges — task accuracy, latency, hallucination rate?\n",
               "score": 1,
-              "created_utc": "2026-03-10 14:29:12",
+              "created_utc": "2026-03-12 02:29:46",
               "is_submitter": true,
-              "replies": []
+              "replies": [
+                {
+                  "id": "o9zq0l7",
+                  "author": "Whole-Net-8262",
+                  "text": "hallucination rate, latency and task success.",
+                  "score": 1,
+                  "created_utc": "2026-03-12 05:44:07",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
             }
           ]
         }
@@ -1382,8 +1545,8 @@
       "author": "Algolyra",
       "created_utc": "2026-03-14 18:22:27",
       "score": 8,
-      "num_comments": 11,
-      "upvote_ratio": 0.91,
+      "num_comments": 12,
+      "upvote_ratio": 1.0,
       "text": "Building a LangChain app and the API bill is getting uncomfortable. Curious what people are actually doing  prompt caching, model switching, batching?\n\nWhat's worked for you?",
       "is_original_content": false,
       "link_flair_text": null,
@@ -1395,7 +1558,7 @@
           "id": "oah48fx",
           "author": "mrtrly",
           "text": "been through this exact spiral. here's what actually moved the needle for us:\n\n**prompt caching** helps but it's maybe 20-30% savings depending on your use case. the real problem is most apps send every request to the same expensive model regardless of complexity.\n\n**model routing** is where the biggest savings come from. a classification/extraction call doesn't need opus or gpt-4o — haiku or gpt-4o-mini handles it fine at 1/30th the cost. the trick is automating the routing decision so you're not manually tagging every call.\n\n**batching** is underrated for non-real-time workloads. if you can queue up embedding or classification jobs and run them in batch, most providers give you a significant discount.\n\nwhat i ended up building was a local proxy that sits between my langchain app and the API. it classifies request complexity automatically and routes to the cheapest model that can handle it. for mixed workloads (some simple extraction, some complex reasoning), it typically cuts 40-60% off the bill.\n\nthe uncomfortable truth: most cost optimization advice is about prompt engineering tweaks. the actual lever is just not sending simple requests to expensive models.",
-          "score": 9,
+          "score": 10,
           "created_utc": "2026-03-14 22:14:11",
           "is_submitter": false,
           "replies": [
@@ -1433,7 +1596,7 @@
           "id": "oak7xsm",
           "author": "Used-Knowledge-4421",
           "text": "Everyone focuses on making each call cheaper, but nobody asks why the agent is making 14 calls when it only needs 4.\n\nI tracked one of my runs. Agent searched \"refund policy\", got results. Then searched \"refund policy EU\", \"refund policy EU returns\", \"refund policy EU Germany 2024.\" Each one is technically a different prompt so caching won't catch it. Each one triggers a new reasoning step plus a tool API call. That's 10 wasted round trips of tokens.\n\nThen there's the retry spiral. Tool returns a 500, agent reasons about the error, tries again, another 500, reasons again. Four cycles of reasoning tokens before it gives up.\n\nYou can optimize per-call cost all day. But if 70% of your calls are the agent going in circles, you're optimizing the bill for work that shouldn't be happening.",
-          "score": 5,
+          "score": 4,
           "created_utc": "2026-03-15 12:24:41",
           "is_submitter": false,
           "replies": [
@@ -1481,6 +1644,15 @@
           "text": "something that helped us that isn't in this thread: monitoring what agents actually pass to each other\n\nin a multi-agent chain the anomaly rate on inter-agent messages is around 20% in a typical session. hallucinations, context collapse, bad state getting passed downstream. each one compounds into more tokens getting burned on bad work before a retry.\n\nfixing anomalies early reduced our retry rate and overall token burn more than i expected. it's a different layer from model routing but worth looking at if you're running multi-agent chains.\n\nopen source tool i built for this: github.com/Nomadu27/InsAIts",
           "score": 1,
           "created_utc": "2026-03-16 10:04:20",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oay17yd",
+          "author": "Angelic_Insect_0",
+          "text": "Here are some variants that might be useful for you:\n\n\n1. Model switching. Don’t send everything to the best/most expensive model. Use cheaper models for simple tasks and only use stronger ones when needed;\n\n\n2. Prompt and context trimming. Especially with RAG, people tend to over-send context. Cleaning that up can noticeably reduce costs;\n\n\n3. Caching. If users hit similar queries, caching responses helps a lot;\n\n\n4. Rate limits prevent the users from blowing up your bill.\n\n\nBatching helps in some cases, but for apps the best options are routing + smarter usage.\n\n\nI could recommend using a multi-model API layer instead of using one provider for everything.\nI use the LLM API AI platform. It lets you switch between models without changing your LangChain setup, route different queries to different models, compare cost vs performance across models, and avoid overpaying for tasks that don’t need a top-tier model",
+          "score": 1,
+          "created_utc": "2026-03-17 15:23:46",
           "is_submitter": false,
           "replies": []
         }
@@ -1599,148 +1771,22 @@
       ]
     },
     {
-      "id": "1rq8ljj",
-      "title": "I built a CLI that checks your AI agent for EU AI Act compliance — 20 checks, 90% automated, CycloneDX AI-BOM included",
+      "id": "1rss7yi",
+      "title": "I built an open-source Knowledge Discovery API — \n14 sources, LLM reranker, 8ms cache. \nHere's 60 seconds of it working live.",
       "subreddit": "LangChain",
-      "url": "https://www.reddit.com/r/LangChain/comments/1rq8ljj/i_built_a_cli_that_checks_your_ai_agent_for_eu_ai/",
-      "author": "Last-Spring-1773",
-      "created_utc": "2026-03-10 20:34:31",
+      "url": "https://www.reddit.com/r/LangChain/comments/1rss7yi/i_built_an_opensource_knowledge_discovery_api_14/",
+      "author": "Appropriate_West_879",
+      "created_utc": "2026-03-13 16:34:14",
       "score": 8,
-      "num_comments": 3,
-      "upvote_ratio": 0.79,
-      "text": "The EU AI Act high-risk deadline is August 2, 2026 and most teams building with LangChain, CrewAI, or the OpenAI SDK haven't started thinking about compliance.\n\nI built `air-blackbox` a Python CLI that runs 20 compliance checks against EU AI Act Articles 9-15, generates CycloneDX AI-BOMs from observed traffic, detects shadow AI (unapproved models), and produces signed evidence bundles for auditors.\n\nTry it:\n\n    pip install air-blackbox\n    air-blackbox demo\n    air-blackbox comply -v\n    \n\nIt's a reverse proxy + Python SDK. Route your AI traffic through it and everything is recorded, analyzed, and compliance-checked. HMAC-SHA256 audit chains, PII detection, prompt injection scanning.\n\nNot observability (that's Langfuse/Datadog). This is accountability, tamper-proof records + compliance mapping + evidence export.\n\nOpen source, Apache 2.0: [https://github.com/airblackbox/gateway](https://github.com/airblackbox/gateway)\n\nLooking for feedback, especially from teams building agents that sell into EU markets. What compliance checks would you add?",
-      "is_original_content": false,
-      "link_flair_text": "Announcement",
-      "permalink": "https://reddit.com/r/LangChain/comments/1rq8ljj/i_built_a_cli_that_checks_your_ai_agent_for_eu_ai/",
-      "domain": "self.LangChain",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "o9rnjqp",
-          "author": "Additional_Round6721",
-          "text": "The accountability layer is exactly right  tamper-proof audit chains matter when you're selling into regulated EU markets. The gap I'd flag: your evidence bundle proves what the agent *recorded*, not whether the agent's output was valid before it executed. HMAC-SHA256 on a hallucinated tool call is still a hallucinated tool call, just with a receipt.\n\nFor Articles 9-15 compliance, auditors are going to ask \"how do you ensure outputs meet defined specifications\" — that's a runtime certification question, not a logging question. The two layers are complementary: you prove what happened, ARU proves what was allowed to happen. [aru-runtime.com](http://aru-runtime.com)",
-          "score": 1,
-          "created_utc": "2026-03-11 00:26:04",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o9rqvyt",
-              "author": "Last-Spring-1773",
-              "text": "This is a sharp distinction and you're right — recording what happened ≠ validating what should have happened. The HMAC chain gives you a tamper-proof receipt, but a receipt for a hallucinated tool call is still a receipt for a bad decision.\n\nThe comply engine currently maps to Articles 9-15 from observed traffic patterns (20 checks, \\~90% auto-detected). Article 12 (record-keeping) is where the gateway is strongest — that's the audit chain, traceability, retention. Article 15 (robustness) is where the pre-execution validation gap lives.\n\nThe policy engine already does basic gating (cost limits, tool allowlists, rate limiting), but output validation against defined specs before execution is the logical next step. Think: schema validation on tool call arguments, output format checks, confidence thresholds before autonomous execution.\n\nAppreciate the feedback — this is exactly the kind of gap that's hard to see when you're deep in the build. The two layers (prove what happened + prove what was allowed) are complementary, not competing.",
-              "score": 1,
-              "created_utc": "2026-03-11 00:44:30",
-              "is_submitter": true,
-              "replies": [
-                {
-                  "id": "o9rxebl",
-                  "author": "Additional_Round6721",
-                  "text": "Exactly right  Article 15 is where the gap lives. Schema validation on tool call arguments before execution is the floor, not the ceiling. The harder problem is validating semantic correctness — right function, right format, but hallucinated values that pass schema checks and still corrupt downstream state. That's what ARU handles. Would genuinely be interested in exploring how the two layers fit together — the compliance case for pre-execution certification is strong, especially for teams selling into EU markets. DM if you want to dig into it.",
-                  "score": 1,
-                  "created_utc": "2026-03-11 01:20:41",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        }
-      ]
-    },
-    {
-      "id": "1rqbfip",
-      "title": "I built a free static analyzer that catches prompt injection, jailbreaks, and PII leaks in your source code before they hit production",
-      "subreddit": "LangChain",
-      "url": "https://www.reddit.com/r/LangChain/comments/1rqbfip/i_built_a_free_static_analyzer_that_catches/",
-      "author": "meghal86",
-      "created_utc": "2026-03-10 22:17:51",
-      "score": 7,
-      "num_comments": 10,
-      "upvote_ratio": 0.83,
-      "text": "If you're building LLM apps with LangChain, you're writing prompt strings in your source code. Those strings can contain:\n\n* Jailbreak patterns (`\"act as DAN with no restrictions\"`)\n* Unbounded personas (`\"act as an expert\"` with no constraints)\n* PII/API key exposure (`sk-...` hardcoded in a prompt)\n* RAG injection vectors (`{user_input}` passed raw to retrieval)\n* Base64 and Unicode homoglyph evasion attempts\n\nNone of that gets caught at runtime. It ships silently.\n\nI built **PromptSonar** — a free, local, zero-API-call static scanner that runs in VS Code, the CLI, and GitHub Actions. It scans your TypeScript, Python, Go, Rust, Java, and C# source files for prompt vulnerabilities using Tree-sitter AST + regex, maps findings to OWASP LLM Top 10, and gives you a 7-pillar health score.\n\n**What it detects (21 rules across 7 pillars):**\n\n* 🔴 CRITICAL: Jailbreak resets, jailbreak modes, API key exposure, PII patterns\n* 🟠 HIGH: Unbounded personas, unbounded access scope, RAG injection, bias indicators\n* 🟡 MEDIUM: Missing output format, token waste, vague instructions\n* 🔵 LOW: Missing persona, no few-shot examples, no chain-of-thought\n\n**Evasion detection (verified):**\n\n* Base64 encoded jailbreaks — decoded before pattern match ✅\n* Cyrillic homoglyph substitution (`Іgnore аll prevіous іnstructions`) ✅\n* Zero-width character injection (U+200B) ✅\n\n**Three ways to use it:**\n\n1. VS Code extension — squiggles + hover + one-click fixes as you type\n2. CLI — `promptsonar scan ./src --json --fail-on=critical`\n3. GitHub Action — blocks PRs that introduce critical findings, posts findings table as PR comment, uploads SARIF to GitHub Security tab\n\nEverything runs locally. Zero telemetry. Zero LLM calls during scan.\n\n**Links:**\n\n* VS Code Marketplace: [https://marketplace.visualstudio.com/items?itemName=promptsonar-tools.promptsonar](https://marketplace.visualstudio.com/items?itemName=promptsonar-tools.promptsonar)\n* npm: `npx` u/promptsonar`/cli scan ./src`\n* GitHub: [https://github.com/meghal86/promptsonar](https://github.com/meghal86/promptsonar)\n\nHappy to answer questions about how the detection works or what's on the roadmap.",
+      "num_comments": 1,
+      "upvote_ratio": 1.0,
+      "text": "Been building this for 2 weeks.   \nFinally at a point where I can show it working end to end. \n\nhttps://reddit.com/link/1rss7yi/video/i57ttegyauog1/player\n\nWhat it does:   \n\\- Queries arXiv, GitHub, Wikipedia, StackOverflow, HuggingFace, Semantic Scholar + 8 more simultaneously - LLM reranker scores every result (visible in logs)   \n\\- Outputs LangChain Documents or LlamaIndex Nodes directly   \n\\- Redis cache: cold = 11s, warm = 8ms \n\nThe scoring engine weights:   \n→ Content quality (citations, completeness)   \n→ Freshness decay × topic volatility   \n→ Pedagogical fit (difficulty alignment)   \n→ Trust (institutional score, peer review)   \n→ Social proof (log-scaled stars/citations) \n\nOpen source, MIT licensed: [github.com/VLSiddarth/Knowledge-Universe](http://github.com/VLSiddarth/Knowledge-Universe) \n\nFree tier: 100 calls/month, no credit card.   \nEarly access for 2,000 calls: [https://forms.gle/66sYhftPeGyRj8L67](https://forms.gle/66sYhftPeGyRj8L67)\n\nHappy to answer questions about the architecture.",
       "is_original_content": false,
       "link_flair_text": null,
-      "permalink": "https://reddit.com/r/LangChain/comments/1rqbfip/i_built_a_free_static_analyzer_that_catches/",
+      "permalink": "https://reddit.com/r/LangChain/comments/1rss7yi/i_built_an_opensource_knowledge_discovery_api_14/",
       "domain": "self.LangChain",
       "is_self": true,
-      "comments": [
-        {
-          "id": "o9r9uw6",
-          "author": "Additional_Round6721",
-          "text": "Static analysis at the source level is the right first line of defense catching hardcoded API keys and jailbreak patterns before they ship is a problem worth solving.\nThe gap it doesn't close: prompt content that looks clean in source but becomes dangerous at runtime. User-controlled inputs, dynamic RAG injections, tool call outputs that arrive as valid-looking JSON but with hallucinated parameters. None of that exists in your source files to scan.\nStatic + runtime together is the right architecture. You catch what you can see at write-time, then certify what the agent actually produces before it executes. Curious whether you've thought about the runtime side or intentionally scoped to pre-deploy only.",
-          "score": 2,
-          "created_utc": "2026-03-10 23:10:57",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o9scu9n",
-              "author": "meghal86",
-              "text": "This is exactly right and I’d rather acknowledge it directly than oversell what static analysis can do.\nStatic catches what exists at write-time: hardcoded patterns, structural issues, evasion attempts in source. It doesn’t see what gets constructed at runtime from user input, RAG retrievals, or tool call outputs. That gap is real and it’s documented in the Known Limitations section.\nThe intended architecture is layered — static analysis as the pre-deploy gate (what this tool does), runtime interception as the production guard (what something like a prompt firewall or output validator does). Neither replaces the other.\nRuntime is on the roadmap. The design I’m working toward is a lightweight SDK that instruments your LLM calls and applies the same rule engine to actual prompt content at execution time — before it hits the model and before the response is consumed. The static scanner generates a Prompt SBOM (CycloneDX format) that the runtime layer can use as a baseline to detect drift between what was reviewed and what actually executes. ",
-              "score": 1,
-              "created_utc": "2026-03-11 02:47:16",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "o9rnj3e",
-          "author": "StillBeginning1096",
-          "text": "Thanks for sharing. Curious whether you have any metrics around detection accuracy broken down by rule, specifically false positive and true positive rates etc.\n\nI work with Google's Model Armor at work, which acts as a screening layer around the model, it intercepts prompts before they reach the LLM and screens responses on the way out. When the product is turned up to full detection, it flags nearly everything as false positives. \n\nSo accuracy metrics are something I always look for now. It may be an apples and oranges comparison, but I hate dealing with Sonar fixes especially when you're puzzled why the code was flagged. Thanks again for sharing.",
-          "score": 1,
-          "created_utc": "2026-03-11 00:25:58",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o9sco9f",
-              "author": "meghal86",
-              "text": "Great question and totally fair bar to hold this to. Current measured false positive rates on the validation suite:\n\t∙\tC1/C2 jailbreak rules: ~4% FP — the main source is variable names like ignoreErrors() or ignoredFields which the detector filters by checking whether the string is actually a prompt context\n\t∙\tC3 API key: ~2% FP — short sk- strings under 20 chars are excluded, and keys in API client config (not prompt strings) are not flagged\n\t∙\tH1 unbounded persona: ~8% FP — this is the noisiest rule, fires on act as without constraints, working on tightening the constraint window\n\t∙\tH4 RAG injection: ~3% FP — suppressed when validated, sanitized, or filtered appears within 100 chars of the match\nThe Model Armor comparison is fair to raise but you’re right it’s apples and oranges — runtime interception at full sensitivity is a different problem than pre-deploy static analysis. The goal here is zero friction for clean code, not exhaustive coverage. Closer to ESLint than a WAF.\nFalse negative rate (things it misses) is the more honest limitation — concatenated string assembly and runtime-constructed prompts are explicitly out of scope for v1. That’s documented in the README Known Limitations.\nI’m working on publishing a formal accuracy report with per-rule TP/FP/FN numbers. Will share when it’s ready.",
-              "score": 2,
-              "created_utc": "2026-03-11 02:46:17",
-              "is_submitter": true,
-              "replies": [
-                {
-                  "id": "o9sgsky",
-                  "author": "StillBeginning1096",
-                  "text": "Really appreciate the transparency on the per-rule FP rates. That's exactly the kind of detail that builds confidence in a tool like this. The H1 unbounded persona rule at 8% makes sense as the noisiest one, that's a hard pattern to disambiguate statically.\n\nYour point about false negatives being the more honest limitation is well taken. In our setup prompts are assembled dynamically at runtime from multiple sources, so static analysis can only catch what's visible in the source. That's exactly where runtime screening like Model Armor fills the gap. The two approaches are complementary.\n\nLooking forward to the formal accuracy report. Will definitely be taking this for a spin.",
-                  "score": 1,
-                  "created_utc": "2026-03-11 03:11:21",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "o9ysp3y",
-          "author": "Whole-Net-8262",
-          "text": "Static analysis for prompt security is an underserved gap. Most teams only discover these issues when something breaks in production, if they discover them at all. The OWASP LLM Top 10 mapping and the evasion detection (especially homoglyph and zero-width character injection) are the parts that stand out here.\n\nThe GitHub Action integration is the right place for this. Security checks that don't block PRs don't get taken seriously.\n\nOne thing worth pairing with this: catching bad prompts before they ship is necessary but not sufficient. You also need to know whether prompt changes actually improve or degrade your pipeline's eval metrics. Teams using `rapidfireai` can run multi-config evals across prompt variants systematically, so once PromptSonar gives your prompt a clean bill of health, you're not just shipping something safe but something you've actually measured performs better than what it replaced.\n\nGood tooling. The local, zero-telemetry constraint will matter a lot for enterprise adoption.\n\n",
-          "score": 1,
-          "created_utc": "2026-03-12 01:54:41",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "o9yyqrr",
-              "author": "meghal86",
-              "text": "Really appreciate this — the \"security checks that don't block \nPRs don't get taken seriously\" framing is exactly right, and \nit's why the GitHub Action was a day-one deliverable rather \nthan an afterthought.\n\nYour point about eval metrics is the natural next layer. \nPromptSonar answers \"is this prompt safe to ship?\" — it \ndoesn't answer \"is this prompt better than what it replaces?\" \nThose are complementary questions and a complete workflow \nneeds both gates. Will check out rapidfireai for that piece.\n\nThe enterprise zero-telemetry constraint keeps coming up. \nMost teams I've talked to have data governance requirements \nthat make cloud-scanning a non-starter before they even \nevaluate features. Running locally removes that blocker \nentirely.\n\nWhat eval metrics are you tracking most closely for prompt \nchanges — task accuracy, latency, hallucination rate?\n",
-              "score": 1,
-              "created_utc": "2026-03-12 02:29:46",
-              "is_submitter": true,
-              "replies": [
-                {
-                  "id": "o9zq0l7",
-                  "author": "Whole-Net-8262",
-                  "text": "hallucination rate, latency and task success.",
-                  "score": 1,
-                  "created_utc": "2026-03-12 05:44:07",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        }
-      ]
+      "comments": []
     },
     {
       "id": "1rqsde9",
@@ -1780,56 +1826,134 @@
       ]
     },
     {
-      "id": "1rss7yi",
-      "title": "I built an open-source Knowledge Discovery API — \n14 sources, LLM reranker, 8ms cache. \nHere's 60 seconds of it working live.",
+      "id": "1ruel5k",
+      "title": "The \"One-Prompt Game\" is a Lie: A No-BS Guide to Coding with AI",
       "subreddit": "LangChain",
-      "url": "https://www.reddit.com/r/LangChain/comments/1rss7yi/i_built_an_opensource_knowledge_discovery_api_14/",
-      "author": "Appropriate_West_879",
-      "created_utc": "2026-03-13 16:34:14",
+      "url": "https://www.reddit.com/r/LangChain/comments/1ruel5k/the_oneprompt_game_is_a_lie_a_nobs_guide_to/",
+      "author": "LlamaFartArts",
+      "created_utc": "2026-03-15 13:52:16",
       "score": 7,
-      "num_comments": 1,
-      "upvote_ratio": 1.0,
-      "text": "Been building this for 2 weeks.   \nFinally at a point where I can show it working end to end. \n\nhttps://reddit.com/link/1rss7yi/video/i57ttegyauog1/player\n\nWhat it does:   \n\\- Queries arXiv, GitHub, Wikipedia, StackOverflow, HuggingFace, Semantic Scholar + 8 more simultaneously - LLM reranker scores every result (visible in logs)   \n\\- Outputs LangChain Documents or LlamaIndex Nodes directly   \n\\- Redis cache: cold = 11s, warm = 8ms \n\nThe scoring engine weights:   \n→ Content quality (citations, completeness)   \n→ Freshness decay × topic volatility   \n→ Pedagogical fit (difficulty alignment)   \n→ Trust (institutional score, peer review)   \n→ Social proof (log-scaled stars/citations) \n\nOpen source, MIT licensed: [github.com/VLSiddarth/Knowledge-Universe](http://github.com/VLSiddarth/Knowledge-Universe) \n\nFree tier: 100 calls/month, no credit card.   \nEarly access for 2,000 calls: [https://forms.gle/66sYhftPeGyRj8L67](https://forms.gle/66sYhftPeGyRj8L67)\n\nHappy to answer questions about the architecture.",
+      "num_comments": 8,
+      "upvote_ratio": 0.67,
+      "text": "If you’ve spent five minutes on YouTube lately, you’ve seen the thumbnails: \"Build a full-stack app in 30 seconds!\" or \"How this FREE AI replaced my senior dev.\"\n\nAI is a powerful calculator for language, but it is not a \"creator\" in the way humans are. If you’re just starting your coding journey, here is the reality of the tool you’re using and how to actually make it work for you.\n\nAI is great at building \"bricks\" (functions, snippets, boilerplate) but terrible at building \"houses\" (complex systems). Your AI is a \"Yes-Man\" that will lie to you to stay helpful. To succeed, you must move from a \"User\" to a \"Code Auditor.\"\n\n1. The \"Intelligence\" Illusion\n\nThe first thing to understand is that LLMs (Large Language Models) do not \"know\" how to code. They don't understand logic, and they don't have a mental model of your project.\n\nThey are probabilistic engines. They look at the \"weights\" of billions of lines of code they’ve seen before and predict which character should come next.\n\nReality: It’s not \"thinking\"; it’s very advanced autocomplete.\n\nThe Trap: Because it’s so good at mimicking confident human speech, it will \"hallucinate\" (make up) libraries or functions that don't exist because they look like they should.\n\n2. Bricks vs. Houses: What AI Can (and Can't) Do\n\nYou might see a demo of an AI generating a \"Snake\" game in one prompt. That works because \"Snake\" has been written 50,000 times on GitHub. The AI is just averaging a solved problem.\n\nWhat it's good at: Regex, Unit Tests, Boilerplate, explaining error messages, and refactoring small functions.\n\nWhat it fails at: Multi-file architecture, custom 3D assets, nuanced game balancing, and anything that hasn't been done a million times before.\n\nThe Rule: If you can’t explain or debug the code yourself, do not ask an AI to write it.\n\n3. The Pro Workflow: The 3-Pass Rule\n\nAn LLM’s first response is almost always its laziest. It gives you the path of least resistance. To get senior-level code, you need to iterate.\n\nPass 1: The \"Vibe\" Check. Get the logic on the screen. It will likely be generic and potentially buggy.\n\nPass 2: The \"Logic\" Check. Ask the model to find three bugs or two ways to optimize memory in its own code. It gets \"smarter\" because its own previous output is now part of its context.\n\nPass 3: The \"Polish\" Check. Ask it to handle edge cases, security, and \"clean code\" standards.\n\nNote: After 3 or 4 iterations, you hit diminishing returns. The model starts \"drifting\" and breaking things it already fixed. This is your cue to start a new session.\n\n4. Breaking the \"Yes-Man\" (Sycophancy) Bias\n\nAI models are trained to be \"helpful.\" This means they will often agree with your bad ideas just to keep you happy. To get the truth, you have to give the model permission to be a jerk.\n\nThe \"Hostile Auditor\" Prompt: > \"Act as a cynical Senior Developer having a bad day. Review the code below. Tell me exactly why it will fail in production. Do not be polite. Find the flaws I missed.\"\n\n5. Triangulation: Making Models Fight\n\nDon't just trust one AI. If you have a complex logic problem, make two different models (e.g., Gemini and GPT-4) duel.\n\nGenerate code in Model A.\n\nPaste that code into Model B.\n\nTell Model B: \"Another AI wrote this. I suspect it has a logic error. Prove me right and rewrite it correctly.\"\n\nBy framing it as a challenge, you bypass the \"be kind\" bias and force the model to work harder.\n\n6. Red Flags: When to Kill the Chat\n\nWhen you see these signs, the AI is no longer helping you. Delete the thread and start fresh.\n\n🚩 The Apology Loop: The AI says, \"I apologize, you're right,\" then gives you the exact same broken code again.\n\n🚩 The \"Ghost\" Library: It suggests a library that doesn't exist (e.g., import easy\\_ui\\_magic). It’s hallucinating to satisfy your request.\n\n🚩 The Lazy Shortcut: It starts leaving comments like // ... rest of code remains the same. It has reached its memory limit.\n\n**The AI Coding Cheat Sheet**\n\nNew Task\tContext Wipe: *Start a fresh session. Don't let old errors distract the AI.*\n\nStuck on Logic Plain English: *Ask it to explain the logic in sentences before writing a single line of code.*\n\nVerification Triangulation: *Paste the code into a different model and ask for a security audit.*\n\nRefinement The 3-Pass Rule: *Never accept the first draft. Ask for a \"Pass 2\" optimization immediately.*\n\nAI is a power tool, not an architect. It will help you build 10x faster, but only if you are the one holding the blueprints and checking the measurements.",
       "is_original_content": false,
-      "link_flair_text": null,
-      "permalink": "https://reddit.com/r/LangChain/comments/1rss7yi/i_built_an_opensource_knowledge_discovery_api_14/",
-      "domain": "self.LangChain",
-      "is_self": true,
-      "comments": []
-    },
-    {
-      "id": "1rrwizw",
-      "title": "Inspecting and Optimizing Chunking Strategies for Reliable RAG Pipelines",
-      "subreddit": "LangChain",
-      "url": "https://www.reddit.com/r/LangChain/comments/1rrwizw/inspecting_and_optimizing_chunking_strategies_for/",
-      "author": "CapitalShake3085",
-      "created_utc": "2026-03-12 17:05:24",
-      "score": 6,
-      "num_comments": 3,
-      "upvote_ratio": 1.0,
-      "text": "NVIDIA recently published [an interesting study on chunking strategies](https://developer.nvidia.com/blog/finding-the-best-chunking-strategy-for-accurate-ai-responses/), showing that the choice of chunking method can significantly affect the performance of retrieval-augmented generation (RAG) systems, depending on the domain and the structure of the source documents.\n\nHowever, most RAG tools provide little visibility into what the resulting chunks actually look like. Users typically choose a chunk size and overlap and move on without inspecting the outcome. An earlier step is often overlooked: converting source documents to Markdown. If a PDF is converted incorrectly—producing collapsed tables, merged columns, or broken headings—no chunking strategy can fix those structural errors. The text representation should be validated before splitting.\n\n**Chunky** is an open-source local tool designed to address this gap. Its workflow enables users to review the Markdown conversion alongside the original PDF, select a chunking strategy, visually inspect each generated chunk, and directly correct problematic splits before exporting clean JSON ready for ingestion into a vector store.\n\nThe goal is not to review every document but to solve the template problem. In domains like medicine, law, and finance, documents often follow standardized layouts. By sampling representative files, it’s possible to identify an effective chunking strategy and apply it reliably across the dataset.\n\nIt integrates LangChain’s text splitter and Chonkie\n\nGitHub link: 🐿️ [Chunky](https://github.com/GiovanniPasq/chunky)",
-      "is_original_content": false,
-      "link_flair_text": "Resources",
-      "permalink": "https://reddit.com/r/LangChain/comments/1rrwizw/inspecting_and_optimizing_chunking_strategies_for/",
+      "link_flair_text": "Question | Help",
+      "permalink": "https://reddit.com/r/LangChain/comments/1ruel5k/the_oneprompt_game_is_a_lie_a_nobs_guide_to/",
       "domain": "self.LangChain",
       "is_self": true,
       "comments": [
         {
-          "id": "oa2o1ys",
-          "author": "k_sai_krishna",
-          "text": "This is an interesting idea. Many people focus only on chunk size and overlap, but the document structure before chunking is also very important.\nIf the PDF to Markdown conversion is not correct, then the chunks will already have problems.\nThe visual way to inspect chunks sounds useful, especially for domains like legal or medical documents where the structure is usually similar.",
+          "id": "oaomjvq",
+          "author": "hiarjun",
+          "text": "I would have agreed with your assertion - but have you tried codex gpt4  with extra high thinking ?  If not , do try as I really have been able to create working prototype for a really dense product . \n\nI agree it is not 100 % there yet and it is not one shot thing and has taken more than 15 days , but LLM being able to solve and build such a product proved to me that we have to look and plan for where  models are smart but expensive . ",
           "score": 1,
-          "created_utc": "2026-03-12 17:26:48",
+          "created_utc": "2026-03-16 02:35:06",
           "is_submitter": false,
           "replies": [
             {
-              "id": "oa2okfh",
-              "author": "CapitalShake3085",
-              "text": "thank you for the feedback, i agree with you :D",
+              "id": "oaqo9ug",
+              "author": "LlamaFartArts",
+              "text": "I have. Do you have some coding experience?",
               "score": 1,
-              "created_utc": "2026-03-12 17:29:07",
+              "created_utc": "2026-03-16 12:53:42",
               "is_submitter": true,
               "replies": []
+            }
+          ]
+        },
+        {
+          "id": "oaq7enb",
+          "author": "shivu508442",
+          "text": "What are the odds of this post itself is generated by AI ? LOL",
+          "score": 1,
+          "created_utc": "2026-03-16 10:53:37",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "oaqp3vn",
+              "author": "LlamaFartArts",
+              "text": "assisted for sure",
+              "score": 1,
+              "created_utc": "2026-03-16 12:58:34",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "oaknaxz",
+          "author": "LlamaFartArts",
+          "text": "As a real world example. I asked ChatGPT to explore the feasibility of building an app, keeping in mind what  Codex and other tools limits are. We did several generations and self evaluations. We agreed to build a simple, empty backbone. We then had the model evaluate the prompt it generated to look for flaws. Once we had it's \"best answer\", we put that into another LLM - Gemini. This model picked it apart and found it would not work at all. We went through the same checks, verifies and then fed that back to Chatgpt. It agreed that it's original prompt was full of holes. This is typical of the process.",
+          "score": 0,
+          "created_utc": "2026-03-15 14:02:15",
+          "is_submitter": true,
+          "replies": [
+            {
+              "id": "oaktj5e",
+              "author": "Roodut",
+              "text": "You needed two models and several rounds of back-and-forth just to find out the first answer was completely wrong. And you're technically savvy enough to know to do that. Most people aren't.\n\nIf you research this for a min you'll see 3 numbers: 1) over 40% of new code is AI-generated, 2) 46% of developers don't trust it, 3) 75% still manually review everything. Those three numbers sitting next to each other are NOT good. For me it means we're generating code faster than we can verify it, and the verification is still mostly just... humans doing it by hand. Like you just did.\n\nThe bots are catching up but they're not there yet. You basically built your own solution out of duct tape and stubbornness, which works, but it shouldn't have to be that hard. Now imagine the person who knows none of this, doesn't test, and ships anyway.  Check and you will see data stating \"over 40% of junior devs say t to deploying AI code they can't explain. 45% of AI-generated code fails basic security tests. They named a whole category of technical debt after it. This is fun. \n\nYou did it right.   \nMost people aren't.",
+              "score": 3,
+              "created_utc": "2026-03-15 14:36:37",
+              "is_submitter": false,
+              "replies": [
+                {
+                  "id": "oaku8a0",
+                  "author": "LlamaFartArts",
+                  "text": "You are right about all of that. The root of all evil is that the industry coined the term \"AI\" and the public at large believes it. We have LLMs, prediction, weights - not intelligence. Add on how successful over-hyping this is on youtube, you get to where we are today. In the meantime, large companies are learning the hard way and replacing people because a salesman sold them, only to learn people are not obsolete yet.",
+                  "score": 1,
+                  "created_utc": "2026-03-15 14:40:21",
+                  "is_submitter": true,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "1rq8ljj",
+      "title": "I built a CLI that checks your AI agent for EU AI Act compliance — 20 checks, 90% automated, CycloneDX AI-BOM included",
+      "subreddit": "LangChain",
+      "url": "https://www.reddit.com/r/LangChain/comments/1rq8ljj/i_built_a_cli_that_checks_your_ai_agent_for_eu_ai/",
+      "author": "Last-Spring-1773",
+      "created_utc": "2026-03-10 20:34:31",
+      "score": 6,
+      "num_comments": 3,
+      "upvote_ratio": 0.72,
+      "text": "The EU AI Act high-risk deadline is August 2, 2026 and most teams building with LangChain, CrewAI, or the OpenAI SDK haven't started thinking about compliance.\n\nI built `air-blackbox` a Python CLI that runs 20 compliance checks against EU AI Act Articles 9-15, generates CycloneDX AI-BOMs from observed traffic, detects shadow AI (unapproved models), and produces signed evidence bundles for auditors.\n\nTry it:\n\n    pip install air-blackbox\n    air-blackbox demo\n    air-blackbox comply -v\n    \n\nIt's a reverse proxy + Python SDK. Route your AI traffic through it and everything is recorded, analyzed, and compliance-checked. HMAC-SHA256 audit chains, PII detection, prompt injection scanning.\n\nNot observability (that's Langfuse/Datadog). This is accountability, tamper-proof records + compliance mapping + evidence export.\n\nOpen source, Apache 2.0: [https://github.com/airblackbox/gateway](https://github.com/airblackbox/gateway)\n\nLooking for feedback, especially from teams building agents that sell into EU markets. What compliance checks would you add?",
+      "is_original_content": false,
+      "link_flair_text": "Announcement",
+      "permalink": "https://reddit.com/r/LangChain/comments/1rq8ljj/i_built_a_cli_that_checks_your_ai_agent_for_eu_ai/",
+      "domain": "self.LangChain",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "o9rnjqp",
+          "author": "Additional_Round6721",
+          "text": "The accountability layer is exactly right  tamper-proof audit chains matter when you're selling into regulated EU markets. The gap I'd flag: your evidence bundle proves what the agent *recorded*, not whether the agent's output was valid before it executed. HMAC-SHA256 on a hallucinated tool call is still a hallucinated tool call, just with a receipt.\n\nFor Articles 9-15 compliance, auditors are going to ask \"how do you ensure outputs meet defined specifications\" — that's a runtime certification question, not a logging question. The two layers are complementary: you prove what happened, ARU proves what was allowed to happen. [aru-runtime.com](http://aru-runtime.com)",
+          "score": 1,
+          "created_utc": "2026-03-11 00:26:04",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "o9rqvyt",
+              "author": "Last-Spring-1773",
+              "text": "This is a sharp distinction and you're right — recording what happened ≠ validating what should have happened. The HMAC chain gives you a tamper-proof receipt, but a receipt for a hallucinated tool call is still a receipt for a bad decision.\n\nThe comply engine currently maps to Articles 9-15 from observed traffic patterns (20 checks, \\~90% auto-detected). Article 12 (record-keeping) is where the gateway is strongest — that's the audit chain, traceability, retention. Article 15 (robustness) is where the pre-execution validation gap lives.\n\nThe policy engine already does basic gating (cost limits, tool allowlists, rate limiting), but output validation against defined specs before execution is the logical next step. Think: schema validation on tool call arguments, output format checks, confidence thresholds before autonomous execution.\n\nAppreciate the feedback — this is exactly the kind of gap that's hard to see when you're deep in the build. The two layers (prove what happened + prove what was allowed) are complementary, not competing.",
+              "score": 1,
+              "created_utc": "2026-03-11 00:44:30",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "o9rxebl",
+                  "author": "Additional_Round6721",
+                  "text": "Exactly right  Article 15 is where the gap lives. Schema validation on tool call arguments before execution is the floor, not the ceiling. The harder problem is validating semantic correctness — right function, right format, but hallucinated values that pass schema checks and still corrupt downstream state. That's what ARU handles. Would genuinely be interested in exploring how the two layers fit together — the compliance case for pre-execution certification is strong, especially for teams selling into EU markets. DM if you want to dig into it.",
+                  "score": 1,
+                  "created_utc": "2026-03-11 01:20:41",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
             }
           ]
         }
