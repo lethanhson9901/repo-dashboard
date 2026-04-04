@@ -1,11 +1,11 @@
 {
   "metadata": {
-    "last_updated": "2026-04-03 17:08:06",
+    "last_updated": "2026-04-04 08:59:11",
     "time_filter": "week",
     "subreddit": "Rag",
     "total_items": 20,
-    "total_comments": 109,
-    "file_size_bytes": 138888
+    "total_comments": 114,
+    "file_size_bytes": 149291
   },
   "items": [
     {
@@ -15,9 +15,9 @@
       "url": "https://www.reddit.com/r/Rag/comments/1s5wiqj/i_built_a_fully_local_graphrag_pipeline_0_gpus/",
       "author": "jokiruiz",
       "created_utc": "2026-03-28 10:11:52",
-      "score": 69,
+      "score": 67,
       "num_comments": 4,
-      "upvote_ratio": 0.95,
+      "upvote_ratio": 0.94,
       "text": "I've been frustrated lately with traditional vector-based RAG. It’s great for retrieving isolated facts, but the moment you ask a question that requires multi-hop reasoning (e.g., \"How does a symptom mentioned in doc A relate to a chemical spill in doc C?\"), standard semantic search completely drops the ball because it lacks relational context.\n\nGraphRAG solves this by extracting entities and relationships to build a Knowledge Graph, but almost every tutorial out there assumes you want to hook up to expensive cloud APIs or have a massive dedicated GPU to process the graph extraction.\n\nI wanted to see if I could build a 100% local, CPU-friendly version. After some tinkering, I got a really clean pipeline working.\n\nThe Stack:\n\nPackage Manager: uv (because it's ridiculously fast for setting up the environment).\n\nEmbeddings: HuggingFace’s all-MiniLM-L6-v2 (super lightweight, runs flawlessly on a CPU).\n\nDatabase: Neo4j running in a local Docker container.\n\nLLM: Llama 3.1 (8B, q2\\_K quantization) running locally via Ollama.\n\nOrchestration: LangChain. I used LLMGraphTransformer to force the local model to extract nodes/edges, and GraphCypherQAChain to translate the user’s question into a Cypher query.\n\nBy forcing a strict extraction schema, even a highly quantized 8B model was able to successfully build a connected neural map and traverse it to answer complex \"whodunnit\" style questions that a normal vector search missed completely.\n\nI’ve put all the code, the Docker commands, and a sample \"mystery\" text dataset to test the multi-hop reasoning in a repo here: [https://github.com/JoaquinRuiz/graphrag-neo4j-ollama](https://github.com/JoaquinRuiz/graphrag-neo4j-ollama)\n\nI'm currently trying to figure out the best ways to optimize the chunking strategies before the graph extraction phase to reduce processing time on the CPU. If anyone has tips on improving local entity extraction on limited hardware, I'd love to hear them!",
       "is_original_content": false,
       "link_flair_text": "Tutorial",
@@ -58,6 +58,396 @@
           "text": "That's a smart approach to bypass the limits of traditional vector-based RAG. Memory is a strong complement, and Hindsight was built to make it easier to manage in agents. [https://github.com/vectorize-io/hindsight](https://github.com/vectorize-io/hindsight)",
           "score": -1,
           "created_utc": "2026-03-28 17:10:16",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1sb62jc",
+      "title": "I replaced Neo4j with pure vector search for Graph RAG",
+      "subreddit": "Rag",
+      "url": "https://www.reddit.com/r/Rag/comments/1sb62jc/i_replaced_neo4j_with_pure_vector_search_for/",
+      "author": "ProfessionalLaugh354",
+      "created_utc": "2026-04-03 06:40:46",
+      "score": 37,
+      "num_comments": 14,
+      "upvote_ratio": 0.93,
+      "text": "I've been working on multi-hop RAG for a while, and the part that always bugged me was the graph database. Not that graph DBs are bad — they do what they do well — but running Neo4j alongside a vector DB meant maintaining two completely separate infrastructure stacks for what's really one retrieval problem. Two query languages, two scaling strategies, two things that break independently at 3am.\n\nAt some point I had a realization that felt almost too obvious: relationships between entities are just text. \"Metformin → treats → Type 2 Diabetes\" is a sentence you can embed. So what if you store entities, relations, and passages in three vector collections with ID cross-references? You'd have a graph structure — just living inside a vector database.\n\nI tried building this out with Milvus. Three collections, linked by IDs. Retrieval is 4 steps, two LLM calls total:\n\n    Query: \"Side effects of first-line diabetes medication?\"\n                              │\n                              ▼\n                ┌───────────────────────┐\n      Step 1    │    Seed Retrieval     │  LLM extracts key entities\n                │                       │  → vector search in Milvus\n                └───────────┬───────────┘\n                            │  seeds: [diabetes, first-line drug, side effects]\n                            ▼\n                ┌───────────────────────┐\n      Step 2    │  Subgraph Expansion   │  Follow ID cross-references\n                │                       │  one hop outward\n                └───────────┬───────────┘\n                            │  diabetes ──relation──▶ metformin (bridge found!)\n                            │  metformin ──relation──▶ renal monitoring\n                            │  metformin ──relation──▶ GI discomfort\n                            │  + 20 other noisy relations\n                            ▼\n                ┌───────────────────────┐\n      Step 3    │     LLM Rerank        │  One LLM call: score & filter\n                │                       │  candidates by relevance\n                └───────────┬───────────┘\n                            │  top relations → retrieve source passages\n                            ▼\n                ┌───────────────────────┐\n      Step 4    │  Answer Generation    │  One LLM call: generate answer\n                │                       │  from source passages\n                └───────────────────────┘\n                            │\n                            ▼\n      \"Metformin requires monitoring renal function\n       and may cause GI discomfort...\"\n\nThe key is step 2 — subgraph expansion discovers \"metformin\" as a bridge entity even though the query never mentions it. That's what pure vector search can't do.\n\nThe thing I wasn't sure about was whether this would actually hold up on real multi-hop questions — the kind where no single passage has the full answer. Like \"What side effects should I watch for with the first-line medication for Type 2 Diabetes?\" where you first need to figure out metformin is the bridge before you can answer anything.\n\nRan it on the standard benchmarks to find out:\n\n|Dataset|Naive RAG|This approach|Delta|\n|:-|:-|:-|:-|\n|MuSiQue (2-4 hop)|65.2%|82.4%|\\+31.4%|\n|HotpotQA (2 hop)|78.6%|91.2%|\\+6.1%|\n|2WikiMultiHopQA (2 hop)|76.4%|89.8%|\\+27.7%|\n|**Average**|**73.4%**|**87.8%**|**+19.6%**|\n\nHonestly better than I expected, especially on MuSiQue which is 3-4 hops. Compared to HippoRAG 2 it's roughly on par on average — wins on some datasets, loses on others. Fair to say it's competitive but not a clear winner everywhere.\n\nWhere I think this approach has a real edge is simplicity. The whole thing runs on Milvus Lite, which is just a local .db file like SQLite. No graph DB, no Docker, no extra infrastructure. Two LLM calls instead of the 3-10+ that iterative approaches need.\n\nWhere it probably falls short: if you need complex graph algorithms (community detection, PageRank), this won't do it. It's not trying to replace that. It's more for the \"I have docs, I need multi-hop QA, I don't want to set up Neo4j\" use case.\n\nI open-sourced the implementation if anyone wants to poke at it or try it on their own data: github.com/zilliztech/vector-graph-rag\n\nCurious if anyone else has tried vector-only approaches to graph-style retrieval, or if there are obvious failure modes I'm not seeing. The benchmarks look decent but benchmarks aren't production.",
+      "is_original_content": false,
+      "link_flair_text": "Showcase",
+      "permalink": "https://reddit.com/r/Rag/comments/1sb62jc/i_replaced_neo4j_with_pure_vector_search_for/",
+      "domain": "self.Rag",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "oe2uxdk",
+          "author": "Final-Frosting7742",
+          "text": "That's interesting, but if you have Neo4j, do you really need a separate vectorDB?",
+          "score": 1,
+          "created_utc": "2026-04-03 14:35:34",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "oe37lby",
+              "author": "Dense_Gate_5193",
+              "text": "no, but it’s also cumbersome, slow, and uses resources like crazy because of the JVM.\n\nthat’s why I’m replacing neo4j stacks at work with NornicDB. it uses neo4j drivers so migration is easy ",
+              "score": 1,
+              "created_utc": "2026-04-03 15:33:52",
+              "is_submitter": false,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "oe35wc5",
+          "author": "Dense_Gate_5193",
+          "text": "i’ve replaced 2 neo4j and mongo atlas graph-rag stacks already at work with this \n\nhttps://github.com/orneryd/NornicDB\n\nit’s a neo4j drop in replacement that is orders of magnitude faster.\n\neasy migration since it uses neo4j drivers and manages embeddings for you. MIT licensed 372 stars and counting.\n\nedit: more context and also it has everything you’d expect from an enterprise-grade product.",
+          "score": -1,
+          "created_utc": "2026-04-03 15:25:58",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "oe4uvf0",
+              "author": "bravelogitex",
+              "text": "You should disclose that you are the author",
+              "score": 1,
+              "created_utc": "2026-04-03 20:09:49",
+              "is_submitter": false,
+              "replies": [
+                {
+                  "id": "oe6nu7w",
+                  "author": "UnionCounty22",
+                  "text": "Infer it from the beginning of the sentence ",
+                  "score": 2,
+                  "created_utc": "2026-04-04 02:08:59",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "oe2q74h",
+          "author": "Ok-Persimmon1784",
+          "text": "Great move on ditching the Neo4j overhead, maintaining that stack at 3AM is indeed a nightmare. The simplicity of using something like Milvus Lite is a massive DX win.\nHowever, as someone who spends a lot of time in the weeds of RAG architecture, there are a few \"hidden\" walls you’re going to hit once you move past benchmarks and into production:\n\n1. The \"Manual Join\" Latency Wall\nBy doing subgraph expansion in Step 2, you’re essentially performing manual joins in the application layer.\n -The Math: If your seed entities have a high branching factor (say 50 relations each), a 2 or 3-hop expansion becomes O(N^k).\n -The Reality: Unlike a graph engine that uses index-free adjacency (pointer hopping in memory), you’re doing multiple round-trip ID lookups. It’s fine for 2 hops on a small dataset, but it will crawl once your graph gets dense.\n\n2. Semantic Dilution vs. Hard Logic\nEmbedding a relationship like \"Metformin --> treats --> Diabetes\" is clever, but vectors are built for similarity, not logic.\n -The Failure Mode: To an embedding model, \"Drug X treats Disease Y\" and \"Drug X aggravates Disease Y\" live in almost the same neighborhood.\n -Result: Your LLM Reranker (Step 3) has to do all the heavy lifting to catch these \"opposite\" meanings. You’re trading the deterministic reliability of a graph for the probabilistic \"vibes\" of a vector, which leads to subtle hallucinations in multi-hop paths.\n\n3. You're losing the \"Global\" in GraphRAG\nThis approach is strictly local. It’s great for \"finding the neighbor of a neighbor,\" but it can't handle global summarization. If you ever need to answer \"What are the 5 main trends in this entire document corpus?\", you need community detection (like Leiden) or PageRank. You can't run those efficiently on a flat vector collection.\n\nThe \"Middle Ground\" Alternative: KùzuDB\nIf you want to keep the \"no-infra\" dream alive without the performance tax of manual joins, check out Kùzu.\nIt’s essentially the SQLite of Graph DBs. It’s an embedded C++ engine with a Python API that runs out of a local file.\n -The Stack: Use Milvus Lite for the initial semantic seed search --> use Kùzu (via Cypher) for the multi-hop traversal.\n -Why: You get native graph performance (microseconds for 4+ hops) and logical integrity without ever having to touch a Docker container or a heavy Neo4j(yeah, I don't like it) instance.\nIt’s a bit more \"robust\" than pure vectors for a production system while staying just as portable. The simplicity is definitely going to attract people tired of the Neo4j tax!\n\nAnyway, killer work on the implementation. The community definitely needs more \"lean\" RAG patterns like this to lower the barrier to entry. We're finally moving away from bloated infrastructure and toward specialized, embedded tools that actually scale without the headache.\n\n​Keep pushing the boundaries on this, and honestly, this is just the begining.\n\n\n",
+          "score": -2,
+          "created_utc": "2026-04-03 14:13:20",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "oe38u0z",
+              "author": "Dense_Gate_5193",
+              "text": "Kuzu is no longer maintained, ladybugDB is a fork of Kuzu and has an active community. it’s an impressive little database the big differentiator being ingestion from table databases. \n\none thing i am implementing in NornicDB which i got the idea from kuzu/ladybug is effectively constraint schemas. they do it a bit differently in ladybug because they are focused on table data ingestion so people have an easy way to transition to knowledge graphs.\n\nhttps://github.com/orneryd/NornicDB/issues/70\n\ni’m effectively extending the cypher REQUIRE syntax instead to allow constraint schemas rather than having to do individual constraints, this, in effect, creates a “class” for nodes and edges that you can define through schema constraint blocks. ",
+              "score": 1,
+              "created_utc": "2026-04-03 15:39:37",
+              "is_submitter": false,
+              "replies": [
+                {
+                  "id": "oe4kz37",
+                  "author": "Ok-Persimmon1784",
+                  "text": "It really is a shame about the Apple acquisition, it's a classic \"Sherlock-ing\" vibes, but I’m stoked to see the community rally so quickly around LadyBugDB Keeping that \"DuckDB-for-graphs\" spirit alive is huge for anyone building local-first, high-performance RAG.\n\n​The work you’re doing on NornicDB with constraint schemas is a massive quality-of-life improvement for graph engineering.\n\nOne of the biggest headaches in pure GraphRAG is the \"schema-less\" chaos where node properties drift over time. By extending the REQUIRE syntax into full constraint blocks, you’re basically bringing strong typing to the graph layer.\n\n​A few thoughts on why that approach hits the mark:\n-Nodes as Classes: Treating nodes and edges as defined classes rather than just collections of labels prevents the \"data rot\" that usually kills multi-hop accuracy. If the LLM knows exactly what properties a \"Person\" or \"Medication\" node must have, the retrieval quality jumps significantly.\n\n-The Relational Bridge: Focusing on table-based ingestion is the \"killer feature.\" Most of us are sitting on structured SQL or Parquet data; making the transition to a Knowledge Graph feel like a natural extension rather than a complete rewrite is how you win the developer-experience war.\n\n-Declarative Integrity: Standard Cypher can feel fragmented when defining complex schemas. Moving toward block-based definitions makes the graph structure feel like actual code: maintainable, readable, and version-control friendly.\n\n​Looking forward to seeing NornicDB evolve. ",
+                  "score": 2,
+                  "created_utc": "2026-04-03 19:21:56",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "1sb6v95",
+      "title": "Do we actually need embeddings? What if the LLM just compiled and navigated a wiki instead?",
+      "subreddit": "Rag",
+      "url": "https://www.reddit.com/r/Rag/comments/1sb6v95/do_we_actually_need_embeddings_what_if_the_llm/",
+      "author": "Lanaxsa",
+      "created_utc": "2026-04-03 07:28:39",
+      "score": 35,
+      "num_comments": 34,
+      "upvote_ratio": 0.87,
+      "text": "Karpathy recently tweeted about using LLMs to build personal knowledge bases - raw docs get compiled into a structured markdown wiki by the LLM, and when you query it, the LLM navigates the wiki itself instead of doing similarity search. No embeddings, no vector DB. \\~400K words and it works fine.\n\nThis got me thinking. The standard RAG pipeline is:\n\n`raw doc → chunk → embed → vector DB → similarity search → answer`\n\nBut what if instead:\n\n`raw doc → LLM compiles structured wiki (summaries, categories, backlinks) → agent navigates to answer`\n\nThe LLM writes a master index with article titles and summaries. On query, it reads that small index, picks the relevant articles, reads them, follows relation links if needed, and answers. Basically how a human would research something in a well-organized wiki.\n\n**Why this might actually be better:**\n\n* Chunks lose context. A wiki article preserves structure and relationships.\n* Embeddings can't do multi-hop reasoning. An agent can read article A, follow a link to article B, connect the dots.\n* \"Response time\" and \"incident handling procedure\" might not be close in vector space, but an LLM reasoning through categories finds both easily.\n\n**The obvious problem:**\n\n* Every query = multiple LLM calls. Way slower and more expensive than a vector lookup.\n* At some scale the master index itself gets too big to read.\n\nBut context windows keep growing and costs keep dropping. And you could always add embedding as a fallback at scale - but over LLM-compiled articles instead of raw chunks, which should be way higher quality retrieval.\n\nHas anyone tried this approach seriously? Is there a fundamental flaw I'm not seeing? Curious what this community thinks.",
+      "is_original_content": false,
+      "link_flair_text": "Discussion",
+      "permalink": "https://reddit.com/r/Rag/comments/1sb6v95/do_we_actually_need_embeddings_what_if_the_llm/",
+      "domain": "self.Rag",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "oe192o1",
+          "author": "SnooSongs5410",
+          "text": "When you have unlimited tokens and inference available to you the way you use an LLM changes.",
+          "score": 37,
+          "created_utc": "2026-04-03 08:01:01",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "oe1ti4q",
+              "author": "jrexthrilla",
+              "text": "I used my serve and called it 52k times yesterday to implement something exactly like this.  Taking a niche forum data and turning it into an interlinked obsidian vault. The entire process required two inference passes the first was for all 35k comments and the second was for the 17k that were rejected on the first pass.  52k calls.  The result is a completely interlinked knowledge graph on a very niche subject ",
+              "score": 11,
+              "created_utc": "2026-04-03 10:57:38",
+              "is_submitter": false,
+              "replies": [
+                {
+                  "id": "oe31lfc",
+                  "author": "polandtown",
+                  "text": "Sick! Care to link any details/tutorials on how youbdid this?",
+                  "score": 3,
+                  "created_utc": "2026-04-03 15:06:14",
+                  "is_submitter": false,
+                  "replies": []
+                },
+                {
+                  "id": "oe1z6pf",
+                  "author": "SnooSongs5410",
+                  "text": "What was your cost?",
+                  "score": 1,
+                  "created_utc": "2026-04-03 11:39:10",
+                  "is_submitter": false,
+                  "replies": []
+                },
+                {
+                  "id": "oe78ziv",
+                  "author": "freshairproject",
+                  "text": "Very interested to hear more! What llm model? How was the setup (n8n, python scripts, github repos, library, ollama)?\n\nAlso how was the data cleanup and information architecture? For example is each post it’s own obsidian note, or is the entire thread a note? And then did the LLM create hyperlinked metadata between the notes?",
+                  "score": 1,
+                  "created_utc": "2026-04-04 04:32:40",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "oe1c6e7",
+          "author": "-Cubie-",
+          "text": "So, instead of making a fast and cheap model read all data, so the slow and expensive model only has to read the important information, you are using the slow and expensive model to read all information multiple times?\n\nSounds slow and expensive. ",
+          "score": 13,
+          "created_utc": "2026-04-03 08:29:19",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "oe2e7q8",
+              "author": "RevolutionaryGold325",
+              "text": "Don't tell them about optimization. That was for the era before Nvidia chips!",
+              "score": 4,
+              "created_utc": "2026-04-03 13:11:01",
+              "is_submitter": false,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "oe191xt",
+          "author": "swastik_K",
+          "text": "https://github.com/VectifyAI/PageIndex\n\nI think this library does the same?",
+          "score": 13,
+          "created_utc": "2026-04-03 08:00:50",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "oe6k3bd",
+              "author": "AccomplishedLine4909",
+              "text": "I like that. I need to run this on my systems to understand more. Thank you!",
+              "score": 1,
+              "created_utc": "2026-04-04 01:45:51",
+              "is_submitter": false,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "oe22msm",
+          "author": "tmfvde",
+          "text": "I did some experiments with semantically structured filetrees. The idea is that an LLM structures a knowledge base by matching similar content under branches. These branches are then navigated by a retrieval agent via the standard tools ls and grep as they are just files. The leaf nodes contain summaries and references to the full documents, which can be fetched if needed.\n\nI did find improvements in complex queries (Multi-Hop, Comparison, Procedural) like you hypothesized. The approach also reduced retrieval noise. \n\nHowever, the issue, like many others here have said are the inference and time costs, which increase as the knowledge base size increases. I compared the approach to standard BM25 hybrid rag, and found that the traditional RAG outperfomed the approach in single-fact retrieval while being much more efficient. I could see a use of a hybrid method where we use traditional rag for single-fact retrieval and agentic search for more complex queries (although some rag strategies like query decomposition could already be enough).\n\nI would also need to run some more experiments with even larger knowledge bases to see if this actually scales (and I don’t unfortunately have unlimited access to the frontier models with 1M context, so that would also limit the results). My experiments were done with Qwen3:9b which I can run locally with decent context.\n\nFull article: https://medium.com/@roope.paukku/agentindex-navigable-semantic-file-trees-for-complex-information-retrieval-with-ai-agents-e96469760e93",
+          "score": 7,
+          "created_utc": "2026-04-03 12:02:18",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oe1fsnw",
+          "author": "burtcopaint",
+          "text": "Thats is the reason for metadata in your vectorDB. The name is just different.  \n\nThat said. No matter how hard you work on your knowledge structure, it's heavy work, and at some point you want to assess semantics.  \n\n",
+          "score": 5,
+          "created_utc": "2026-04-03 09:01:59",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oe19p7b",
+          "author": "LizardLikesMelons",
+          "text": "\"LLM compiles structured wiki (summaries, categories, backlinks) → agent navigates to answer\"\n\nisn't this a huge leap? Most people face the problem of duplicate entries, entries unfit for LLMS, and hard to categorize data. \n\nEmebdding is an attempt to get useful data out of a sea of semi organized data.",
+          "score": 3,
+          "created_utc": "2026-04-03 08:06:34",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oe1ug3c",
+          "author": "debauch3ry",
+          "text": "There was some research somewhere that showed RAG was inferior to giving an LLM search tools, index, etc, so it can agentically get the info it needs. I'm sure the document type affects the suitability of this.",
+          "score": 5,
+          "created_utc": "2026-04-03 11:04:38",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oe1et1m",
+          "author": "timtody",
+          "text": "Honestly Karpathy has turned into such a quack",
+          "score": 7,
+          "created_utc": "2026-04-03 08:53:14",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oe1x3pm",
+          "author": "Severe-Librarian4372",
+          "text": "Yeah at my work I have basically no limit for my usage on Claude models so that is very similar to what I run. Using Claude to summarize all the slack chats history jira tickets and confluence to build knowledge wikis and then run another cycle on that wiki to create a graph of connected knowledge to relevant projects so that for each existing/new project it will go to the project node + top 3 nodes by similarity and do a graph based search to explore all the needed information for the task. Which will be cached for the rest of the work on that project. It works really well if you have unlimited money ",
+          "score": 3,
+          "created_utc": "2026-04-03 11:24:17",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oe2vget",
+          "author": "EnvironmentalFix3414",
+          "text": "For a personal knowledge base (like Karpathy's example), the Wiki approach is strictly superior because the \"user\" is one person and the \"database\" is manageable. For a global customer support bot handling 100,000 queries an hour, the \"Wiki\" approach would bankrupt the company. ***- Gemini by iteself***\n\nThe \"Wiki-Agent\" approach is an architectural non-starter for mission-critical systems because it introduces a **catastrophic loss of provenance**. In industries like healthcare or finance, truth is found in the raw, unedited source—the specific legal clause or the exact lab value—not in a \"summarized\" or \"compiled\" version generated by a probabilistic model. When an LLM acts as the librarian, it makes irreversible editorial decisions that can silently delete nuance, omit edge cases, or hallucinate relationships during the compilation phase. This creates a \"black box\" retrieval layer where you can no longer trace an answer back to a deterministic byte-range in a source document, effectively trading auditable facts for a cohesive but potentially fictional narrative. - ***Gemini as instructed***",
+          "score": 2,
+          "created_utc": "2026-04-03 14:38:04",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "oe7sm6p",
+              "author": "Lanaxsa",
+              "text": "The provenance point is spot on. Any compiled wiki would need to maintain explicit source references back to the original documents , every claim traceable to a specific byte-range in the raw file. The wiki becomes an index layer, not a replacement for the source material",
+              "score": 2,
+              "created_utc": "2026-04-04 07:17:29",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "oe165kk",
+          "author": "Livelife_Aesthetic",
+          "text": "We use AI built data vaults with MCP calls for our ais to build knowledge bases and get around embeddings. Works super well, we are thinking maybe SQL queries or MongoDB query tools to not use MCP moving forward ",
+          "score": 1,
+          "created_utc": "2026-04-03 07:35:01",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oe18rx3",
+          "author": "CareMassive4763",
+          "text": "have a look at [runcabinet.org](http://runcabinet.org) \\- for human, visual KB+LLM makes more sense than MD+LLM. Also, i've seen another nice concept to replace rug in [https://getcandlekeep.com/](https://getcandlekeep.com/)",
+          "score": 1,
+          "created_utc": "2026-04-03 07:58:23",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oe1hfhd",
+          "author": "ScaredyCatUK",
+          "text": "I guess the addeed advantage is that you now also have a structured wiki to reference too.",
+          "score": 1,
+          "created_utc": "2026-04-03 09:16:56",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oe1k6zb",
+          "author": "laurentbourrelly",
+          "text": "We didn't wait for LLM to build search engines.",
+          "score": 1,
+          "created_utc": "2026-04-03 09:41:40",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oe1vm53",
+          "author": "Main_Path_4051",
+          "text": "I would prefer a wiki mcp with search func",
+          "score": 1,
+          "created_utc": "2026-04-03 11:13:20",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oe24rey",
+          "author": "justkid201",
+          "text": "It would make sense to do it as a tool call, so one LLM’s context is the entire wiki and the one calling it is free from having to have the full burden of all the context, it reasons over what is retrieved in comparison with whatever the user request is.  \n\nThe issue is even with big context windows, models don’t reason well when a full window is provided, and there continues to be a needle in the haystack problem at large window lengths.\n",
+          "score": 1,
+          "created_utc": "2026-04-03 12:15:46",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oe2573b",
+          "author": "Simulacra93",
+          "text": "That’s what the rag on my fanfic/roleplay website is, no vector db since users need CRUD permissions. Search is deterministic and based on background data labeling that enables single hop retrieval. I pre-structure a lot so narrative entities already exist in knowledge graphs.\n\nIt wouldn’t work past 200,000 words of source material, but that’s a crazy latent context window for fractions of a penny per call in conversations that go 100+ turns.",
+          "score": 1,
+          "created_utc": "2026-04-03 12:18:30",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oe28vv2",
+          "author": "chungyeung",
+          "text": "Understand word2vec is your next move.",
+          "score": 1,
+          "created_utc": "2026-04-03 12:41:06",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oe2whwj",
+          "author": "EmergencySherbert247",
+          "text": "If you can burn so many tokens upfront yes. That’s what pageindex does.",
+          "score": 1,
+          "created_utc": "2026-04-03 14:42:55",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oe4q9b7",
+          "author": "Academic_Track_2765",
+          "text": "you might think its better, I did too. But you know the obvious issue right? non-determinism in actual results. I did this using a custom page index implementation, and it works until it doesn't. Its not an issue, but it can be based on the domain. ",
+          "score": 1,
+          "created_utc": "2026-04-03 19:47:22",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oe62uvy",
+          "author": "Ps4Atom",
+          "text": "This feels right, but not as a replacement for embeddings more like an upgrade to RAG. Chunking loses structure. A wiki gives the model a map (pages, links, hierarchy), which is way better for multi-hop reasoning than pulling random chunks. But embeddings still matter for fast recall**.** Once your corpus grows, you need a cheap way to shortlist where to look otherwise latency and cost blow up. So it’s not “embeddings vs wiki,” it’s: embeddings to find candidates; wiki to preserve structure; LLM to navigate + reason. The real shift is from flat retrieval to structured knowledge navigation.",
+          "score": 1,
+          "created_utc": "2026-04-04 00:01:12",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oe6vdqe",
+          "author": "NihilisticAssHat",
+          "text": "I think this is what DeepSeek's engram module is supposed to obsolesce.\n\n\nHonestly, my problem with an autonomously generated wiki is hallucination",
+          "score": 1,
+          "created_utc": "2026-04-04 02:57:09",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oe2hk5g",
+          "author": "SeaSituation7723",
+          "text": "Yeah, the fundamental flaw is that the ENTIRE reason why chunking exists is because ingesting an entire knowledge base in the context is at best, wasteful/inefficient, and at worst, impossible (if you have a massive knowledge base). Your approach of using a wiki is exactly that; your agent would need to read the ENTIRE wiki to get an answer. If you want to separate it into sections, you would need to query each section, probably using a similarity search to get the answer. And separating it into sections is sort of like chunking. Wow, we're back to where we started.",
+          "score": 0,
+          "created_utc": "2026-04-03 13:29:09",
           "is_submitter": false,
           "replies": []
         }
@@ -319,7 +709,7 @@
       "author": "codexahsan",
       "created_utc": "2026-04-01 19:24:24",
       "score": 26,
-      "num_comments": 21,
+      "num_comments": 20,
       "upvote_ratio": 0.96,
       "text": "Hi everyone,\n\nMy boss has given us a tight one-week project: build a fully functional advanced RAG chatbot (we have to show the working demo next Wednesday). We are two developers and will be building the same chatbot separately so we can compare the two versions at the end.\n\nRequirements (fixed):\n\nLangChain\n\nAdvanced RAG techniques\n\nLLM 4.1 Mini (API-based only)\n\nFull data compliance with PII detection + masking, and store only masked data in the database\n\nEverything else (frontend, backend, vector DB, relational DB, deployment, etc.) is completely our choice.\n\nWhat I’m looking for from the community:\n\nI want to build something impressive and production-ready in just 7 days. Any chatbot idea is fine (internal knowledge base, customer support bot, personal assistant, etc.).\n\nSpecifically, I would love your suggestions on:\n\nBest advanced RAG practices that work really well with LLM 4.1 Mini (chunking strategy, embeddings, retrieval, reranking, query rewriting, agentic RAG, etc.)\n\nClean and secure implementation for PII detection & masking + how to store masked data safely in DB\n\nRecommended full stack (frontend + backend + vector DB + relational DB + deployment) that integrates smoothly with LangChain\n\nGood project structure so both of us can build separately but end up with identical functionality\n\nCommon pitfalls people make in 1-week RAG projects and how to avoid them\n\nAny good GitHub repos, templates, or tutorials that are close to this exact stack\n\nAny project idea, architecture ideas, or real-world experience you can share would be extremely helpful. Thank you so much in advance - really appreciate the community support!",
       "is_original_content": false,
@@ -332,7 +722,7 @@
           "id": "odrxg5a",
           "author": "SerDetestable",
           "text": "7 days lmao",
-          "score": 14,
+          "score": 15,
           "created_utc": "2026-04-01 21:54:03",
           "is_submitter": false,
           "replies": [
@@ -369,7 +759,7 @@
           "id": "ods0llb",
           "author": "Sure_Host_4255",
           "text": "Just start from simple search and check the results. Then try add more layers of search: vector, embeddings, bm25 etc. Try to turn on/off layers of search. Because your main goal is to provide as accurate results of context to LLM as possible, and it is not always the most complicated way. Test results on real data, don't overcomplicate solution before you see first results.",
-          "score": 4,
+          "score": 3,
           "created_utc": "2026-04-01 22:10:31",
           "is_submitter": false,
           "replies": []
@@ -501,132 +891,67 @@
               ]
             }
           ]
-        },
-        {
-          "id": "oduddkz",
-          "author": "Remote_Spend174",
-          "text": "First of all for Speed & Efficiency - drop the Langchain and use the direct libs from OpenAI i.e : \"openai-agents-python\" because that is fast and lightweight.",
-          "score": 0,
-          "created_utc": "2026-04-02 07:32:06",
-          "is_submitter": false,
-          "replies": []
         }
       ]
     },
     {
-      "id": "1sb62jc",
-      "title": "I replaced Neo4j with pure vector search for Graph RAG",
+      "id": "1sbf7vp",
+      "title": "How do you choose the best chunking strategy for your RAG?",
       "subreddit": "Rag",
-      "url": "https://www.reddit.com/r/Rag/comments/1sb62jc/i_replaced_neo4j_with_pure_vector_search_for/",
-      "author": "ProfessionalLaugh354",
-      "created_utc": "2026-04-03 06:40:46",
-      "score": 25,
-      "num_comments": 5,
-      "upvote_ratio": 0.96,
-      "text": "I've been working on multi-hop RAG for a while, and the part that always bugged me was the graph database. Not that graph DBs are bad — they do what they do well — but running Neo4j alongside a vector DB meant maintaining two completely separate infrastructure stacks for what's really one retrieval problem. Two query languages, two scaling strategies, two things that break independently at 3am.\n\nAt some point I had a realization that felt almost too obvious: relationships between entities are just text. \"Metformin → treats → Type 2 Diabetes\" is a sentence you can embed. So what if you store entities, relations, and passages in three vector collections with ID cross-references? You'd have a graph structure — just living inside a vector database.\n\nI tried building this out with Milvus. Three collections, linked by IDs. Retrieval is 4 steps, two LLM calls total:\n\n    Query: \"Side effects of first-line diabetes medication?\"\n                              │\n                              ▼\n                ┌───────────────────────┐\n      Step 1    │    Seed Retrieval     │  LLM extracts key entities\n                │                       │  → vector search in Milvus\n                └───────────┬───────────┘\n                            │  seeds: [diabetes, first-line drug, side effects]\n                            ▼\n                ┌───────────────────────┐\n      Step 2    │  Subgraph Expansion   │  Follow ID cross-references\n                │                       │  one hop outward\n                └───────────┬───────────┘\n                            │  diabetes ──relation──▶ metformin (bridge found!)\n                            │  metformin ──relation──▶ renal monitoring\n                            │  metformin ──relation──▶ GI discomfort\n                            │  + 20 other noisy relations\n                            ▼\n                ┌───────────────────────┐\n      Step 3    │     LLM Rerank        │  One LLM call: score & filter\n                │                       │  candidates by relevance\n                └───────────┬───────────┘\n                            │  top relations → retrieve source passages\n                            ▼\n                ┌───────────────────────┐\n      Step 4    │  Answer Generation    │  One LLM call: generate answer\n                │                       │  from source passages\n                └───────────────────────┘\n                            │\n                            ▼\n      \"Metformin requires monitoring renal function\n       and may cause GI discomfort...\"\n\nThe key is step 2 — subgraph expansion discovers \"metformin\" as a bridge entity even though the query never mentions it. That's what pure vector search can't do.\n\nThe thing I wasn't sure about was whether this would actually hold up on real multi-hop questions — the kind where no single passage has the full answer. Like \"What side effects should I watch for with the first-line medication for Type 2 Diabetes?\" where you first need to figure out metformin is the bridge before you can answer anything.\n\nRan it on the standard benchmarks to find out:\n\n|Dataset|Naive RAG|This approach|Delta|\n|:-|:-|:-|:-|\n|MuSiQue (2-4 hop)|65.2%|82.4%|\\+31.4%|\n|HotpotQA (2 hop)|78.6%|91.2%|\\+6.1%|\n|2WikiMultiHopQA (2 hop)|76.4%|89.8%|\\+27.7%|\n|**Average**|**73.4%**|**87.8%**|**+19.6%**|\n\nHonestly better than I expected, especially on MuSiQue which is 3-4 hops. Compared to HippoRAG 2 it's roughly on par on average — wins on some datasets, loses on others. Fair to say it's competitive but not a clear winner everywhere.\n\nWhere I think this approach has a real edge is simplicity. The whole thing runs on Milvus Lite, which is just a local .db file like SQLite. No graph DB, no Docker, no extra infrastructure. Two LLM calls instead of the 3-10+ that iterative approaches need.\n\nWhere it probably falls short: if you need complex graph algorithms (community detection, PageRank), this won't do it. It's not trying to replace that. It's more for the \"I have docs, I need multi-hop QA, I don't want to set up Neo4j\" use case.\n\nI open-sourced the implementation if anyone wants to poke at it or try it on their own data: github.com/zilliztech/vector-graph-rag\n\nCurious if anyone else has tried vector-only approaches to graph-style retrieval, or if there are obvious failure modes I'm not seeing. The benchmarks look decent but benchmarks aren't production.",
-      "is_original_content": false,
-      "link_flair_text": "Showcase",
-      "permalink": "https://reddit.com/r/Rag/comments/1sb62jc/i_replaced_neo4j_with_pure_vector_search_for/",
-      "domain": "self.Rag",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "oe2q74h",
-          "author": "Ok-Persimmon1784",
-          "text": "Great move on ditching the Neo4j overhead, maintaining that stack at 3AM is indeed a nightmare. The simplicity of using something like Milvus Lite is a massive DX win.\nHowever, as someone who spends a lot of time in the weeds of RAG architecture, there are a few \"hidden\" walls you’re going to hit once you move past benchmarks and into production:\n\n1. The \"Manual Join\" Latency Wall\nBy doing subgraph expansion in Step 2, you’re essentially performing manual joins in the application layer.\n -The Math: If your seed entities have a high branching factor (say 50 relations each), a 2 or 3-hop expansion becomes O(N^k).\n -The Reality: Unlike a graph engine that uses index-free adjacency (pointer hopping in memory), you’re doing multiple round-trip ID lookups. It’s fine for 2 hops on a small dataset, but it will crawl once your graph gets dense.\n\n2. Semantic Dilution vs. Hard Logic\nEmbedding a relationship like \"Metformin --> treats --> Diabetes\" is clever, but vectors are built for similarity, not logic.\n -The Failure Mode: To an embedding model, \"Drug X treats Disease Y\" and \"Drug X aggravates Disease Y\" live in almost the same neighborhood.\n -Result: Your LLM Reranker (Step 3) has to do all the heavy lifting to catch these \"opposite\" meanings. You’re trading the deterministic reliability of a graph for the probabilistic \"vibes\" of a vector, which leads to subtle hallucinations in multi-hop paths.\n\n3. You're losing the \"Global\" in GraphRAG\nThis approach is strictly local. It’s great for \"finding the neighbor of a neighbor,\" but it can't handle global summarization. If you ever need to answer \"What are the 5 main trends in this entire document corpus?\", you need community detection (like Leiden) or PageRank. You can't run those efficiently on a flat vector collection.\n\nThe \"Middle Ground\" Alternative: KùzuDB\nIf you want to keep the \"no-infra\" dream alive without the performance tax of manual joins, check out Kùzu.\nIt’s essentially the SQLite of Graph DBs. It’s an embedded C++ engine with a Python API that runs out of a local file.\n -The Stack: Use Milvus Lite for the initial semantic seed search --> use Kùzu (via Cypher) for the multi-hop traversal.\n -Why: You get native graph performance (microseconds for 4+ hops) and logical integrity without ever having to touch a Docker container or a heavy Neo4j(yeah, I don't like it) instance.\nIt’s a bit more \"robust\" than pure vectors for a production system while staying just as portable. The simplicity is definitely going to attract people tired of the Neo4j tax!\n\nAnyway, killer work on the implementation. The community definitely needs more \"lean\" RAG patterns like this to lower the barrier to entry. We're finally moving away from bloated infrastructure and toward specialized, embedded tools that actually scale without the headache.\n\n​Keep pushing the boundaries on this, and honestly, this is just the begining.\n\n\n",
-          "score": 1,
-          "created_utc": "2026-04-03 14:13:20",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "oe38u0z",
-              "author": "Dense_Gate_5193",
-              "text": "Kuzu is no longer maintained, ladybugDB is a fork of Kuzu and has an active community. it’s an impressive little database the big differentiator being ingestion from table databases. \n\none thing i am implementing in NornicDB which i got the idea from kuzu/ladybug is effectively constraint schemas. they do it a bit differently in ladybug because they are focused on table data ingestion so people have an easy way to transition to knowledge graphs.\n\nhttps://github.com/orneryd/NornicDB/issues/70\n\ni’m effectively extending the cypher REQUIRE syntax instead to allow constraint schemas rather than having to do individual constraints, this, in effect, creates a “class” for nodes and edges that you can define through schema constraint blocks. ",
-              "score": 1,
-              "created_utc": "2026-04-03 15:39:37",
-              "is_submitter": false,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "oe2uxdk",
-          "author": "Final-Frosting7742",
-          "text": "That's interesting, but if you have Neo4j, do you really need a separate vectorDB?",
-          "score": 1,
-          "created_utc": "2026-04-03 14:35:34",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "oe37lby",
-              "author": "Dense_Gate_5193",
-              "text": "no, but it’s also cumbersome, slow, and uses resources like crazy because of the JVM.\n\nthat’s why I’m replacing neo4j stacks at work with NornicDB. it uses neo4j drivers so migration is easy ",
-              "score": 1,
-              "created_utc": "2026-04-03 15:33:52",
-              "is_submitter": false,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "oe35wc5",
-          "author": "Dense_Gate_5193",
-          "text": "i’ve replaced 2 neo4j and mongo atlas graph-rag stacks already at work with this \n\nhttps://github.com/orneryd/NornicDB\n\nit’s a neo4j drop in replacement that is orders of magnitude faster.\n\neasy migration since it uses neo4j drivers and manages embeddings for you. MIT licensed 372 stars and counting.\n\nedit: more context and also it has everything you’d expect from an enterprise-grade product.",
-          "score": 1,
-          "created_utc": "2026-04-03 15:25:58",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
-      "id": "1sb6v95",
-      "title": "Do we actually need embeddings? What if the LLM just compiled and navigated a wiki instead?",
-      "subreddit": "Rag",
-      "url": "https://www.reddit.com/r/Rag/comments/1sb6v95/do_we_actually_need_embeddings_what_if_the_llm/",
-      "author": "Lanaxsa",
-      "created_utc": "2026-04-03 07:28:39",
-      "score": 23,
-      "num_comments": 26,
-      "upvote_ratio": 0.85,
-      "text": "Karpathy recently tweeted about using LLMs to build personal knowledge bases - raw docs get compiled into a structured markdown wiki by the LLM, and when you query it, the LLM navigates the wiki itself instead of doing similarity search. No embeddings, no vector DB. \\~400K words and it works fine.\n\nThis got me thinking. The standard RAG pipeline is:\n\n`raw doc → chunk → embed → vector DB → similarity search → answer`\n\nBut what if instead:\n\n`raw doc → LLM compiles structured wiki (summaries, categories, backlinks) → agent navigates to answer`\n\nThe LLM writes a master index with article titles and summaries. On query, it reads that small index, picks the relevant articles, reads them, follows relation links if needed, and answers. Basically how a human would research something in a well-organized wiki.\n\n**Why this might actually be better:**\n\n* Chunks lose context. A wiki article preserves structure and relationships.\n* Embeddings can't do multi-hop reasoning. An agent can read article A, follow a link to article B, connect the dots.\n* \"Response time\" and \"incident handling procedure\" might not be close in vector space, but an LLM reasoning through categories finds both easily.\n\n**The obvious problem:**\n\n* Every query = multiple LLM calls. Way slower and more expensive than a vector lookup.\n* At some scale the master index itself gets too big to read.\n\nBut context windows keep growing and costs keep dropping. And you could always add embedding as a fallback at scale - but over LLM-compiled articles instead of raw chunks, which should be way higher quality retrieval.\n\nHas anyone tried this approach seriously? Is there a fundamental flaw I'm not seeing? Curious what this community thinks.",
+      "url": "https://www.reddit.com/r/Rag/comments/1sbf7vp/how_do_you_choose_the_best_chunking_strategy_for/",
+      "author": "Holiday-Case-4524",
+      "created_utc": "2026-04-03 14:31:32",
+      "score": 22,
+      "num_comments": 17,
+      "upvote_ratio": 0.92,
+      "text": "Hi everyone,\nI’d like to ask how you choose the best chunking strategy for your RAG. Do you typically use a single strategy for all documents, or do you adapt the approach depending on the type of document?",
       "is_original_content": false,
       "link_flair_text": "Discussion",
-      "permalink": "https://reddit.com/r/Rag/comments/1sb6v95/do_we_actually_need_embeddings_what_if_the_llm/",
+      "permalink": "https://reddit.com/r/Rag/comments/1sbf7vp/how_do_you_choose_the_best_chunking_strategy_for/",
       "domain": "self.Rag",
       "is_self": true,
       "comments": [
         {
-          "id": "oe192o1",
-          "author": "SnooSongs5410",
-          "text": "When you have unlimited tokens and inference available to you the way you use an LLM changes.",
-          "score": 25,
-          "created_utc": "2026-04-03 08:01:01",
+          "id": "oe2vyl5",
+          "author": "Just-Message-9899",
+          "text": "Selecting the optimal chunking strategy requires evaluating the retriever module against a sample of documents. The goal is to identify the strategy that maximizes both recall and precision. While I haven't implemented dynamic chunking for this specific document type yet, it remains a compelling area for further exploration.\n\nYou can use this visual tool to compare various strategies and test different approaches: [https://github.com/GiovanniPasq/chunky](https://github.com/GiovanniPasq/chunky)",
+          "score": 6,
+          "created_utc": "2026-04-03 14:40:25",
           "is_submitter": false,
           "replies": [
             {
-              "id": "oe1ti4q",
-              "author": "jrexthrilla",
-              "text": "I used my serve and called it 52k times yesterday to implement something exactly like this.  Taking a niche forum data and turning it into an interlinked obsidian vault. The entire process required two inference passes the first was for all 35k comments and the second was for the 17k that were rejected on the first pass.  52k calls.  The result is a completely interlinked knowledge graph on a very niche subject ",
-              "score": 4,
-              "created_utc": "2026-04-03 10:57:38",
+              "id": "oe3fopr",
+              "author": "Oshden",
+              "text": "Dude this is awesome! ",
+              "score": 2,
+              "created_utc": "2026-04-03 16:11:12",
               "is_submitter": false,
               "replies": [
                 {
-                  "id": "oe31lfc",
-                  "author": "polandtown",
-                  "text": "Sick! Care to link any details/tutorials on how youbdid this?",
-                  "score": 2,
-                  "created_utc": "2026-04-03 15:06:14",
+                  "id": "oe4nl4k",
+                  "author": "Just-Message-9899",
+                  "text": "thank you =)",
+                  "score": 1,
+                  "created_utc": "2026-04-03 19:34:33",
                   "is_submitter": false,
                   "replies": []
-                },
+                }
+              ]
+            },
+            {
+              "id": "oe30t08",
+              "author": "Holiday-Case-4524",
+              "text": "I see it also implements chunking enrichment, which is really interesting—thank you! I’ll definitely give it a try ",
+              "score": 1,
+              "created_utc": "2026-04-03 15:02:38",
+              "is_submitter": true,
+              "replies": [
                 {
-                  "id": "oe1z6pf",
-                  "author": "SnooSongs5410",
-                  "text": "What was your cost?",
+                  "id": "oe4nw4n",
+                  "author": "Just-Message-9899",
+                  "text": "yes, as suggested by Anthropic in this article: [https://www.anthropic.com/engineering/contextual-retrieval](https://www.anthropic.com/engineering/contextual-retrieval)",
                   "score": 1,
-                  "created_utc": "2026-04-03 11:39:10",
+                  "created_utc": "2026-04-03 19:36:00",
                   "is_submitter": false,
                   "replies": []
                 }
@@ -635,183 +960,97 @@
           ]
         },
         {
-          "id": "oe191xt",
-          "author": "swastik_K",
-          "text": "https://github.com/VectifyAI/PageIndex\n\nI think this library does the same?",
-          "score": 11,
-          "created_utc": "2026-04-03 08:00:50",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oe1c6e7",
-          "author": "-Cubie-",
-          "text": "So, instead of making a fast and cheap model read all data, so the slow and expensive model only has to read the important information, you are using the slow and expensive model to read all information multiple times?\n\nSounds slow and expensive. ",
-          "score": 11,
-          "created_utc": "2026-04-03 08:29:19",
+          "id": "oe2y0xz",
+          "author": "Simulacra93",
+          "text": "The best chunking strategy will always be hand-labeling your data beforehand. It’s a tradeoff though because if you’re trying to support multiple document types, that’s going to be incredibly time consuming. So the question you need to ask yourself is why you’re using vector embeddings to begin with over inline context strategies. \n\nFor instance. I have a story chatbot app that uses Supabase and stores narrative entities (locations, characters, items) and compacted summaries of turns. \n\nEach turn, the story model replies and I have a background LLM call classify the narrative state of the recent exchange (characters, plot, locations) and pre-select the external context to inject into the next call. \n\nThe pre-retrieval system is still rag but beats out vector dbs for my use case. ",
+          "score": 1,
+          "created_utc": "2026-04-03 14:50:01",
           "is_submitter": false,
           "replies": [
             {
-              "id": "oe2e7q8",
-              "author": "RevolutionaryGold325",
-              "text": "Don't tell them about optimization. That was for the era before Nvidia chips!",
-              "score": 2,
-              "created_utc": "2026-04-03 13:11:01",
-              "is_submitter": false,
+              "id": "oe30wao",
+              "author": "Holiday-Case-4524",
+              "text": "Can you give me more details? I did not understand ",
+              "score": 1,
+              "created_utc": "2026-04-03 15:03:03",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "oe32byd",
+                  "author": "Simulacra93",
+                  "text": "About what specifically? Rag is an umbrella for vector and non vector retrieval systems. ",
+                  "score": 1,
+                  "created_utc": "2026-04-03 15:09:35",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "oe32gsp",
+          "author": "Entire_Jacket_3457",
+          "text": "I would say it depends 100% on the data and your users.\n\nSometimes you might need to add additional context as header data. \nFor instance if you have a db with different sports teams. You might want to add header data that this text chunk is about a \"Canadian hockey team\" or \"Spanish football team\". If the database is only about \"Spanish football teams\" that header data is not needed.\n\nI would say think about what data you have and how the users will query the db as well as how the data might look like in isolation (without context) instead of just look at 150 vs 200 char chunks or similar.",
+          "score": 1,
+          "created_utc": "2026-04-03 15:10:12",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "oe36m64",
+              "author": "Holiday-Case-4524",
+              "text": "Thanks, that makes a lot of sense! I’ll keep that in mind :)",
+              "score": 1,
+              "created_utc": "2026-04-03 15:29:19",
+              "is_submitter": true,
               "replies": []
             }
           ]
         },
         {
-          "id": "oe22msm",
-          "author": "tmfvde",
-          "text": "I did some experiments with semantically structured filetrees. The idea is that an LLM structures a knowledge base by matching similar content under branches. These branches are then navigated by a retrieval agent via the standard tools ls and grep as they are just files. The leaf nodes contain summaries and references to the full documents, which can be fetched if needed.\n\nI did find improvements in complex queries (Multi-Hop, Comparison, Procedural) like you hypothesized. The approach also reduced retrieval noise. \n\nHowever, the issue, like many others here have said are the inference and time costs, which increase as the knowledge base size increases. I compared the approach to standard BM25 hybrid rag, and found that the traditional RAG outperfomed the approach in single-fact retrieval while being much more efficient. I could see a use of a hybrid method where we use traditional rag for single-fact retrieval and agentic search for more complex queries (although some rag strategies like query decomposition could already be enough).\n\nI would also need to run some more experiments with even larger knowledge bases to see if this actually scales (and I don’t unfortunately have unlimited access to the frontier models with 1M context, so that would also limit the results). My experiments were done with Qwen3:9b which I can run locally with decent context.\n\nFull article: https://medium.com/@roope.paukku/agentindex-navigable-semantic-file-trees-for-complex-information-retrieval-with-ai-agents-e96469760e93",
-          "score": 6,
-          "created_utc": "2026-04-03 12:02:18",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oe1fsnw",
-          "author": "burtcopaint",
-          "text": "Thats is the reason for metadata in your vectorDB. The name is just different.  \n\nThat said. No matter how hard you work on your knowledge structure, it's heavy work, and at some point you want to assess semantics.  \n\n",
-          "score": 4,
-          "created_utc": "2026-04-03 09:01:59",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oe19p7b",
-          "author": "LizardLikesMelons",
-          "text": "\"LLM compiles structured wiki (summaries, categories, backlinks) → agent navigates to answer\"\n\nisn't this a huge leap? Most people face the problem of duplicate entries, entries unfit for LLMS, and hard to categorize data. \n\nEmebdding is an attempt to get useful data out of a sea of semi organized data.",
-          "score": 5,
-          "created_utc": "2026-04-03 08:06:34",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oe1ug3c",
-          "author": "debauch3ry",
-          "text": "There was some research somewhere that showed RAG was inferior to giving an LLM search tools, index, etc, so it can agentically get the info it needs. I'm sure the document type affects the suitability of this.",
-          "score": 3,
-          "created_utc": "2026-04-03 11:04:38",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oe1et1m",
-          "author": "timtody",
-          "text": "Honestly Karpathy has turned into such a quack",
-          "score": 4,
-          "created_utc": "2026-04-03 08:53:14",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oe1x3pm",
-          "author": "Severe-Librarian4372",
-          "text": "Yeah at my work I have basically no limit for my usage on Claude models so that is very similar to what I run. Using Claude to summarize all the slack chats history jira tickets and confluence to build knowledge wikis and then run another cycle on that wiki to create a graph of connected knowledge to relevant projects so that for each existing/new project it will go to the project node + top 3 nodes by similarity and do a graph based search to explore all the needed information for the task. Which will be cached for the rest of the work on that project. It works really well if you have unlimited money ",
-          "score": 2,
-          "created_utc": "2026-04-03 11:24:17",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oe2vget",
-          "author": "EnvironmentalFix3414",
-          "text": "For a personal knowledge base (like Karpathy's example), the Wiki approach is strictly superior because the \"user\" is one person and the \"database\" is manageable. For a global customer support bot handling 100,000 queries an hour, the \"Wiki\" approach would bankrupt the company. ***- Gemini by iteself***\n\nThe \"Wiki-Agent\" approach is an architectural non-starter for mission-critical systems because it introduces a **catastrophic loss of provenance**. In industries like healthcare or finance, truth is found in the raw, unedited source—the specific legal clause or the exact lab value—not in a \"summarized\" or \"compiled\" version generated by a probabilistic model. When an LLM acts as the librarian, it makes irreversible editorial decisions that can silently delete nuance, omit edge cases, or hallucinate relationships during the compilation phase. This creates a \"black box\" retrieval layer where you can no longer trace an answer back to a deterministic byte-range in a source document, effectively trading auditable facts for a cohesive but potentially fictional narrative. - ***Gemini as instructed***",
-          "score": 2,
-          "created_utc": "2026-04-03 14:38:04",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oe165kk",
-          "author": "Livelife_Aesthetic",
-          "text": "We use AI built data vaults with MCP calls for our ais to build knowledge bases and get around embeddings. Works super well, we are thinking maybe SQL queries or MongoDB query tools to not use MCP moving forward ",
+          "id": "oe35qcq",
+          "author": "Life_Yesterday_5529",
+          "text": "In my case (scientific literature), I go with content-based chunking.",
           "score": 1,
-          "created_utc": "2026-04-03 07:35:01",
+          "created_utc": "2026-04-03 15:25:11",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "oe36sao",
+              "author": "Holiday-Case-4524",
+              "text": "Thank you for sharing this, how did you choose it? ",
+              "score": 1,
+              "created_utc": "2026-04-03 15:30:07",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "oe44b9j",
+                  "author": "Life_Yesterday_5529",
+                  "text": "Partially manually, partially heuristic based on headings, partially with a llm",
+                  "score": 1,
+                  "created_utc": "2026-04-03 18:03:32",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "oe70ie9",
+          "author": "graph-crawler",
+          "text": "You test it",
+          "score": 1,
+          "created_utc": "2026-04-04 03:31:54",
           "is_submitter": false,
           "replies": []
         },
         {
-          "id": "oe18rx3",
-          "author": "CareMassive4763",
-          "text": "have a look at [runcabinet.org](http://runcabinet.org) \\- for human, visual KB+LLM makes more sense than MD+LLM. Also, i've seen another nice concept to replace rug in [https://getcandlekeep.com/](https://getcandlekeep.com/)",
+          "id": "oe71jdy",
+          "author": "jmb-1971",
+          "text": "Personnaly i will trying to implement something like that for python project :\n\nhttps://preview.redd.it/pj7kp4mqg3tg1.png?width=900&format=png&auto=webp&s=454c5fcf4b7a66f785a9a9f53d7b8ba3f7a7cb6a\n\n**Why we built two separate code chunking paths for our local RAG system (and how they feed the same vector store)**\n\nWe're building RAG Pro, an internal RAG system at our company running entirely on local hardware (AMD Strix Halo, llama.cpp, Qdrant). One of the trickiest design decisions was how to handle code ingestion — and we ended up with two completely different paths that coexist in the same hybrid search index.\n\n**Path A: The \"soft\" internal chunker** — This is what RAG Pro does natively when you upload a file through the web UI. It's regex-based: for Python it splits on `class`/`def`/`async def` boundaries, for JS/TS on `function`/`class`/`const =`, and so on for \\~25 file extensions. Each chunk gets a \"context header\" prepended — basically the file's preamble (docstring + imports) and the current class scope, so the LLM always knows *where* in the codebase a chunk comes from. It's simple, fast, and works surprisingly well for most files. But it has no real understanding of what it's splitting — it's pattern matching on indentation and keywords.\n\n**Path B: PyContextBuilder** — This is an external tool that does full AST parsing *before* anything touches RAG Pro. It walks the syntax tree, resolves cross-references, identifies symbol types (`function`, `method`, `class`, `module_summary`), tracks qualified names (`mypackage.auth.manager.AuthManager.validate_token`), and builds semantically meaningful chunks with rich metadata. The chunks arrive at RAG Pro already built — they skip the extract+chunk pipeline entirely and go straight to embedding via a dedicated `POST /api/documents/inject_chunks` endpoint.",
           "score": 1,
-          "created_utc": "2026-04-03 07:58:23",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oe1hfhd",
-          "author": "ScaredyCatUK",
-          "text": "I guess the addeed advantage is that you now also have a structured wiki to reference too.",
-          "score": 1,
-          "created_utc": "2026-04-03 09:16:56",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oe1k6zb",
-          "author": "laurentbourrelly",
-          "text": "We didn't wait for LLM to build search engines.",
-          "score": 1,
-          "created_utc": "2026-04-03 09:41:40",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oe1vm53",
-          "author": "Main_Path_4051",
-          "text": "I would prefer a wiki mcp with search func",
-          "score": 1,
-          "created_utc": "2026-04-03 11:13:20",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oe24rey",
-          "author": "justkid201",
-          "text": "It would make sense to do it as a tool call, so one LLM’s context is the entire wiki and the one calling it is free from having to have the full burden of all the context, it reasons over what is retrieved in comparison with whatever the user request is.  \n\nThe issue is even with big context windows, models don’t reason well when a full window is provided, and there continues to be a needle in the haystack problem at large window lengths.\n",
-          "score": 1,
-          "created_utc": "2026-04-03 12:15:46",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oe2573b",
-          "author": "Simulacra93",
-          "text": "That’s what the rag on my fanfic/roleplay website is, no vector db since users need CRUD permissions. Search is deterministic and based on background data labeling that enables single hop retrieval. I pre-structure a lot so narrative entities already exist in knowledge graphs.\n\nIt wouldn’t work past 200,000 words of source material, but that’s a crazy latent context window for fractions of a penny per call in conversations that go 100+ turns.",
-          "score": 1,
-          "created_utc": "2026-04-03 12:18:30",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oe28vv2",
-          "author": "chungyeung",
-          "text": "Understand word2vec is your next move.",
-          "score": 1,
-          "created_utc": "2026-04-03 12:41:06",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oe2hk5g",
-          "author": "SeaSituation7723",
-          "text": "Yeah, the fundamental flaw is that the ENTIRE reason why chunking exists is because ingesting an entire knowledge base in the context is at best, wasteful/inefficient, and at worst, impossible (if you have a massive knowledge base). Your approach of using a wiki is exactly that; your agent would need to read the ENTIRE wiki to get an answer. If you want to separate it into sections, you would need to query each section, probably using a similarity search to get the answer. And separating it into sections is sort of like chunking. Wow, we're back to where we started.",
-          "score": 1,
-          "created_utc": "2026-04-03 13:29:09",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oe2whwj",
-          "author": "EmergencySherbert247",
-          "text": "If you can burn so many tokens upfront yes. That’s what page rank does. ",
-          "score": 1,
-          "created_utc": "2026-04-03 14:42:55",
+          "created_utc": "2026-04-04 03:39:03",
           "is_submitter": false,
           "replies": []
         }
@@ -838,7 +1077,7 @@
           "id": "odeuw7v",
           "author": "PiaRedDragon",
           "text": "I have tried RAG in production and tbh it does not scale.\n\nOnce you get to many documents the user queries become useless, you need to find a way to add more context without asking the user to directly provide it.\n\nEven if you manage that, as you scale the issue then becomes a massive infrastructure/data project.\n\nI think I am rapidly coming to the conclusion that Agentic is the way to go.  So you have agents query the original data source rather than RAG.",
-          "score": 3,
+          "score": 5,
           "created_utc": "2026-03-31 00:17:34",
           "is_submitter": false,
           "replies": [
@@ -846,7 +1085,7 @@
               "id": "odhdsc4",
               "author": "DragonKnight002",
               "text": "You’re still using RAG lol",
-              "score": 5,
+              "score": 3,
               "created_utc": "2026-03-31 11:29:25",
               "is_submitter": false,
               "replies": []
@@ -891,7 +1130,7 @@
                   "id": "odbqi22",
                   "author": "jrochkind",
                   "text": "it is so annoying to me. \n\nA lot of these i read like someone trying to sell me something, but i realize they may not be, its' just that AI often sounds like that?\n\nWhat is the motivation for posting AI answers here? Just karma?\n\nOr if they aren't really AI answers, we're all learning to talk like AI, which has learned to talk like someone trying to sell us something, which is even scarier.",
-                  "score": 4,
+                  "score": 5,
                   "created_utc": "2026-03-30 15:16:16",
                   "is_submitter": false,
                   "replies": []
@@ -918,9 +1157,9 @@
       "url": "https://www.reddit.com/r/Rag/comments/1s6nycp/literllm_unified_access_to_142_llm_providers_rust/",
       "author": "Eastern-Surround7763",
       "created_utc": "2026-03-29 06:43:29",
-      "score": 18,
+      "score": 20,
       "num_comments": 4,
-      "upvote_ratio": 0.87,
+      "upvote_ratio": 0.88,
       "text": " We just released liter-llm: [https://github.com/kreuzberg-dev/liter-llm](https://github.com/kreuzberg-dev/liter-llm) \n\nThe concept is similar to LiteLLM: one interface for 142 AI providers. The difference is the foundation: a compiled Rust core with native bindings for Python, TypeScript/Node.js, WASM, Go, Java, C#, Ruby, Elixir, PHP, and C. There's no interpreter, PyPI install hooks, or post-install scripts in the critical path. The attack vector that hit LiteLLM this week is structurally not possible here.  \n\nIn liter-llm, API keys are stored as SecretString (zeroed on drop, redacted in debug output). The middleware stack is composable and zero-overhead when disabled. Provider coverage is the same as LiteLLM. Caching is powered by OpenDAL (40+ backends: Redis, S3, GCS, Azure Blob, PostgreSQL, SQLite, and more). Cost calculation uses an embedded pricing registry derived from the same source as LiteLLM, and streaming supports both SSE and AWS EventStream binary framing.\n\nOne thing to be clear about: liter-llm is a client library, not a proxy. No admin dashboard, no virtual API keys, no team management. For Python users looking for an alternative right now, it's a drop-in in terms of provider coverage. For everyone else, you probably haven't had something like this before. And of course, full credit and thank you to LiteLLM for the provider configurations we derived from their work.\n\nGitHub: [https://github.com/kreuzberg-dev/liter-llm](https://github.com/kreuzberg-dev/liter-llm)   \n ",
       "is_original_content": false,
       "link_flair_text": "Tools & Resources",
@@ -975,9 +1214,9 @@
       "url": "https://www.reddit.com/r/Rag/comments/1s8l511/what_we_learned_about_confidence_calibration/",
       "author": "FinanceSenior9771",
       "created_utc": "2026-03-31 11:47:10",
-      "score": 17,
+      "score": 19,
       "num_comments": 5,
-      "upvote_ratio": 0.88,
+      "upvote_ratio": 0.95,
       "text": "Been running a RAG system in production for a few weeks now where non-technical business owners are the end users (not developers). Wanted to share some stuff that surprised us since most RAG discussion is from the builder's perspective.\n\n**1. Users don't read citations.** We added source links thinking it would build trust. Almost nobody clicks them. What they actually do is judge trustworthiness by how the answer sounds. Vague = suspicious, specific = trusted, even if the specific answer is wrong. That's terrifying.\n\n**2. \"I don't know\" is way harder to get right than good answers.** We added a confidence threshold but finding the sweet spot is per-customer. One business wants the bot to attempt everything, another wants it to bail early and hand off to a human. We ended up exposing the threshold as a slider and letting each customer tune it themselves.\n\n**3. Stale content is the silent killer.** A business updates their pricing page and the bot still quotes old prices. Nobody reports it as a bug because the answer sounds confident. They just lose trust and stop using it. Still figuring out the best re-crawl strategy for this.\n\n**4. Chunking matters less than we thought, deduplication matters more.** We had cases where 3 slightly different versions of the same info existed across different pages. The model would pull from the wrong one randomly. Cleaning the source data fixed more quality issues than any retrieval optimization.\n\nCurious if others shipping to non-technical users are seeing the same patterns or if this is specific to our use case.",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -1016,7 +1255,7 @@
               "id": "odnmjta",
               "author": "FinanceSenior9771",
               "text": "Yeah don't rip them out entirely though. some power users and internal teams do check them. it's more that you shouldn't expect citations alone to build trust with the average end user. they're a safety net, not the main trust signal.   \n  \nWhat ended up mattering more for us was the tone and specificity of the answer itself. a confident, detailed response that's actually grounded in the right source does more for trust than a vague answer with a citation link attached.",
-              "score": 2,
+              "score": 3,
               "created_utc": "2026-04-01 07:58:58",
               "is_submitter": true,
               "replies": []
@@ -1035,183 +1274,15 @@
       ]
     },
     {
-      "id": "1s5n4ae",
-      "title": "Got tired of rebuilding RAG pipelines, so I made this (thoughts?)",
-      "subreddit": "Rag",
-      "url": "https://www.reddit.com/r/Rag/comments/1s5n4ae/got_tired_of_rebuilding_rag_pipelines_so_i_made/",
-      "author": "Skakkar_03",
-      "created_utc": "2026-03-28 01:33:54",
-      "score": 16,
-      "num_comments": 10,
-      "upvote_ratio": 0.86,
-      "text": "I kept running into the same problem while working on AI projects. Every time I started something new, I had to redo the entire retrieval setup from scratch.\n\nUpload docs, chunk them, generate embeddings, set up a vector DB, build an endpoint, and then repeat it all again for the next project.\n\nIt was not hard, just repetitive and honestly pretty annoying.\n\nI ended up building a small tool for myself to make this easier, and figured I would share it here in case it is useful to others:  \n[https://github.com/Sarthak-Kakkar-03/RAAS](https://github.com/Sarthak-Kakkar-03/RAAS)\n\nI’m calling it **RaaS (Retrieval-as-a-Service)**. The idea is to treat retrieval as its own layer instead of rebuilding it every time.\n\nYou can create separate projects, upload documents through a simple UI, and it handles chunking, embedding, and indexing using Chroma. Each project gets its own API key, and you get a `/retrieve` endpoint that you can plug into whatever model you are using.\n\nIt is designed to be cloned and run in your own environment. You can spin it up with Docker, add your own API keys, and have a working retrieval backend without much setup.\n\nStack is pretty simple. FastAPI with a worker for ingestion, Chroma as the vector database, and a React frontend.\n\nStill early and definitely rough in some places, but it has already made my own workflow cleaner.\n\nIf you have worked on RAG systems before, I am curious how you handle retrieval across multiple projects. That is the part that kept getting messy for me.\n\nAlso happy to hear any feedback, ideas, or things that feel off. You can comment here or open an issue if you end up trying it out.",
-      "is_original_content": false,
-      "link_flair_text": "Tools & Resources",
-      "permalink": "https://reddit.com/r/Rag/comments/1s5n4ae/got_tired_of_rebuilding_rag_pipelines_so_i_made/",
-      "domain": "self.Rag",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "od1842z",
-          "author": "H-Jupiter",
-          "text": "RaaS as a Keyword is widely used in Workday Terminology.  Workday Report as a service. FYI",
-          "score": 3,
-          "created_utc": "2026-03-28 22:30:17",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "od1c3du",
-              "author": "Skakkar_03",
-              "text": "Oh no, really? Considering I only open-sourced it as a free tool (at max might show during job inteviews?), can I leave it as is? Or should I look into changing it?",
-              "score": 1,
-              "created_utc": "2026-03-28 22:52:36",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "od09a7f",
-          "author": "HatmanStack",
-          "text": "Sounds cool, Super simple to switch between different batches of embeddings with metadata.  Would be much simplier than a separate API key for each project, that sounds over engineered.  ",
-          "score": 1,
-          "created_utc": "2026-03-28 19:26:50",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "od1bhr8",
-              "author": "Skakkar_03",
-              "text": "Thank you so much!  \nEvery project in RAAS has a unique api endpoint for retrieval to your bot. I thought the API key was important in case your endpoint accidentally became public? From a perspective that no one should be able to retrieve data on your hosted system directly through retrieval. For example, I have a project on my host that has some old hw files. I don't think my university would be very happy if someone managed to retrieve it all 😂",
-              "score": 1,
-              "created_utc": "2026-03-28 22:49:14",
-              "is_submitter": true,
-              "replies": [
-                {
-                  "id": "od8x7my",
-                  "author": "HatmanStack",
-                  "text": "Brother, you're so far from a legitimate architecture it's crazy.  The main thing is you've built something yourself and hopefully learned a ton.  Now kill it.  An important lesson for any developer/entrprenuer. Start your next project.  The application layer is right.  The  only reliable ROI on AI right now is in RAG.  Look at what other people are doing and use that as your next jumping off point.   keep going.",
-                  "score": 1,
-                  "created_utc": "2026-03-30 03:04:58",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "od6zg75",
-          "author": "nicoloboschi",
-          "text": "That's a neat way to structure retrieval as its own service. With agents becoming more complex, memory systems like Hindsight become valuable for managing context across projects, too. [https://github.com/vectorize-io/hindsight](https://github.com/vectorize-io/hindsight)",
-          "score": 1,
-          "created_utc": "2026-03-29 20:26:53",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ocx2gcz",
-          "author": "-Cubie-",
-          "text": "Why only OpenAI embeddings?",
-          "score": 0,
-          "created_utc": "2026-03-28 07:27:27",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "ocyg4qf",
-              "author": "Skakkar_03",
-              "text": "Version one is currently very opinionated and is made to work around a specific model.  \nI am thinking about adding a config file and supporting more options for future improvements",
-              "score": 3,
-              "created_utc": "2026-03-28 13:58:46",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        }
-      ]
-    },
-    {
-      "id": "1s9runf",
-      "title": "RAG Architecture, RAG Myths Busted & RAG Patterns According to Use Cases - Full-video Coming Soon",
-      "subreddit": "Rag",
-      "url": "https://www.reddit.com/r/Rag/comments/1s9runf/rag_architecture_rag_myths_busted_rag_patterns/",
-      "author": "Tom-Miller",
-      "created_utc": "2026-04-01 17:50:11",
-      "score": 14,
-      "num_comments": 6,
-      "upvote_ratio": 0.89,
-      "text": "If you are interested in Generative AI role as a developer then learning about retrieval augmented generation OR RAG will be super helpful for you.   \nI created a short, highlighting the main concepts in a RAG architecture & types or RAG patterns that are currently working in Production environments in corporate.   \nHappy to share the link for those interested. \n\n[\\#retrievalaugmentedgeneration](https://www.youtube.com/hashtag/retrievalaugmentedgeneration) [\\#genai](https://www.youtube.com/hashtag/genai) [\\#rag](https://www.youtube.com/hashtag/rag)",
-      "is_original_content": false,
-      "link_flair_text": "Discussion",
-      "permalink": "https://reddit.com/r/Rag/comments/1s9runf/rag_architecture_rag_myths_busted_rag_patterns/",
-      "domain": "self.Rag",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "odqlyha",
-          "author": "Koaskdoaksd",
-          "text": "Interested!",
-          "score": 3,
-          "created_utc": "2026-04-01 18:11:58",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "odrbzru",
-          "author": "Kaloulouf",
-          "text": "Interested!",
-          "score": 2,
-          "created_utc": "2026-04-01 20:12:04",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "odqir6j",
-          "author": "sparrowacct86",
-          "text": "Interested!",
-          "score": 2,
-          "created_utc": "2026-04-01 17:57:28",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "odujuyh",
-          "author": "Tom-Miller",
-          "text": "Thanks  for your interest. Here's the link to the youtube short. I am also creating a full-length video on RAG Patterns later.  [https://youtube.com/shorts/IVRa1b7KxUs](https://youtube.com/shorts/IVRa1b7KxUs)",
-          "score": 1,
-          "created_utc": "2026-04-02 08:33:20",
-          "is_submitter": true,
-          "replies": []
-        },
-        {
-          "id": "odv0sw4",
-          "author": "nicoloboschi",
-          "text": "RAG is definitely important for developers in the GenAI space. I'm glad you're creating content around it. [https://hindsight.vectorize.io](https://hindsight.vectorize.io)",
-          "score": 1,
-          "created_utc": "2026-04-02 10:59:25",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ody33oo",
-          "author": "Equivalent_Bat4224",
-          "text": "Interested! ",
-          "score": 1,
-          "created_utc": "2026-04-02 20:09:19",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
       "id": "1s9o7ks",
       "title": "8x faster embedding generation alternative to fastembed for python",
       "subreddit": "Rag",
       "url": "https://www.reddit.com/r/Rag/comments/1s9o7ks/8x_faster_embedding_generation_alternative_to/",
       "author": "pacifio",
       "created_utc": "2026-04-01 15:42:55",
-      "score": 13,
+      "score": 14,
       "num_comments": 3,
-      "upvote_ratio": 0.89,
+      "upvote_ratio": 0.94,
       "text": "A fast embedding library with both **C/C++** and **Python** APIs for generating text embeddings, sparse embeddings, image embeddings, and document reranking using ONNX Runtime. **5-8x faster than fastembed** with 3.5x less memory.\n\n[https://github.com/pacifio/libembedding](https://github.com/pacifio/libembedding)",
       "is_original_content": false,
       "link_flair_text": "Showcase",
@@ -1257,8 +1328,8 @@
       "author": "LisaE_Fanelli",
       "created_utc": "2026-03-31 07:29:09",
       "score": 13,
-      "num_comments": 13,
-      "upvote_ratio": 0.85,
+      "num_comments": 14,
+      "upvote_ratio": 0.88,
       "text": "i keep seeing teams blame the model when a RAG app gives a bad answer, but the moment that changed my mind was watching someone ask about a reimbursement policy and the system \n\nconfidently pulled last year's PDF\n\nafter that nobody on the team cared whether the model was actually decent or not. trust was just gone\n\nthats how most \"RAG quality\" problems feel to me now. retrieval looks fine until a real user asks something messy from buried pages, duplicated docs, outdated PDFs, or three slightly different versions of the same policy\n\ni've been testing a few setups lately, Denser was one of them, and honestly the thing that mattered most to me wasnt model quality. it was whether i could actually see where the answer came from and verify it fast\n\nif i can check the source quickly im way more forgiving. if i cant, even a good answer starts feeling off\n\nis that what usually kills trust first in production RAG for you guys too? or am i over-indexing on citations",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -1382,6 +1453,15 @@
           "text": "You're not over-indexing on citations — you're describing the exact line between toy RAG and production RAG.\n\nI've been building a RAG engine (Wauldo), and this trust problem is precisely what pushed me to rethink the whole design.\n\nThe core shift for me was this:  \n→ **the answer is not the output — the audit trail is**\n\nWhat I ended up shipping:\n\n* Every response includes a **confidence score**\n* A strict **grounded flag** (true/false)\n* The **retrieval path** (which strategy actually produced the answer)\n* The **source chunks + relevance scores**\n\nNo hidden reasoning, no black box.\n\nIf the system can’t justify the answer → it refuses.\n\nMost RAG systems treat explainability as a debug feature.  \nIn production, it needs to be part of the contract.\n\nCurious how you think about this — especially where to draw the line between UX simplicity and full transparency.",
           "score": 1,
           "created_utc": "2026-03-31 19:40:11",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oe4taqa",
+          "author": "Agreeable_Emotion163",
+          "text": "Most RAG setups retrieve over a single corpus (your docs, your knowledge base, whatever). The real world is clearly a lot messier than that. the answer to someone's question usually lives across 3-4 different systems (a slack thread, a google doc, an email chain, a linear ticket). no single pipeline sees all of it.\n\nso the system confidently answers from the one source it can see, and the user who has the full picture immediately knows it's wrong. that's not a hallucination problem, that's an architecture problem. You SIMPLY can't retrieve what you never ingested. Also the data quality-first approach mentioned above is spot on but i'd push it further. Data quality AND data completeness are both needed. You can have perfectly chunked docs and still fail because the critical context was in a slack DM your pipeline never saw.\n\ni've actually been building something in this space - a permission-aware context layer that sits across your whole workspace and retrieves from all your tools at once instead of just one corpus. the biggest unlock was realizing the trust problem mostly disappears when the AI has access to the same, if not way broader because it is not bandwidth constrained, surface area as the human does. The cherry on top is a robust in-text citation feature. \n\ncurious if anyone here has tried retrieval across multiple disconnected sources? feels like that's where most of the trust issues actually start",
+          "score": 1,
+          "created_utc": "2026-04-03 20:02:04",
           "is_submitter": false,
           "replies": []
         }
@@ -1527,7 +1607,7 @@
       "url": "https://www.reddit.com/r/Rag/comments/1s7nayw/architecture_review_local_multiagent_rag_for/",
       "author": "safepesca",
       "created_utc": "2026-03-30 10:59:15",
-      "score": 13,
+      "score": 12,
       "num_comments": 9,
       "upvote_ratio": 1.0,
       "text": "Hi everyone. I'm an AI student currently working on my Master's thesis. My professor proposed building an AI-as-a-Service tool for the local public administration (city halls, municipalities) based on RAG and AI Agents.\n\nI'd like to share what I've planned so far to see if I'm moving in the right direction and ask for some advice on the tooling. Please keep in mind this is my first complex project of this kind, so feel free to explain things to me \"like I'm 5\".\n\n**The Use Case** The application needs to help government clerks draft specific official documents in Italian (for example, acts regarding public works, public job postings, etc.). The input could be a text prompt (maybe supported by writing hints) or an incomplete draft.\n\nThe drafting process must strictly follow the digital formatting and legal guidelines set by the national digital agency. These guidelines are contained in dozens of heavy PDFs. Also, due to strict privacy regulations with government data, everything MUST run 100% locally and be open-source/free.\n\n*\\[Hardware note: I will be running this on a machine with 32GB of RAM and an RTX 5060 Ti with 16GB VRAM\\]*\n\n**My Architecture Idea so far:**\n\n* **VectorDB & Embeddings:** The guidelines will be vectorized. I chose the BAAI BGE-M3 embedding model because I read it handles bureaucratic/legal Italian quite well. I haven't chosen the VectorDB yet. I would love your opinion on ChromaDB vs Qdrant vs PostgreSQL + pgvector for this specific scenario.\n* **The Core (4 Agents):** \n   * \\* **Agent 1 (Drafter):** Writes the document following the RAG guidelines. I was planning to use Qwen 2.5 14B Instruct (running locally via Ollama).\n   * **Agent 2 (Validator):** Checks the contextual and syntactic correctness of the draft against the rules. *\\[I am also planning to pair this LLM with a hard-coded Python rule engine to strictly verify structural compliance\\].*\n   * **Agent 3 (Archivist):** Will manage metadata extraction (I still need to research this part deeply).\n   * **Agent 4 (Interoperability):** Will format the final package to comply with external government APIs.\n* **Framework:** My idea was to wire everything up using LangChain and LangGraph.\n\n**My dilemma:** My thesis advisor approved the ideas so far, but he challenged me to evaluate \"more innovative\" tools, pointing out that LangChain/LangGraph are becoming the standard. He suggested I look into these tools: CrewAI, Agno (Phidata), Haystack, OpenClaw, ZeroClaw, OpenFang, n8n, FlowiseAI.\n\nWhich of these tools do you think would actually help me build this deterministic, local workflow better than LangGraph?\n\nThanks to anyone who will spend time reading this and helping me out!",
@@ -1646,7 +1726,7 @@
           "id": "od2i88e",
           "author": "token----",
           "text": "If data is tabular and structured why not just put it in SQL and let the model access it through queries, even low parameters models can perform SQL queries with more than 90% accuracy",
-          "score": 6,
+          "score": 5,
           "created_utc": "2026-03-29 03:03:37",
           "is_submitter": false,
           "replies": []
@@ -1700,6 +1780,79 @@
       ]
     },
     {
+      "id": "1s9runf",
+      "title": "RAG Architecture, RAG Myths Busted & RAG Patterns According to Use Cases - Full-video Coming Soon",
+      "subreddit": "Rag",
+      "url": "https://www.reddit.com/r/Rag/comments/1s9runf/rag_architecture_rag_myths_busted_rag_patterns/",
+      "author": "Tom-Miller",
+      "created_utc": "2026-04-01 17:50:11",
+      "score": 11,
+      "num_comments": 6,
+      "upvote_ratio": 0.8,
+      "text": "If you are interested in Generative AI role as a developer then learning about retrieval augmented generation OR RAG will be super helpful for you.   \nI created a short, highlighting the main concepts in a RAG architecture & types or RAG patterns that are currently working in Production environments in corporate.   \nHappy to share the link for those interested. \n\n[\\#retrievalaugmentedgeneration](https://www.youtube.com/hashtag/retrievalaugmentedgeneration) [\\#genai](https://www.youtube.com/hashtag/genai) [\\#rag](https://www.youtube.com/hashtag/rag)",
+      "is_original_content": false,
+      "link_flair_text": "Discussion",
+      "permalink": "https://reddit.com/r/Rag/comments/1s9runf/rag_architecture_rag_myths_busted_rag_patterns/",
+      "domain": "self.Rag",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "odqlyha",
+          "author": "Koaskdoaksd",
+          "text": "Interested!",
+          "score": 3,
+          "created_utc": "2026-04-01 18:11:58",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "odrbzru",
+          "author": "Kaloulouf",
+          "text": "Interested!",
+          "score": 2,
+          "created_utc": "2026-04-01 20:12:04",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "ody33oo",
+          "author": "Equivalent_Bat4224",
+          "text": "Interested! ",
+          "score": 2,
+          "created_utc": "2026-04-02 20:09:19",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "odqir6j",
+          "author": "sparrowacct86",
+          "text": "Interested!",
+          "score": 2,
+          "created_utc": "2026-04-01 17:57:28",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "odujuyh",
+          "author": "Tom-Miller",
+          "text": "Thanks  for your interest. Here's the link to the youtube short. I am also creating a full-length video on RAG Patterns later.  [https://youtube.com/shorts/IVRa1b7KxUs](https://youtube.com/shorts/IVRa1b7KxUs)",
+          "score": 1,
+          "created_utc": "2026-04-02 08:33:20",
+          "is_submitter": true,
+          "replies": []
+        },
+        {
+          "id": "odv0sw4",
+          "author": "nicoloboschi",
+          "text": "RAG is definitely important for developers in the GenAI space. I'm glad you're creating content around it. [https://hindsight.vectorize.io](https://hindsight.vectorize.io)",
+          "score": 1,
+          "created_utc": "2026-04-02 10:59:25",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
       "id": "1s65m8z",
       "title": "How do you handle chat history in a RAG chatbot without polluting retrieval queries?",
       "subreddit": "Rag",
@@ -1708,7 +1861,7 @@
       "created_utc": "2026-03-28 16:54:51",
       "score": 11,
       "num_comments": 8,
-      "upvote_ratio": 1.0,
+      "upvote_ratio": 0.93,
       "text": "I am currently building a RAG-based chatbot and running into a problem with adding memory.\n\nIf I pass the full chat history into the retrieval query, the vector search gets confused by all the previous context and pulls irrelevant chunks. But if I don't pass any history, the bot can't handle follow-up questions. \n\nAny experience or stories for dealing with this issue?                       ",
       "is_original_content": false,
       "link_flair_text": "Discussion",
