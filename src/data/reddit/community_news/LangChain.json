@@ -1,11 +1,11 @@
 {
   "metadata": {
-    "last_updated": "2026-04-10 17:06:24",
+    "last_updated": "2026-04-11 03:09:57",
     "time_filter": "week",
     "subreddit": "LangChain",
     "total_items": 20,
     "total_comments": 107,
-    "file_size_bytes": 180429
+    "file_size_bytes": 182347
   },
   "items": [
     {
@@ -15,7 +15,7 @@
       "url": "https://www.reddit.com/r/LangChain/comments/1sebsv2/we_opensourced_a_claude_code_for_investment/",
       "author": "MediumHelicopter589",
       "created_utc": "2026-04-06 21:13:39",
-      "score": 76,
+      "score": 75,
       "num_comments": 15,
       "upvote_ratio": 0.93,
       "text": "**TL;DR:** Open-sourced a full-stack finance agent (React 19, FastAPI, PostgreSQL, Redis) built on deepagents + LangGraph. Two modes (PTC for full sandbox execution, Flash for quick answers). 24-layer middleware stack, MCP-to-Python code generation, async subagent orchestration, persistent workspaces. BYOK for any LLM provider. Apache 2.0 at [github.com/ginlix-ai/langalpha](https://github.com/ginlix-ai/langalpha).\n\nThe detailed write-up below is meant for agents. No human should have to suffer through this wall of text — throw this post and the [README](https://github.com/ginlix-ai/LangAlpha/blob/main/README.md) at your agent and ask it to break down what's interesting to you.\n\n---\n\nWe've been building a vertical agent in finance for the past three months. Decided to open-source everything under Apache 2.0. Full-stack app: React 19 frontend, FastAPI backend, PostgreSQL, Redis. Bring your own key (BYOK) for any LLM provider, or plug in your existing Claude Code / Codex OAuth subscription.\n\nWe liked how harnesses like deepagents and Claude Code approach things: give the agent a filesystem and a working runtime. Filesystem tools, bash, and code execution are the foundation — everything else builds on top. deepagents gave us pluggable sandbox backends, middleware hooks, and subagent scaffolding. We kept those abstractions and extended them based on what we needed — persistent workspaces, research workflows, a multi-agent system, and financial data pipelines.\n\nLearned a lot along the way — and still figuring some things out. Sharing this here because we'd like to hear how others in the community are thinking about these problems. This post walks through some key features and design decisions: middleware, tools/data, prompt management, subagents, and the workspace system that ties it all together. If you've built something similar or taken a different approach to any of these, we'd genuinely love to learn from it.\n\nA little background before we dive into the details. We built two agent modes. **PTC** (Programmatic Tool Calling) Agent is the full agent — writes and executes Python in a sandbox, with MCP data servers, file tools, and subagents. **Flash** Agent is the lightweight mode — no sandbox overhead, no code execution. It handles quick questions, helps manage workspaces, and dispatches complex missions to PTC agents with the right workspace context (routing layer still in progress).\n\n---\n\n## Middleware\n\nLangChain v1 gives you the middleware pattern. We built 24 layers on top. Every production problem became a middleware layer. Here are the ones worth talking about:\n\n**Steering — redirect a running agent mid-stream**\n\nFinancial research involves a long-running process. The agent might be halfway through a DCF model when the user realizes they want to add a peer comparison, change the target company, or — more critically — the user spots the agent making a wrong call that could lead to a bad conclusion. Without steering, the only option is to wait for the full run to finish or kill it and start over — both waste compute and context.\n\nOur approach: a Redis-backed steering layer. The user's follow-up gets pushed to a list keyed by thread ID. Before every LLM call, the steering middleware atomically drains the list and injects messages into conversation state. The agent sees them naturally on its next reasoning step — no restart, no lost context.\n\n**Multimodal injection**\n\nThe agent just uses the Read tool — one tool handles text files, images, and PDFs. Middleware intercepts the read, detects the file type, base64-encodes visual content, and injects it as proper content blocks the model can see. If the model doesn't support images or PDFs, the file is stored in the working directory and the agent can still process it with external tools in the sandbox.\n\n**Context management — two-tier compaction**\n\nContext fills up fast when the agent is executing code and crunching financial data.\n\n*Tier 1 — message truncation:* Large tool call arguments (file writes, code execution) and redundant tool results (duplicate file reads, non-critical paths) in older messages get truncated. Originals are offloaded to sandbox files first — nothing is lost.\n\n*Tier 2 — LLM summarization:* When token count gets critical, conversation history is partitioned, evicted messages are saved to sandbox files, and everything before the cutoff is replaced with a summary.\n\nThe checkpoint is never modified — only the view passed to the LLM changes.\n\nFor thresholds, we use the actual token count returned from the last API call plus a buffer budget — no extra cost, since the count is already in the response. We also emit an SSE event to the frontend on every LLM call, so the user sees the context window utilization in real time. Evicted content lands in the right workspace directories where the agent can find it later.\n\n**Large result eviction**\n\nTool results over 40k tokens get written to a file and replaced with a head/tail preview + path. The agent pages through with read offsets. Prevents one massive output from blowing the context.\n\n**Human-in-the-loop — ask questions, propose plans**\n\nTwo HITL mechanisms, both built on LangGraph's `interrupt()`. The agent can ask the user a question mid-run (with structured options) — the graph suspends, the frontend shows the question, and the agent resumes with the answer as a normal tool result. Separately, plan mode gives the agent a two-phase workflow: explore the problem, then submit a plan for user approval before executing. Approve and it proceeds; reject and it stops.\n\n**Skills middleware — dynamic tool exposure**\n\nBeyond the existing skill conventions widely used everywhere, we further allow skills that bundle with their own tools. The tools are pre-registered with the graph, but the middleware holds them from the LLM's context until the skill is activated. This keeps the tool surface small by default and expands it on demand as the agent discovers capabilities.\n\nTwo activation paths depending on agent mode. In PTC mode (with sandbox), the agent discovers skills by reading their definition files from the workspace — the middleware intercepts the read and activates the skill. In Flash mode (no sandbox), the agent calls a `LoadSkill` tool directly. Either way, the skill's bound tools appear on the next model call.\n\n23 built-in skills plus user-installed ones. Drop a skill folder in the sandbox, it gets picked up on the next message.\n\n**Secret redaction**\n\nEvery tool result is scanned against all configured API keys and workspace vault secrets. Matches get replaced with `[REDACTED]`. Vault secrets are encrypted at rest with pgcrypto — plaintext never hits the application layer. The sandbox gets a Python module for accessing secrets, and the redaction pipeline catches them on the way out if the agent prints one.\n\n---\n\n## Tools and Data\n\n**The problem with financial data and JSON tool calls**\n\nFinancial data overflows context fast. Five years of daily prices, intraday data at small intervals, full financial statements across quarters — each dataset is critical for analysis but accumulates thousands of tokens before the agent even starts reasoning. Dumping raw data into the context window means the model burns tokens on data it should be *processing*, not *reading*. What you actually want: the agent post-processes data however it needs to — filter, aggregate, run pandas, build charts — and only the result hits the context.\n\n**PTC: MCP servers become Python APIs automatically**\n\nAt startup, we connect to each MCP server, pull tool schemas, and auto-generate a Python module per server — typed functions with docstrings and proper signatures — plus a markdown doc per tool. These get uploaded into the sandbox. The agent writes `from tools.fundamentals import get_financial_statements` and gets back a Python dict it can pass straight to pandas — filter, aggregate, visualize, whatever it needs. Only the final result enters the context.\n\nThis works with any MCP server — including ones built by data vendors and third parties. The agent gets a programmatic data layer instead of just a tool call interface.\n\n**We kept JSON tool calls too**\n\nFor high-frequency queries, we built curated snapshot tools — pre-shaped responses for the most common lookups so the agent doesn't take the full sandbox path for a simple question. These snapshots also control what information the agent sees. We inject time-sensitive context and reminders into the tool results — market hours, data freshness, recent events — so the agent stays oriented on what's current vs stale.\n\nThe routing is explicit in the system prompt: direct question → JSON tool, compute/compare/model → write code with MCP imports. Both paths coexist.\n\nJSON tool calls also serve a second purpose: artifacts. We use a tool call artifact system — separate from the raw tool result — that gives fine-grained control over what the frontend renders vs what the agent sees. The frontend gets formatted React components (charts, tables, quote cards), while the agent gets the data it needs for reasoning. PTC handles the heavy computation; artifacts handle the presentation.\n\n**Per-server control and lazy loading**\n\nAround 80 MCP tools across our servers. Each server has independent controls:\n\n- **Enabled/disabled** — disabled servers never connect, their modules get pruned\n- **Exposure mode** — \"summary\" (server name + tool count + import path) or \"detailed\" (full signatures)\n\nSummary mode is the default. A server with 20 tools takes the same prompt space as one with 3. The agent reads the tool's markdown doc before first use — runtime discovery instead of upfront context burn.\n\n---\n\n## Prompt Management\n\n**How the system message is constructed**\n\nThe system message isn't a single string. It's four separate content blocks, each managed by a different middleware layer:\n\n1. **Main system prompt** — one Jinja2 render at agent creation. The template pulls in around 13 reusable components: task workflow, tool guide, subagent coordination, data processing, visualizations, citation rules, security policy, workspace paths, and more. A section toggle controls which components render — the PTC agent gets everything, Flash gets a minimal set, each subagent type overrides selectively (research subagent drops tool guide and data processing; equity-analyst gets the full stack).\n\n   The tool summary is also built from the MCP registry at startup — same lazy loading as Part 2. Each server is a compact entry in the prompt (name, description, tool count, import path), and the agent reads per-tool docs from the sandbox before first use.\n\n2. **Skills manifest** — rebuilt and appended every LLM call. A lightweight summary of available skills with descriptions and activation hints. The full skill definition only loads when the agent activates it.\n\n3. **Workspace context (`agent.md`)** — appended every call. The agent's persistent memory: goals, findings, file index.\n\n4. **Runtime context** — current time and user profile, appended last.\n\nBeyond the system message, three more injection points feed context into the conversation: mid-turn steering (user messages injected between LLM calls), multimodal injection (images and PDFs intercepted from file reads, injected as content blocks), and system reminders (structured context appended to user messages — used when the frontend references additional context like highlighted text in a report, or to tell the agent which channel the conversation came from).\n\nEach subagent type gets a tailored prompt via a resolution chain: custom string → custom template → role template wrapped in the shared base. Skills can be pre-baked at compile time so the subagent has workflow instructions from turn one.\n\n**Cache control**\n\nThe reason we split the system message into four blocks is caching. The static system prompt is rendered once at agent creation and never re-rendered — timestamp is captured at initialization and reused. Dynamic content goes in separate blocks that append after. What gets cached depends on middleware ordering.\n\nFor Anthropic models, we take advantage of their prompt caching API (Anthropic lets you mark breakpoints in the system message — everything before the breakpoint gets cached and subsequent requests read from cache at 0.1× the input token cost). A caching middleware runs outermost and tags the last system message block with a `cache_control` breakpoint. At the time it runs, the skills manifest is the last block — so the breakpoint lands there. Then the inner middlewares append workspace context and runtime context *after* the breakpoint. The static prompt + skills manifest get cached across turns. Tools also get a breakpoint on the last tool in the list, staying within the 4-breakpoint limit.\n\nThe key is middleware ordering — what runs before vs after the caching layer determines what's in the cached prefix and what isn't.\n\nFor non-Anthropic providers, the caching middleware is a no-op — the static-once render still avoids re-computation, but there's no API-level cache breakpoint.\n\n---\n\n## Subagents / Agent Team\n\nWe extended deepagents' subagent spawning into a stateful agent team system.\n\n**Five built-in types** — research, general-purpose, data-prep, equity-analyst, report-builder — each with different tool access, iteration limits, and prompt components. Custom types can be defined in config.\n\nAll stateful subagents share the same sandbox (files written by one are visible to others) but have isolated LLM context.\n\n**Three lifecycle actions:**\n\n- **Init** — fire and forget. Spawns the subagent as a background task, returns immediately. Multiple spawns in one LLM response run concurrently.\n- **Update** — redirect mid-flight. Pushes a message via Redis that gets injected before the subagent's next LLM call. Change direction without killing it.\n- **Resume** — rehydrate from checkpoint. Each subagent's full conversation state persists to Postgres under a scoped checkpoint namespace. On resume, the complete history loads back, the new prompt appends on top, and it continues from where it stopped.\n\nThe orchestrator loop is fully async. The main agent can finish its turn and respond to the user while subagents keep running in the background. When a subagent completes, the orchestrator injects results into the main agent's state and re-invokes it — the user sees a new response with the subagent's findings folded in. User steering can also interrupt waits early.\n\nThis part is still evolving — orchestration across multiple long-running subagents with shared filesystem state gets complicated.\n\n---\n\n## Persistent Workspaces — Tying It All Together\n\nEverything from Parts 1-4 lives in the sandbox filesystem. The decision everything else depends on: give the agent a persistent workspace.\n\nEach workspace maps 1:1 to a Daytona cloud sandbox (or local Docker). Full Ubuntu environment with Python, Node, and common packages pre-installed. MCP data servers run as persistent subprocesses inside.\n\n**Workspace as a managed codebase:**\n\nWe wanted the agent to manage its workspace with conventions and predictable structure instead of dumping files wherever. It follows ground rules:\n\n```\nagent.md                        — workspace memory (goals, findings, file index)\nwork/<task_name>/               — per-task working area\nwork/<task_name>/data/          — task-specific data\nwork/<task_name>/charts/        — task-specific visualizations\nresults/                        — finalized reports only\ndata/                           — shared datasets across threads\ntools/                          — auto-generated MCP Python modules (read-only)\n.agents/threads/<tid>/          — offloaded tool results and conversation history\n.agents/skills/                 — skill modules + lock file\n.agents/user/                   — portfolio, watchlist, preferences (read-only)\n```\n\nEvery task gets its own working directory. Charts stay with their task; reports embed them via relative paths. Only finalized work goes to `results/`.\n\n**Thread-level runtime data:** Evicted tool results, truncated arguments, offloaded conversation history — all land in `.agents/threads/<tid>/`. The workspace accumulates a searchable record of every thread. The agent can grep across it when it needs to find something from a previous run.\n\n**User data:** Portfolio, watchlist, and preferences in `.agents/user/`. Read-only. When the user says \"check my portfolio,\" the agent reads from here.\n\n**`agent.md` — workspace memory:** Injected into every LLM call (see Part 3, block 3). The agent maintains it — key findings, thread index, file index. Start research Monday, pick it up Thursday, full context.\n\n**Keeping it all in sync:**\n\nOn reconnect to a sandbox, we don't re-upload everything. A manifest stores SHA-256 hashes for five module types: MCP servers, tool modules, skills, tokens, data client. The sync diffs local vs remote and only uploads what changed. Warm reconnects with no changes upload nothing.\n\n**Skills lock file:** Instead of downloading every skill's definition individually on each session, a single lock file (`.agents/skills/skills-lock.json`) contains parsed metadata for all installed skills. Discovery is three-tier: in-memory cache → lock file → individual file fallback. Any skill resolved via fallback gets a lock entry written back automatically. A post-turn housekeeping step reconciles the lock against the filesystem.\n\n---\n\nThis is still a work in progress. Happy to discuss deeper on any of these, and genuinely curious how others are handling similar problems. If you find the project useful, a star on [GitHub](https://github.com/ginlix-ai/LangAlpha) helps others discover it.\n",
@@ -165,8 +165,8 @@
       "author": "Nir777",
       "created_utc": "2026-04-08 15:45:34",
       "score": 62,
-      "num_comments": 26,
-      "upvote_ratio": 0.92,
+      "num_comments": 27,
+      "upvote_ratio": 0.91,
       "text": "Hi everyone,\n\nI’ve spent the last 18 months maintaining the **RAG Techniques** repository on GitHub. After looking at hundreds of implementations and seeing where most teams fall over when they try to move past a simple \"Vector DB + Prompt\" setup, I decided to codify everything into a formal guide.\n\nThis isn’t just a dump of theory. It’s an intuitive roadmap with custom illustrations and side-by-side comparisons to help you actually choose the right architecture for your data.\n\nI’ve organized the 22 chapters into five main pillars:\n\n* **The Foundation:** Moving beyond text to structured data (spreadsheets), and using proposition vs. semantic chunking to keep meaning intact.\n* **Query & Context:** How to reshape questions before they hit the DB (HyDE, transformations) and managing context windows without losing the \"origin story\" of your data.\n* **The Retrieval Stack:** Blending keyword and semantic search (Fusion), using rerankers, and implementing Multi-Modal RAG for images/captions.\n* **Agentic Loops:** Making sense of Corrective RAG (CRAG), Graph RAG, and feedback loops so the system can \"decide\" when it has enough info.\n* **Evaluation:** Detailed descriptions of frameworks like RAGAS to help you move past \"vibe checks\" and start measuring faithfulness and recall.\n\n**Full disclosure:** I’m the author. I want to make sure the community that helped build the repo can actually get this, so I’ve set the Kindle version to **$0.99** for the next 24 hours (the floor Amazon allows).\n\nThe book actually hit #1 in \"Computer Information Theory\" and #2 in \"Generative AI\" this morning, which was a nice surprise.\n\nHappy to answer any technical questions about the patterns in the guide or the repo!\n\n**Link in the first comment.**  \n",
       "is_original_content": false,
       "link_flair_text": "Announcement",
@@ -178,7 +178,7 @@
           "id": "of1qwnl",
           "author": "Immediate-Engine9837",
           "text": "Production RAG deployments usually optimize for retrieval precision without considering latency tradeoffs, then get surprised when p99 explodes after stacking rerankers. Most are genuinely over-engineered at the retrieval layer - simple hybrid search hits 90% of the performance for half the cost, tbh. Also, teams rarely measure whether better retrieval actually improves answer quality versus assuming it does... which depends heavily on your domain and chunking strategy.",
-          "score": 4,
+          "score": 5,
           "created_utc": "2026-04-08 18:58:53",
           "is_submitter": false,
           "replies": []
@@ -308,7 +308,7 @@
                   "id": "ofe4ny9",
                   "author": "SharpRule4025",
                   "text": "You nailed the evaluator angle. When the scoring LLM reads 93K tokens of navigation and footer text alongside the actual content, it loses signal on what matters. Faithfulness drops because the context window is full of irrelevant matches. We saw the same pattern benchmarking extraction accuracy. Structured JSON extraction hit 94 percent factual accuracy on the same pages where markdown-based retrieval came in at 71 percent. The retrieval step works fine, the problem is what gets fed into it.\n\nThis is exactly why we built alterlab.io around typed JSON output from the start. You pass in a schema or let the Cortex AI layer figure out the structure, and you get back clean fields instead of a wall of text. For RAG specifically, that means you can index price as a number, dates as dates, and paragraphs as paragraphs. No chunking strategy needed to separate the signal from the UI noise.",
-                  "score": 1,
+                  "score": 2,
                   "created_utc": "2026-04-10 14:53:30",
                   "is_submitter": false,
                   "replies": []
@@ -393,7 +393,7 @@
       "author": "mee-gee",
       "created_utc": "2026-04-04 21:24:49",
       "score": 27,
-      "num_comments": 26,
+      "num_comments": 27,
       "upvote_ratio": 1.0,
       "text": "General concerns we have it seeing that other agents built with LangChain/LangGraph or even the OpenAI Agents SDK seem to have better latency than our Google ADK agents.\n\nI understand a lot about latency is about the infra. We have it on a fairly standard stack (Railway + Python, Supabase + SQLAlchemy, Vercel + Nextjs) - so unless I'm missing something huge about our infra, we're thinking about translating.\n\nI would love the thoughts of people who have built with both, though.",
       "is_original_content": false,
@@ -418,6 +418,15 @@
               "created_utc": "2026-04-05 02:43:48",
               "is_submitter": false,
               "replies": [
+                {
+                  "id": "offf2h5",
+                  "author": "hwchase17",
+                  "text": "Unfortunately I don’t think super soon :/",
+                  "score": 2,
+                  "created_utc": "2026-04-10 18:19:19",
+                  "is_submitter": false,
+                  "replies": []
+                },
                 {
                   "id": "oeer8iw",
                   "author": "crishoj",
@@ -552,7 +561,7 @@
       "created_utc": "2026-04-09 05:55:54",
       "score": 24,
       "num_comments": 10,
-      "upvote_ratio": 0.94,
+      "upvote_ratio": 0.96,
       "text": "I've been researching the AI agent ecosystem and noticed two very different approaches emerging:\n\n**Fully managed agent APIs:**\n\n* Anthropic Managed Agents — versioned agent configs, hosted infra, built-in tool suite\n* LangGraph Cloud — hosted deployment of LangGraph agents\n* AWS Bedrock Agents\n\n**Open-source SDKs/frameworks:**\n\n* LangGraph (graph-based orchestration, most flexible but steepest learning curve)\n* OpenAI Agents SDK (lightweight, handoff model, great for prototyping)\n* Google ADK (4 language SDKs, A2A protocol, GCP-native)\n* CrewAI (role-based collaboration, easiest onboarding)\n* AutoGen (multi-agent conversation/debate)\n\nA few questions for those building agents in production:\n\n1. **Managed vs. self-hosted** — Are you willing to pay for fully managed agent infra, or do you prefer owning the stack?\n2. **Lock-in concerns** — Anthropic's Managed Agents ties you to Claude models. Does that matter, or is model quality worth the trade-off?\n3. **Multi-agent** — Anyone actually running multi-agent setups in prod? Which framework handles it best?\n4. **LangGraph** — It seems like the most mature open-source option. Is the complexity worth it vs. simpler alternatives like CrewAI?\n\nWould love to hear what's working (and what's not) for people who've moved past the prototype stage.",
       "is_original_content": false,
       "link_flair_text": null,
@@ -564,7 +573,7 @@
           "id": "of6wjti",
           "author": "rshah4",
           "text": "The biggest users of managed frameworks seem to be consultants that want to push workloads/managements off their desks. Most teams I see use OSS frameworks where it makes sense. (You don't always need a framework). The biggest value for frameworks is it helps standardize your team/agents so you aren't building the same pieces in 6 different ways. ",
-          "score": 4,
+          "score": 5,
           "created_utc": "2026-04-09 14:08:46",
           "is_submitter": false,
           "replies": []
@@ -573,7 +582,7 @@
           "id": "of6xemb",
           "author": "captain_racoon",
           "text": "As a person that has used both, managed and open framework.  I will say that neither will come out victorious because it depends on the use case.  For example, AWS Bedrock Agents are very vanilla and if youre just looking for a very straight forward \"agent\" with no concern for hosting, managing, etc, this is your ticket. But dont expect to do much with Bedrock Agent.\n\nIf you want to kick it up a notch and really start doing semi-complex to complex workflows and agents, then the Open Frameworks will fit much better for this use case.  Gives you more control, more flexibility etc.  Yes you have to contest with managing your own infra.\n\nYou did forget about AWS AgentCore.  The sweet spot.  You can use your favorite Open Framework, place it into S3, and AWS takes care of the rest.  What i dont like about AWS is that the monitoring and logging is non existent compared to something like LangSmith.\n\nEdit: Words.",
-          "score": 2,
+          "score": 3,
           "created_utc": "2026-04-09 14:12:42",
           "is_submitter": false,
           "replies": []
@@ -584,15 +593,6 @@
           "text": "Weird that no one is actually answering your questions.\n\n1. This requires a \"it depends answer\", managed if you just want to start fast and don't care about control. Self-hosted if you need more control and are ok with the trade-off of maintenance and infra issues that come with it.\n2. If you are going managed it probably means you don't care about lock-in for now, in this case you are valuing faster implementation rather than optionality of models.\n3. I have used LangGraph, haven't explore the other options so I can really provide an informed comparison here. LangGraph tho does very well for multi-agent workflows.\n4. And again, depends on what you are doing and the control you want to have. LangGraph is kind of the low level option if you compare it with CrewAI.",
           "score": 1,
           "created_utc": "2026-04-09 15:27:33",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "of8y32m",
-          "author": "Slight_Comparison986",
-          "text": "I'll answer your question. TL:DR, I've spent a month digging into this and I've settled onto langgraph's deepagent implementation for my use case. I also think Vercel AI is good contender. \n\nManaged vs. self-hosted\n\nI prefer owning the stack. But to be honest, this depends on the person/team, and willingness to spin-up and maintain infra, and cost sensitivity. It really comes down to time spent building and maintaining. I personally don't mind maintaining the infra and it's really not too complicated for an agent. If you want to save time and get a managed solution; I'll add that AWS is heavily pushing Bedrock with tons of subsidies for infra credits. Vercel AI is also popular amongst early-stage startups. \n\nLock-in concerns \n\nYes, I don't like being tied into a single model provider. There's latency differences and performance differences. I think GPT-5.4 and Claude Opus and Sonnet can be very different depending on the use case. I prefer GPT-5.4 for long-horizon tasks that are operations heavy / data heavy, and I prefer claude models for agent tasks that require writing. I use LangGraph and for a research chat bot I can have GPT-5.4 in the harness doing research but switch to claude for synthesizing and writing the final output. \n\nIf you want to get advanced, there's other differences and trade-offs in terms of input token optimization. LangGraph's out-of-box deepagent has a built input-token caching middleware for claude models. Both GPT and Claude support prefix-based input caching but they differ slightly and claude models also support response prefills (which opens the door for cache-optimizations).\n\nMulti-agent \n\nI personally steer away from multi-agent setups unless I know a specific task / workflow requires it. Multi-agent is often a good idea because it maps well to how we think about breaking up tasks and working in teams as humans. But, there's different camps for this and some startups lean into multi-agent and some don't. \n\nThe best balance I have is allowing a single main agent harness which can spawn general subagents as a tool. Langgraph's deepagent implementation does this well. \n\nMy advice is to avoid relying on multi-agents and subagents. Agent to agent communication is incredibly complex and we want want to avoid over-structuring agentic approaches to problems (see richard sutton's bitter lesson). \n\n**LangGraph** \n\nIdk if I can say for sure it's the most \"mature\" open-source option.   \nTbh, if you're looking to built LLM workflows, LlamaIndex's Workflow library is way better than LangGraph. LangGraph seriously overcomplicates the abstractions for LLM workflows. The event-based flow structure of LlamaIndex Workflow is much better.\n\nIf you're looking to build an agent harness, then LangGraph is great for this, especially their deepagent's implementation. I think their design with the middleware abstraction is done quite well. \n\nI honestly didn't pay any attention to CrewAI, any serious AI engineer knows that \"role-based\" agents is anthropomorphizing LLM and baking an implementation with that is a mistake. \n\n  \n",
-          "score": 1,
-          "created_utc": "2026-04-09 19:36:31",
           "is_submitter": false,
           "replies": []
         },
@@ -624,6 +624,15 @@
           "replies": []
         },
         {
+          "id": "of8y32m",
+          "author": "Slight_Comparison986",
+          "text": "I'll answer your question. TL:DR, I've spent a month digging into this and I've settled onto langgraph's deepagent implementation for my use case. I also think Vercel AI is good contender. \n\nManaged vs. self-hosted\n\nI prefer owning the stack. But to be honest, this depends on the person/team, and willingness to spin-up and maintain infra, and cost sensitivity. It really comes down to time spent building and maintaining. I personally don't mind maintaining the infra and it's really not too complicated for an agent. If you want to save time and get a managed solution; I'll add that AWS is heavily pushing Bedrock with tons of subsidies for infra credits. Vercel AI is also popular amongst early-stage startups. \n\nLock-in concerns \n\nYes, I don't like being tied into a single model provider. There's latency differences and performance differences. I think GPT-5.4 and Claude Opus and Sonnet can be very different depending on the use case. I prefer GPT-5.4 for long-horizon tasks that are operations heavy / data heavy, and I prefer claude models for agent tasks that require writing. I use LangGraph and for a research chat bot I can have GPT-5.4 in the harness doing research but switch to claude for synthesizing and writing the final output. \n\nIf you want to get advanced, there's other differences and trade-offs in terms of input token optimization. LangGraph's out-of-box deepagent has a built input-token caching middleware for claude models. Both GPT and Claude support prefix-based input caching but they differ slightly and claude models also support response prefills (which opens the door for cache-optimizations).\n\nMulti-agent \n\nI personally steer away from multi-agent setups unless I know a specific task / workflow requires it. Multi-agent is often a good idea because it maps well to how we think about breaking up tasks and working in teams as humans. But, there's different camps for this and some startups lean into multi-agent and some don't. \n\nThe best balance I have is allowing a single main agent harness which can spawn general subagents as a tool. Langgraph's deepagent implementation does this well. \n\nMy advice is to avoid relying on multi-agents and subagents. Agent to agent communication is incredibly complex and we want want to avoid over-structuring agentic approaches to problems (see richard sutton's bitter lesson). \n\n**LangGraph** \n\nIdk if I can say for sure it's the most \"mature\" open-source option.   \nTbh, if you're looking to built LLM workflows, LlamaIndex's Workflow library is way better than LangGraph. LangGraph seriously overcomplicates the abstractions for LLM workflows. The event-based flow structure of LlamaIndex Workflow is much better.\n\nIf you're looking to build an agent harness, then LangGraph is great for this, especially their deepagent's implementation. I think their design with the middleware abstraction is done quite well. \n\nI honestly didn't pay any attention to CrewAI, any serious AI engineer knows that \"role-based\" agents is anthropomorphizing LLM and baking an implementation with that is a mistake. \n\n  \n",
+          "score": 0,
+          "created_utc": "2026-04-09 19:36:31",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
           "id": "of5cmxn",
           "author": "Playful_Astronaut672",
           "text": "I have built a system , where it tells the ai agents what to do next based what worked previously , Which reduces the failures made by executing the wrong actions by the agent ",
@@ -636,7 +645,7 @@
           "id": "of5t67i",
           "author": "nicoloboschi",
           "text": "It’s interesting to see the different approaches people are taking, managed vs. open source. I've found that the memory component becomes a critical piece as agent complexity grows; we built Hindsight to address these challenges. [https://github.com/vectorize-io/hindsight](https://github.com/vectorize-io/hindsight)",
-          "score": -3,
+          "score": -4,
           "created_utc": "2026-04-09 10:17:45",
           "is_submitter": false,
           "replies": []
@@ -659,9 +668,9 @@
       "url": "https://v.redd.it/7d2vueg3jstg1",
       "author": "Powerful-One4265",
       "created_utc": "2026-04-07 15:56:26",
-      "score": 22,
+      "score": 20,
       "num_comments": 5,
-      "upvote_ratio": 0.96,
+      "upvote_ratio": 0.92,
       "text": "[External Link]",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -690,15 +699,33 @@
       ]
     },
     {
+      "id": "1sgenzv",
+      "title": "Alternative to NotebookLM with no data limits",
+      "subreddit": "LangChain",
+      "url": "https://www.reddit.com/r/LangChain/comments/1sgenzv/alternative_to_notebooklm_with_no_data_limits/",
+      "author": "Uiqueblhats",
+      "created_utc": "2026-04-09 03:42:44",
+      "score": 15,
+      "num_comments": 0,
+      "upvote_ratio": 0.86,
+      "text": "NotebookLM is one of the best and most useful AI platforms out there, but once you start using it regularly you also feel its limitations leaving something to be desired more.\n\n1. There are limits on the amount of sources you can add in a notebook.\n2. There are limits on the number of notebooks you can have.\n3. You cannot have sources that exceed 500,000 words and are more than 200MB.\n4. You are vendor locked in to Google services (LLMs, usage models, etc.) with no option to configure them.\n5. Limited external data sources and service integrations.\n6. NotebookLM Agent is specifically optimised for just studying and researching, but you can do so much more with the source data.\n7. Lack of multiplayer support.\n\n...and more.\n\nSurfSense is specifically made to solve these problems. For those who dont know, SurfSense is open source, privacy focused alternative to NotebookLM for teams with no data limit's. It currently empowers you to:\n\n* **Control Your Data Flow** \\- Keep your data private and secure.\n* **No Data Limits** \\- Add an unlimited amount of sources and notebooks.\n* **No Vendor Lock-in** \\- Configure any LLM, image, TTS, and STT models to use.\n* **25+ External Data Sources** \\- Add your sources from Google Drive, OneDrive, Dropbox, Notion, and many other external services.\n* **Real-Time Multiplayer Support** \\- Work easily with your team members in a shared notebook.\n* **Desktop App** \\- Get AI assistance in any application with Quick Assist, General Assist, Extreme Assist, and local folder sync.\n\nCheck us out at [https://github.com/MODSetter/SurfSense](https://github.com/MODSetter/SurfSense) if this interests you or if you want to contribute to a open source software",
+      "is_original_content": false,
+      "link_flair_text": null,
+      "permalink": "https://reddit.com/r/LangChain/comments/1sgenzv/alternative_to_notebooklm_with_no_data_limits/",
+      "domain": "self.LangChain",
+      "is_self": true,
+      "comments": []
+    },
+    {
       "id": "1scucif",
       "title": "LangChain Agent constantly hallucinating facts - any debugging tips?",
       "subreddit": "LangChain",
       "url": "https://www.reddit.com/r/LangChain/comments/1scucif/langchain_agent_constantly_hallucinating_facts/",
       "author": "lewd_peaches",
       "created_utc": "2026-04-05 04:36:14",
-      "score": 15,
+      "score": 13,
       "num_comments": 12,
-      "upvote_ratio": 0.94,
+      "upvote_ratio": 0.89,
       "text": "Been there. Double-check your prompt instructions for clarity and grounding in provided context. If that doesn't fix it, consider a smaller, more focused model for the agent's reasoning step to reduce the search space and hallucination risk; fine-tuning a smaller model on your specific knowledge domain might also help.",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -710,7 +737,7 @@
           "id": "oedvvve",
           "author": "Fun_Nebula_9682",
           "text": "one thing that worked well for me: force the agent to classify every output statement as fact (must cite source), inference (must state confidence level), or suggestion (must list assumptions). sounds like overkill but hallucinations surface immediately because the model straight up can't cite a source for stuff it invented. you can enforce this through structured output schemas with required fields.\n\nalso worth checking your retrieval pipeline separately from the agent logic. half the hallucination bugs i've debugged were actually bad retrieval — vaguely related chunks getting returned and the model confidently weaving them into an answer. logging the raw retrieved context before it hits the llm saved me a lot of debugging time",
-          "score": 4,
+          "score": 3,
           "created_utc": "2026-04-05 05:30:30",
           "is_submitter": false,
           "replies": [
@@ -809,24 +836,6 @@
       ]
     },
     {
-      "id": "1sgenzv",
-      "title": "Alternative to NotebookLM with no data limits",
-      "subreddit": "LangChain",
-      "url": "https://www.reddit.com/r/LangChain/comments/1sgenzv/alternative_to_notebooklm_with_no_data_limits/",
-      "author": "Uiqueblhats",
-      "created_utc": "2026-04-09 03:42:44",
-      "score": 15,
-      "num_comments": 0,
-      "upvote_ratio": 0.86,
-      "text": "NotebookLM is one of the best and most useful AI platforms out there, but once you start using it regularly you also feel its limitations leaving something to be desired more.\n\n1. There are limits on the amount of sources you can add in a notebook.\n2. There are limits on the number of notebooks you can have.\n3. You cannot have sources that exceed 500,000 words and are more than 200MB.\n4. You are vendor locked in to Google services (LLMs, usage models, etc.) with no option to configure them.\n5. Limited external data sources and service integrations.\n6. NotebookLM Agent is specifically optimised for just studying and researching, but you can do so much more with the source data.\n7. Lack of multiplayer support.\n\n...and more.\n\nSurfSense is specifically made to solve these problems. For those who dont know, SurfSense is open source, privacy focused alternative to NotebookLM for teams with no data limit's. It currently empowers you to:\n\n* **Control Your Data Flow** \\- Keep your data private and secure.\n* **No Data Limits** \\- Add an unlimited amount of sources and notebooks.\n* **No Vendor Lock-in** \\- Configure any LLM, image, TTS, and STT models to use.\n* **25+ External Data Sources** \\- Add your sources from Google Drive, OneDrive, Dropbox, Notion, and many other external services.\n* **Real-Time Multiplayer Support** \\- Work easily with your team members in a shared notebook.\n* **Desktop App** \\- Get AI assistance in any application with Quick Assist, General Assist, Extreme Assist, and local folder sync.\n\nCheck us out at [https://github.com/MODSetter/SurfSense](https://github.com/MODSetter/SurfSense) if this interests you or if you want to contribute to a open source software",
-      "is_original_content": false,
-      "link_flair_text": null,
-      "permalink": "https://reddit.com/r/LangChain/comments/1sgenzv/alternative_to_notebooklm_with_no_data_limits/",
-      "domain": "self.LangChain",
-      "is_self": true,
-      "comments": []
-    },
-    {
       "id": "1senw1p",
       "title": "Rethinking Memory in LangChain Deep Agents (AGENTS.md vs Selective Loading)",
       "subreddit": "LangChain",
@@ -835,7 +844,7 @@
       "created_utc": "2026-04-07 06:15:37",
       "score": 12,
       "num_comments": 5,
-      "upvote_ratio": 1.0,
+      "upvote_ratio": 0.94,
       "text": "Hey everyone,\n\nI’ve been working with Deep Agents in LangChain and ran into a design question around memory that I’d love to get feedback on.\n\nBy default, files like \"AGENTS.md\" are loaded into the system prompt. Initially, I started using \"AGENTS.md\" as a kind of memory index for the user, something like:\n\n/memories/\n\n  AGENTS.md      (index of memory)\n\n  preferences.md\n\n  hobbies.md\n\n  identity.md\n\nThe idea was:\n\n\\- \"AGENTS.md\" describes what each file contains\n\n\\- The agent decides when to open (\"read\\_file\") other memory files\n\nThis approach works, but I’m not convinced it’s optimal:\n\n1. Context waste → If I load too much, I’m burning tokens unnecessarily\n\n2. LLM reliability → The agent doesn’t always choose the right file to open\n\n3. Over-reliance on prompting → Feels like I’m pushing too much responsibility to the model\n\nFor example:\n\n\\- If the user asks about programming → \"preferences.md\" is relevant\n\n\\- But \"identity.md\" and \"hobbies.md\" are not\n\n\\- Still, my current setup doesn’t guarantee clean separation\n\n\\---\n\nProposed Solution: Memory Router (Selective Loading)\n\nInstead of relying on the agent to decide what to read, I’m experimenting with moving that logic outside the agent:\n\nFlow:\n\nUser input\n\n   ↓\n\nMemory Router (heuristic / LLM / embeddings)\n\n   ↓\n\nSelect relevant memory files\n\n   ↓\n\nInject ONLY those into the prompt\n\n   ↓\n\nAgent runs\n\nSo now:\n\n\\- \"AGENTS.md\" becomes minimal (rules, not index)\n\n\\- Memory files are loaded on demand, not implicitly\n\n\\- The agent can still use tools like \"read\\_file\", but as fallback\n\nRouter options I’m considering\n\n1. Heuristics\n\n   \\- Simple keyword-based routing\n\n2. LLM classifier\n\n   \\- Ask a small model which memory is relevant\n\n3. Embeddings (RAG-style)\n\n   \\- Index memory chunks and retrieve relevant ones\n\n\\---\n\n\\- Is this approach aligned with how Deep Agents memory is intended to be used?\n\n\\- Are people relying on \"read\\_file\" decisions by the agent, or doing external routing like this?\n\n\\- Any best practices for structuring memory files (granularity, size, naming)?\n\n\\- Has anyone combined this with summarization per file before injection?\n\nCurious how others are handling this in real systems.\n\nThanks!",
       "is_original_content": false,
       "link_flair_text": null,
@@ -891,15 +900,89 @@
       ]
     },
     {
+      "id": "1sgmbsq",
+      "title": "Multi-agent systems are harder than the tutorials suggest : here's what actually breaks in production",
+      "subreddit": "LangChain",
+      "url": "https://www.reddit.com/r/LangChain/comments/1sgmbsq/multiagent_systems_are_harder_than_the_tutorials/",
+      "author": "ElBargainout",
+      "created_utc": "2026-04-09 10:57:39",
+      "score": 11,
+      "num_comments": 6,
+      "upvote_ratio": 0.92,
+      "text": "Been building multi-agent systems for a while now and there's a consistent gap between \"follow this quickstart\" and \"why is my agent loop spinning forever at 3am.\"\n\nThree things bite almost every team when they move beyond toy examples:\n\n**The prompts are the architecture.** People spend weeks on orchestration code and an afternoon on prompts. That ratio should probably be reversed. In agent systems, the prompt defines behavior in a way that code doesn't. If your validator agent's prompt says \"improve the output if needed,\" it will start generating content. If your router has no termination condition, it loops. The contracts between agents live in the system prompts, not in your message-passing logic. I wrote up the patterns I actually use in production [here](https://helain-zimmermann.com/blog/prompt-engineering-for-multi-agent-workflows) if you want concrete templates.\n\n**Identity explodes.** I audited a fintech company's infrastructure recently. 340 humans, 47,000 non-human identities. Most of their IAM was built assuming identities belong to people. AI agents break every assumption: they run continuously for weeks (so session duration is irrelevant), they chain delegation three hops deep (Agent A calls Agent B which calls Agent C), and \"anomalous behavior\" is impossible to define when an agent legitimately makes 10,000 API calls per hour. Traditional RBAC cannot model \"read this repo, write this branch, access the secrets vault for 15 minutes.\" Zero-trust principles exist for a reason but most teams aren't applying them to their agents at all.\n\n**Interoperability is still a mess, but it's getting better.** If you built a tool for Claude using MCP, it won't work with GPT agents. If you used Google's A2A, your agents can't discover agents built on OpenAI's infrastructure. In December 2025 a group of companies (OpenAI, Anthropic, Google, Microsoft, AWS, Block) co-founded the Agentic AI Foundation under the Linux Foundation to govern MCP, the Goose framework, and the AGENTS.md spec. Whether this actually solves fragmentation or just adds a governance layer to existing fragmentation is an open question. The track record of standards bodies in tech is mixed at best.\n\nThe thing that surprises me most is that the hard problems in multi-agent systems aren't model quality or context length. They're the boring stuff: who owns what, what format does output need to be in, what happens when something fails three hops into a delegation chain. The research papers don't cover any of that.\n\nCurious if others are seeing the same patterns. What's the part of your agent system that's caused the most production incidents?",
+      "is_original_content": false,
+      "link_flair_text": null,
+      "permalink": "https://reddit.com/r/LangChain/comments/1sgmbsq/multiagent_systems_are_harder_than_the_tutorials/",
+      "domain": "self.LangChain",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "ofaznbk",
+          "author": "Academic_Track_2765",
+          "text": "yes, and expensive, and need multiple logging layers, and determinism is out the window. ",
+          "score": 2,
+          "created_utc": "2026-04-10 02:00:14",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "of9cxvz",
+          "author": "Ok_Explorer7384",
+          "text": "the delegation chain thing is the scariest part imo. agent A calls B calls C and C drops a production table... good luck figuring out who authorized what after the fact. most teams don't even log the full chain let alone have a way to interrupt it mid-execution.",
+          "score": 1,
+          "created_utc": "2026-04-09 20:43:54",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "ofbqi4e",
+          "author": "Enough_Big4191",
+          "text": "yeah the identity piece is real, but for me it’s the data layer that keeps breaking things. agent does 80% right then grabs the wrong contact or stale title and everything downstream looks “confident but off.”  Are u resolving identity across sources or just trusting one? i ended up testing on our own accounts and measuring how often it picks the wrong entity, that exposed way more issues than any synthetic eval.",
+          "score": 1,
+          "created_utc": "2026-04-10 04:56:35",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "ofbw0r2",
+          "author": "fabkosta",
+          "text": "Disclaimer: I built multi-agent system already 15 years ago. People underestimate the complexity of these system. Most of the time the effort is not worth it.",
+          "score": 1,
+          "created_utc": "2026-04-10 05:40:20",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "of6lht8",
+          "author": "ciscorick",
+          "text": "AI slop",
+          "score": 0,
+          "created_utc": "2026-04-09 13:14:25",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "of78uxy",
+              "author": "ElBargainout",
+              "text": "AI slop bores me, but like what ?!",
+              "score": 1,
+              "created_utc": "2026-04-09 15:04:13",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        }
+      ]
+    },
+    {
       "id": "1sbzgzh",
       "title": "A lightweight hallucination detector for RAG (catches contradictions without an LLM-as-a-judge)",
       "subreddit": "LangChain",
       "url": "https://www.reddit.com/r/LangChain/comments/1sbzgzh/a_lightweight_hallucination_detector_for_rag/",
       "author": "UnluckyOpposition",
       "created_utc": "2026-04-04 04:18:52",
-      "score": 11,
+      "score": 10,
       "num_comments": 4,
-      "upvote_ratio": 1.0,
+      "upvote_ratio": 0.92,
       "text": "Hey everyone,\n\nIf you’re building RAG apps, you’ve probably hit this wall: your retrieval is perfect, you feed the right context to the LLM, but the LLM still subtly misrepresents the facts in its final answer.\n\nEvaluating this usually sucks. You either have to rely on expensive LLM-as-a-judge APIs (like sending it back to GPT-4 to check itself) or deal with bulky evaluation frameworks that are hard to run locally.\n\nTo solve this, we just open-sourced **LongTracer**. It's a lightweight Python package that checks the LLM's response against your retrieved documents and flags any hallucinated claims—all locally, without API keys.\n\n**How simple it is to use:**\n\nYou just pass in the LLM's answer and your source documents:\n\nPython\n\n    from longtracer import check\n    \n    result = check(\n        \"The Eiffel Tower is 330m tall and located in Berlin.\",\n        [\"The Eiffel Tower is in Paris, France. It is 330 metres tall.\"]\n    )\n    \n    print(result.verdict)             # FAIL\n    print(result.hallucination_count) # 1\n    \n\n**If you use LangChain, you can instrument your whole pipeline in one line:**\n\nPython\n\n    from longtracer import LongTracer, instrument_langchain\n    \n    LongTracer.init(verbose=True)\n    instrument_langchain(your_chain) \n    \n\n**Why we built it this way:**\n\n* **No API Costs:** It runs small, local NLP models to verify facts, so you don't have to pay just to check if your bot is lying.\n* **Zero Infrastructure:** It takes plain text strings. No need to hook it up to your vector database.\n* **Automatic Logging:** It automatically logs all traces and hallucination metrics to SQLite (default), Mongo, or Postgres.\n\nIt also comes with a CLI to generate HTML reports of your pipeline runs.\n\nIt’s MIT licensed and available via `pip install longtracer`.\n\nThe code and architecture details are on GitHub if you want to test it on your pipelines:[https://github.com/ENDEVSOLS/LongTracer](https://github.com/ENDEVSOLS/LongTracer)\n\nWe are actively looking for feedback on how to make this more useful for production workflows, so let me know what you think!",
       "is_original_content": false,
       "link_flair_text": null,
@@ -934,9 +1017,9 @@
       "url": "https://www.reddit.com/r/LangChain/comments/1sces3y/looking_for_people_to_build_ai_agents/",
       "author": "loop_seeker",
       "created_utc": "2026-04-04 17:11:39",
-      "score": 9,
+      "score": 10,
       "num_comments": 13,
-      "upvote_ratio": 0.85,
+      "upvote_ratio": 0.92,
       "text": "Hello guys. I am a software developer with 1 YOE. I am working on a side project. I am making an AI agent. I have just done some POC yet. I am looking for someone truly passionate and a little skilled.\n\nI have planned making an agent which will take user input like \"plan a trip to Goa under 20k\" and will extract details from user query and keep asking for missing details unless fully satisfied. After that it will fill all the details and will call appropriate tools like fetch\\_flights, fetch\\_weather for those dates etc.\n\nThis agent will continuously keep human in loop. It will keep asking for confirmations, human can prompt anything in between like increase budget from 20k to 30k. Then it will adjust the upcoming plan according to that.\n\nI have already built mock tools. Which will help us complete it fast. Later we can integrate real tools.\n\nThis is one project idea I have. I am open to other better ideas if anyone have.  \nLets discuss in comments and build something big which will shine in our resumes and maybe used as a Saas later.\n\nSkills preferred: \n\nFastAPI (or any backend framework)\n\nLangchain, Langgraph, Langsmith. \n\nSystem design skills (most imp). ",
       "is_original_content": false,
       "link_flair_text": "Question | Help",
@@ -1067,126 +1150,15 @@
       ]
     },
     {
-      "id": "1sd2xs6",
-      "title": "auto generate MCP configs and agent skills from your codebase, project just hit 550 github stars",
-      "subreddit": "LangChain",
-      "url": "https://www.reddit.com/r/LangChain/comments/1sd2xs6/auto_generate_mcp_configs_and_agent_skills_from/",
-      "author": "Substantial-Cost-429",
-      "created_utc": "2026-04-05 12:56:11",
-      "score": 9,
-      "num_comments": 3,
-      "upvote_ratio": 0.91,
-      "text": "hey langchain folks, working on something that might be useful here\n\n\n\nbeen building Caliber, an open source tool that scans your codebase and auto generates the context files your AI agent needs. this includes MCP config recommendations, agent skills, [CLAUDE.md](http://CLAUDE.md) and cursorrules\n\n\n\nthe idea is simple: your agent should know YOUR codebase not some generic template. caliber analyzes what you actually have and generates configs based on that. also scores your agent setup 0 to 100\n\n\n\nfor langchain users specifically: if youre building agents that operate on a codebase, having good context files massively improves what the agent can do and reduces the hallucinations about your project structure\n\n\n\njust hit 550 stars on github with 90 merged PRs and 20 open issues. been really stoked about the traction\n\n\n\ngithub: [https://github.com/rely-ai-org/caliber](https://github.com/rely-ai-org/caliber)\n\ndiscord (issues and feedback welcome): [https://discord.com/invite/u3dBECnHYs](https://discord.com/invite/u3dBECnHYs)\n\n\n\nhappy to answer questions in comments",
-      "is_original_content": false,
-      "link_flair_text": null,
-      "permalink": "https://reddit.com/r/LangChain/comments/1sd2xs6/auto_generate_mcp_configs_and_agent_skills_from/",
-      "domain": "self.LangChain",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "oefh03j",
-          "author": "onyxlabyrinth1979",
-          "text": "This is cool, but I’d sanity check how stable those generated configs actually are over time.\n\nWe tried something similar for auto-generating context off a codebase, and it worked great… until the repo evolved. Small refactors or naming changes would drift the generated layer, and suddenly the agent is confidently wrong in very specific ways.\n\nIf this is for dev assist, that’s fine. If people start wiring agents into real workflows, that drift becomes a maintenance problem fast.",
-          "score": 1,
-          "created_utc": "2026-04-05 13:21:49",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oemlq4h",
-          "author": "globalchatads",
-          "text": "Codebase-level config generation is a smart solve for the cold start problem. The scoring from 0-100 is neat.\n\n  \nSomething I keep hitting: once you generate configs for multiple repos across a team, you end up with a bunch of MCP servers that nobody tracks as a whole. My team has like 15 different MCP servers scattered across services and honestly nobody knows the full inventory.\n\n  \nCaliber handles the \"what tools does THIS repo expose\" question well. But there is still a gap around \"what tools exist across all our services.\" We have been experimenting with crawling .well-known endpoints and agent cards to piece together a cross-repo view, but it is pretty rough.\n\n  \nAny plans for multi-repo support? Something that aggregates configs across an org repos into a unified registry?",
-          "score": 1,
-          "created_utc": "2026-04-06 15:17:40",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
-      "id": "1sgmbsq",
-      "title": "Multi-agent systems are harder than the tutorials suggest : here's what actually breaks in production",
-      "subreddit": "LangChain",
-      "url": "https://www.reddit.com/r/LangChain/comments/1sgmbsq/multiagent_systems_are_harder_than_the_tutorials/",
-      "author": "ElBargainout",
-      "created_utc": "2026-04-09 10:57:39",
-      "score": 9,
-      "num_comments": 6,
-      "upvote_ratio": 0.85,
-      "text": "Been building multi-agent systems for a while now and there's a consistent gap between \"follow this quickstart\" and \"why is my agent loop spinning forever at 3am.\"\n\nThree things bite almost every team when they move beyond toy examples:\n\n**The prompts are the architecture.** People spend weeks on orchestration code and an afternoon on prompts. That ratio should probably be reversed. In agent systems, the prompt defines behavior in a way that code doesn't. If your validator agent's prompt says \"improve the output if needed,\" it will start generating content. If your router has no termination condition, it loops. The contracts between agents live in the system prompts, not in your message-passing logic. I wrote up the patterns I actually use in production [here](https://helain-zimmermann.com/blog/prompt-engineering-for-multi-agent-workflows) if you want concrete templates.\n\n**Identity explodes.** I audited a fintech company's infrastructure recently. 340 humans, 47,000 non-human identities. Most of their IAM was built assuming identities belong to people. AI agents break every assumption: they run continuously for weeks (so session duration is irrelevant), they chain delegation three hops deep (Agent A calls Agent B which calls Agent C), and \"anomalous behavior\" is impossible to define when an agent legitimately makes 10,000 API calls per hour. Traditional RBAC cannot model \"read this repo, write this branch, access the secrets vault for 15 minutes.\" Zero-trust principles exist for a reason but most teams aren't applying them to their agents at all.\n\n**Interoperability is still a mess, but it's getting better.** If you built a tool for Claude using MCP, it won't work with GPT agents. If you used Google's A2A, your agents can't discover agents built on OpenAI's infrastructure. In December 2025 a group of companies (OpenAI, Anthropic, Google, Microsoft, AWS, Block) co-founded the Agentic AI Foundation under the Linux Foundation to govern MCP, the Goose framework, and the AGENTS.md spec. Whether this actually solves fragmentation or just adds a governance layer to existing fragmentation is an open question. The track record of standards bodies in tech is mixed at best.\n\nThe thing that surprises me most is that the hard problems in multi-agent systems aren't model quality or context length. They're the boring stuff: who owns what, what format does output need to be in, what happens when something fails three hops into a delegation chain. The research papers don't cover any of that.\n\nCurious if others are seeing the same patterns. What's the part of your agent system that's caused the most production incidents?",
-      "is_original_content": false,
-      "link_flair_text": null,
-      "permalink": "https://reddit.com/r/LangChain/comments/1sgmbsq/multiagent_systems_are_harder_than_the_tutorials/",
-      "domain": "self.LangChain",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "ofaznbk",
-          "author": "Academic_Track_2765",
-          "text": "yes, and expensive, and need multiple logging layers, and determinism is out the window. ",
-          "score": 2,
-          "created_utc": "2026-04-10 02:00:14",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "of9cxvz",
-          "author": "Ok_Explorer7384",
-          "text": "the delegation chain thing is the scariest part imo. agent A calls B calls C and C drops a production table... good luck figuring out who authorized what after the fact. most teams don't even log the full chain let alone have a way to interrupt it mid-execution.",
-          "score": 1,
-          "created_utc": "2026-04-09 20:43:54",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ofbqi4e",
-          "author": "Enough_Big4191",
-          "text": "yeah the identity piece is real, but for me it’s the data layer that keeps breaking things. agent does 80% right then grabs the wrong contact or stale title and everything downstream looks “confident but off.”  Are u resolving identity across sources or just trusting one? i ended up testing on our own accounts and measuring how often it picks the wrong entity, that exposed way more issues than any synthetic eval.",
-          "score": 1,
-          "created_utc": "2026-04-10 04:56:35",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ofbw0r2",
-          "author": "fabkosta",
-          "text": "Disclaimer: I built multi-agent system already 15 years ago. People underestimate the complexity of these system. Most of the time the effort is not worth it.",
-          "score": 1,
-          "created_utc": "2026-04-10 05:40:20",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "of6lht8",
-          "author": "ciscorick",
-          "text": "AI slop",
-          "score": 0,
-          "created_utc": "2026-04-09 13:14:25",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "of78uxy",
-              "author": "ElBargainout",
-              "text": "AI slop bores me, but like what ?!",
-              "score": 1,
-              "created_utc": "2026-04-09 15:04:13",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        }
-      ]
-    },
-    {
       "id": "1seszti",
       "title": "Built a middleware that scans CrewAI/LangChain agent API calls for PII before they reach the target API",
       "subreddit": "LangChain",
       "url": "https://www.reddit.com/r/LangChain/comments/1seszti/built_a_middleware_that_scans_crewailangchain/",
       "author": "Healthy_Owl_7132",
       "created_utc": "2026-04-07 11:15:05",
-      "score": 8,
+      "score": 10,
       "num_comments": 12,
-      "upvote_ratio": 0.91,
+      "upvote_ratio": 1.0,
       "text": "Been building with CrewAI for a few months. Had a support agent that reads Jira tickets and posts summaries to Slack. One ticket had a customer's SSN in the description. The agent tried to post it straight to Slack.\n\nSo I built an inline gateway that sits between the agent and any API it calls. It scans every request for PII, secrets, and threats before forwarding. If it finds PII, instead of blocking the whole request, it strips the sensitive data and forwards a clean version. The Slack message still gets posted, but the SSN is replaced with a redaction token.\n\nAlso handles the worst case. Tested with a rogue agent trying to steal creds, escalate IAM privileges, exfiltrate data. All blocked.\n\n14-min demo with real Jira and Slack APIs: [https://vimeo.com/1179128874](https://vimeo.com/1179128874)\n\nPython SDK integrates in about 5 lines. Works with any agent that makes HTTP calls.\n\nHappy to answer questions about the implementation.",
       "is_original_content": false,
       "link_flair_text": null,
@@ -1311,15 +1283,107 @@
       ]
     },
     {
+      "id": "1shpcl5",
+      "title": "We built an AI agent that reads hundreds of resources and sends you only what actually matters — here's how it works under the hood",
+      "subreddit": "LangChain",
+      "url": "https://www.reddit.com/r/LangChain/comments/1shpcl5/we_built_an_ai_agent_that_reads_hundreds_of/",
+      "author": "d_arthez",
+      "created_utc": "2026-04-10 15:11:49",
+      "score": 9,
+      "num_comments": 5,
+      "upvote_ratio": 1.0,
+      "text": "Let's face it — staying on top of latest tech news, AI models and papers keeps getting harder every day and the amount of noise is diabolical. Research takes hours every week, and even then, most of what you find doesn't hit the mark.\n\nAt Software Mansion we've been running internal AI agents for a while: one scans platforms for marketing opportunities, another helps our research team stay on top of the latest AI models and papers. Both work well — but building them exposed a real problem we haven't fully appreciated before.\n\n**What we built**\n\nThe core insight: to prevent the noise, the relevance verification has to happen at the individual level. So we built around that.\n\nHere's the pipeline:\n\n1. **Scraping** — HuggingFace, arXiv, Github, Reddit, HN, SubStack (and still expanding…) - all scraped on a regular basis and stored as both text and embeddings\n2. **Recommending** — hybrid recommendations per each user's specific use case, mostly an embedding similarity with LLM as a judge, but also additional web search, category search and classical approaches like collaborative filtering are on the way.\n3. **Newsletter** **compilation** — based on the recommendations, an agent compiles results into a digest with key takeaways, summaries and urls to original resources. All sent regularly to user's mailbox.\n4. **User's feedback** — everything to make our agent's recommendations better over time.\n\nThe two-stage approach (embedding similarity with LLM verification) was key for keeping inference costs sane. Running an LLM over every scraped item for every user doesn't scale; running it over a pre-filtered shortlist does.\n\n**Tech stack**\n\n1. Python\n2. LangGraph for orchestration\n3. Qdrant as the vector database\n4. FastAPI for the backend\n5. Next.js for the frontend\n6. PostgreSQL for the db\n7. Taskiq + Redis for the workflows scheduling\n\nIt's quite interesting architecturally, as the system sits on the edge of agentic AI and classical recommender systems. Curious what you think about it. Any feedback much appreciated?",
+      "is_original_content": false,
+      "link_flair_text": null,
+      "permalink": "https://reddit.com/r/LangChain/comments/1shpcl5/we_built_an_ai_agent_that_reads_hundreds_of/",
+      "domain": "self.LangChain",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "ofeails",
+          "author": "Otherwise_Wave9374",
+          "text": "Love this, especially the two-stage filter (embeddings shortlist, then LLM judge). That is basically the only way to keep costs sane once you scale beyond a single user.\n\nHow are you collecting feedback, explicit thumbs up/down on items, or implicit signals like \"clicked, read time, forwarded\"? And are you storing per-user preference embeddings, or just using feedback to tune the recommender rules?\n\nAlso, if you are into agent architectures that combine retrieval + orchestration, https://www.agentixlabs.com/ has some good patterns around memory, tool use, and evaluation loops.",
+          "score": 2,
+          "created_utc": "2026-04-10 15:19:36",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "ofe8sky",
+          "author": "d_arthez",
+          "text": "[https://mailboy.swmansion.com/](https://mailboy.swmansion.com/)",
+          "score": 1,
+          "created_utc": "2026-04-10 15:11:59",
+          "is_submitter": true,
+          "replies": []
+        },
+        {
+          "id": "ofgohjv",
+          "author": "BardlySerious",
+          "text": "Love the nod to Ada on the wait list page.",
+          "score": 1,
+          "created_utc": "2026-04-10 21:54:13",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "ofhky1o",
+          "author": "TheLostWanderer47",
+          "text": "The 2-stage filter (embeddings → LLM) is how you keep costs under control, actually. This is really great.\n\nOne thing I’d think about is how tightly your scraping layer is coupled. We moved the scraping part to a tool layer, exposing web access via something like Bright Data’s [MCP server](https://github.com/brightdata/brightdata-mcp), so agents can fetch/update data on demand instead of relying only on scheduled crawls.\n\nOverall, though, you've got a very good setup.",
+          "score": 1,
+          "created_utc": "2026-04-11 00:56:59",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1sd2xs6",
+      "title": "auto generate MCP configs and agent skills from your codebase, project just hit 550 github stars",
+      "subreddit": "LangChain",
+      "url": "https://www.reddit.com/r/LangChain/comments/1sd2xs6/auto_generate_mcp_configs_and_agent_skills_from/",
+      "author": "Substantial-Cost-429",
+      "created_utc": "2026-04-05 12:56:11",
+      "score": 8,
+      "num_comments": 3,
+      "upvote_ratio": 0.9,
+      "text": "hey langchain folks, working on something that might be useful here\n\n\n\nbeen building Caliber, an open source tool that scans your codebase and auto generates the context files your AI agent needs. this includes MCP config recommendations, agent skills, [CLAUDE.md](http://CLAUDE.md) and cursorrules\n\n\n\nthe idea is simple: your agent should know YOUR codebase not some generic template. caliber analyzes what you actually have and generates configs based on that. also scores your agent setup 0 to 100\n\n\n\nfor langchain users specifically: if youre building agents that operate on a codebase, having good context files massively improves what the agent can do and reduces the hallucinations about your project structure\n\n\n\njust hit 550 stars on github with 90 merged PRs and 20 open issues. been really stoked about the traction\n\n\n\ngithub: [https://github.com/rely-ai-org/caliber](https://github.com/rely-ai-org/caliber)\n\ndiscord (issues and feedback welcome): [https://discord.com/invite/u3dBECnHYs](https://discord.com/invite/u3dBECnHYs)\n\n\n\nhappy to answer questions in comments",
+      "is_original_content": false,
+      "link_flair_text": null,
+      "permalink": "https://reddit.com/r/LangChain/comments/1sd2xs6/auto_generate_mcp_configs_and_agent_skills_from/",
+      "domain": "self.LangChain",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "oefh03j",
+          "author": "onyxlabyrinth1979",
+          "text": "This is cool, but I’d sanity check how stable those generated configs actually are over time.\n\nWe tried something similar for auto-generating context off a codebase, and it worked great… until the repo evolved. Small refactors or naming changes would drift the generated layer, and suddenly the agent is confidently wrong in very specific ways.\n\nIf this is for dev assist, that’s fine. If people start wiring agents into real workflows, that drift becomes a maintenance problem fast.",
+          "score": 1,
+          "created_utc": "2026-04-05 13:21:49",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oemlq4h",
+          "author": "globalchatads",
+          "text": "Codebase-level config generation is a smart solve for the cold start problem. The scoring from 0-100 is neat.\n\n  \nSomething I keep hitting: once you generate configs for multiple repos across a team, you end up with a bunch of MCP servers that nobody tracks as a whole. My team has like 15 different MCP servers scattered across services and honestly nobody knows the full inventory.\n\n  \nCaliber handles the \"what tools does THIS repo expose\" question well. But there is still a gap around \"what tools exist across all our services.\" We have been experimenting with crawling .well-known endpoints and agent cards to piece together a cross-repo view, but it is pretty rough.\n\n  \nAny plans for multi-repo support? Something that aggregates configs across an org repos into a unified registry?",
+          "score": 1,
+          "created_utc": "2026-04-06 15:17:40",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
       "id": "1sh7cuj",
       "title": "I compared sandbox options for AI agents. Here’s my ranking.",
       "subreddit": "LangChain",
       "url": "https://www.reddit.com/r/LangChain/comments/1sh7cuj/i_compared_sandbox_options_for_ai_agents_heres_my/",
       "author": "aniketmaurya",
       "created_utc": "2026-04-10 00:32:35",
-      "score": 8,
+      "score": 7,
       "num_comments": 13,
-      "upvote_ratio": 0.83,
+      "upvote_ratio": 0.82,
       "text": "It’s pretty clear by now that if you’re letting AI agents run code, browse the web, touch files, or use tools, you should probably not run them directly on your own machine.\n\n**I went through a bunch of open-source sandbox options and ranked them mostly for my own use case.** Sharing here in case it helps others evaluating the space.\n\nMy criteria were:\n\n* easy to get started\n* snapshotting\n* fork/clone\n* pause/resume\n* cross-OS support (Linux + macOS)\n* support for **computer-use agents** / full desktop environments\n\nThis ranking is biased toward people building AI agents, not just generic isolated code execution.\n\nFull disclosure: **I work on CelestoAI/SmolVM**, so take that into account. I still tried to make this useful.\n\n# 1. [SmolVM](https://github.com/CelestoAI/smolVM)\n\nWhy I ranked it first:\n\n* easy local setup\n* supports Linux and macOS\n* supports snapshotting, pause/resume, and persistent sandbox workflows\n* supports browser sessions and full desktop-style computer-use workflows\n\nFor my use case, it feels like the most complete mix of developer experience + agent-focused features.\n\n# 2. [OpenSandbox](https://github.com/alibaba/OpenSandbox)\n\nThis feels more like a broader sandbox platform than just a local dev tool.\n\nWhat stands out:\n\n* supports GUI agents\n* desktop / VNC-style workflows\n* more platform-level ambition\n\nWhy I ranked it lower:\n\n* heavier mental model\n* for my use case, I care a lot about tight DX and fast setup\n\n\n\n# 3. Microsandbox\n\nThis one looks promising if you want something local-first and lightweight.\n\nWhat I like:\n\n* local-first feel\n* simple developer experience\n* good fit for isolated execution without a ton of setup\n\nWhy it’s lower for me:\n\n* I’m less confident yet on snapshotting / clone semantics\n* computer-use / full desktop support seems less clear than the top entries\n\n\n\n# 4. [E2B](https://e2b.dev/)\n\nProbably the most well-known option in this category.\n\nWhat stands out:\n\n* easy to get started\n* pause/resume support\n* desktop sandbox support for computer-use agents\n* solid hosted experience\n\nWhy I ranked it lower for my use case:\n\n* I’m personally more biased toward local/open infrastructure and tighter control\n\n# My takeaway\n\nThe biggest thing I noticed is that a lot of “AI sandbox” discussions mix together very different products:\n\n* some are basically isolated code runners\n* some are full agent sandboxes\n* some support browser / desktop / computer-use\n* some are more like platform/control planes\n\nSo “best sandbox” really depends on what you need.\n\nIf your agent needs to:\n\n* write files and come back later\n* keep state between turns\n* run a browser\n* use a desktop environment\n* recover from interruptions\n\n…then the feature set matters a lot more than just “can it run code?”\n\nCurious what others here are using. Especially interested if I missed any sandbox that has:\n\n* real snapshotting\n* fast clone/fork from saved state\n* pause/resume\n* Linux + macOS support\n* proper computer-use support",
       "is_original_content": false,
       "link_flair_text": "Resources",
@@ -1431,9 +1495,9 @@
       "url": "https://www.reddit.com/r/LangChain/comments/1sgj7rm/i_turned_my_saas_into_a_claude_code_skill_cli/",
       "author": "Certain-Ad2909",
       "created_utc": "2026-04-09 07:54:33",
-      "score": 8,
+      "score": 7,
       "num_comments": 1,
-      "upvote_ratio": 0.9,
+      "upvote_ratio": 0.89,
       "text": "I'm the developer behind [Lessie AI](https://lessie.ai/), a people search and enrichment platform (think: find CTOs at AI startups in SF, enrich their contact info, qualify candidates via web research — all agent-driven). It started as a typical B2B SaaS with a web dashboard.\n\nOver the past few months, I rebuilt it so the **primary consumer isn't a human clicking buttons — it's an AI agent.** Lessie now ships as:\n\n1. **A CLI** (`npm install -g` u/lessie`/cli`) — 13 commands, zero dependencies, stdout-pure JSON\n2. **An MCP server** — tools exposed via FastMCP, callable by Claude Code, Cursor, or any MCP client\n3. **A** [**SKILL.md**](http://skill.md/) **file** — behavioral guidance that turns Claude Code into a Lessie power user\n\nThis post is the full breakdown: architecture, real code, painful lessons, and why I think \"skill-ified SaaS\" is where a lot of B2B software is heading.\n\n# Why I Did This\n\nTools like Claude Code and [OpenClaw](https://openclaw.com/) have gotten remarkably smart. You can just *talk* to them — describe what you need in plain language, and they figure out the execution. At some point I realized: **why am I making users learn a dashboard when they could just tell an agent what they want?**\n\nEvery SaaS GUI has a learning curve. You need to find the right filter panel, understand which dropdowns do what, remember the correct workflow sequence. And GUIs are rigid — the product designer decided the workflow for you. Want to combine search + qualification + enrichment in a way the UI didn't anticipate? Too bad, export to CSV and do it manually.\n\nWith an agent, you get three things that GUIs can't match:\n\n* **Zero learning curve.** You just describe the goal: \"Find 20 CTOs at AI companies in SF and check if they have ML backgrounds.\" No filters to learn, no workflow to memorize.\n* **Full automation.** The agent figures out which tools to call, in what order, with what parameters — end to end, no manual steps in between.\n* **Flexible output.** Ask for a markdown table, a CSV file, a summary report, a ranked shortlist with reasoning, a comparison chart — any format that fits your actual use case, not just the one format the dashboard happens to support.\n\n**The GUI forces users to think in terms of your product's UI model. The skill lets them think in terms of their own goals.** That's when I realized: the product isn't the dashboard. The product is the execution layer.\n\n# The Architecture\n\nThree layers, each with a specific job:\n\n* **CLI** — intentionally dumb. Parse args, authenticate, call remote tools, print JSON. Zero business logic.\n* **MCP Server** — tool schemas + auth + credit gating. The agent discovers what's available through MCP's tool listing protocol.\n* [**SKILL.md**](http://skill.md/) — this is where the \"product brain\" lives. More on this below.\n\n# The CLI: Why stdout Purity Is Non-Negotiable\n\nHere's a design decision that sounds trivial but made the biggest difference for agent reliability:\n\n**stdout is sacred. Only machine-readable JSON goes to stdout. Everything else goes to stderr.**\n\n    // output.ts — the entire output moduleexport function outputJSON(data: unknown): void {const json = prettyMode\n        ? JSON.stringify(data, null, 2): JSON.stringify(data);\n      process.stdout.write(json + \"\\n\");}export function info(msg: string): void {\n      process.stderr.write(msg + \"\\n\");        // status → stderr}export function fatal(msg: string, hint?: string): never {\n      process.stderr.write(`Error: ${msg}\\n`); // errors → stderrif (hint) process.stderr.write(`  ${hint}\\n`);\n      process.exit(1);}\n\nWhen I mixed status messages into stdout early on, the agent would try to parse \"Connecting to server...\" as JSON and choke. Agents don't skim — they parse. If your CLI prints anything non-data to stdout, you've already lost.\n\nThe arg parser is also zero-dependency and hand-rolled — supports `--key value`, `--key=value`, boolean flags, `--` separator, required flag validation, and **JSON parse errors with specific hints**:\n\n    // If the user passes malformed JSON, don't just say \"invalid JSON\"// Tell them exactly what's wrongexport function requireJSON(value: string, flagName: string): unknown {try {return JSON.parse(value);} catch (err) {let msg = `Error: --${flagName} contains invalid JSON.\\n`;if (/\\{[^\"]*\\w+\\s*:/.test(value)) {\n          msg += `  Hint: JSON keys must be double-quoted\\n`;}if (value.includes(\"'\")) {\n          msg += `  Hint: JSON requires double quotes, not single quotes.\\n`;}// ...}}\n\nAnd there's Levenshtein-based typo correction — if you type `lessie find-peple`, it suggests `Did you mean: lessie find-people`. Small thing, but agents make typos too (especially when guessing command names from memory).\n\n# The MCP Server: FastMCP + JWT + Credit Gating\n\nThe MCP server is a Python FastAPI app with FastMCP mounted on top. Every tool call goes through JWT auth and credit checks:\n\n    mcp = FastMCP(\"Lessie\",\n        auth=JWTVerifier(public_key=OAUTH_JWT_SECRET, algorithm=\"HS256\"),\n        instructions=(\"Lessie is an AI-powered people search, qualification, \"\"and enrichment agent.\"),)# Credit costs are explicit — the agent (and SKILL.md) knows exactly# what each call costs\n    MCP_CREDITS_FIND_PEOPLE = 20   # find_people: 20 credits per search\n    MCP_CREDITS_PER_PERSON  = 1    # enrich/review: 1 credit per person\n    MCP_CREDITS_DEFAULT     = 1    # web-search, enrich-org, etc.\n\nThe CLI connects to this server as an MCP client over Streamable HTTP:\n\n    // remote.ts — the CLI is just a thin MCP clientimport { Client } from \"@modelcontextprotocol/sdk/client/index.js\";import { StreamableHTTPClientTransport }from \"@modelcontextprotocol/sdk/client/streamableHttp.js\";async function tryConnect(url: URL): Promise<Client> {const c = new Client({ name: \"lessie-cli\", version: pkg.version },{ requestTimeoutMs: 120_000 });await c.connect(new StreamableHTTPClientTransport(url, { authProvider }));return c;}\n\nThis means the CLI doesn't embed any business logic. It's a remote MCP client that speaks JSON over HTTP. If I add a new tool on the server side, `lessie tools` immediately discovers it — no CLI update needed for new capabilities.\n\n# [SKILL.md](http://skill.md/): The Real Product — A Runbook, Not API Docs\n\nThis was my biggest insight: [**SKILL.md**](http://skill.md/) **is not documentation. It's a behavioral contract between your product and the agent.**\n\nI initially wrote it like API docs — parameter types, defaults, response schemas. That was wrong. The agent already gets that from MCP tool schemas. What it *doesn't* get is **operational judgment.**\n\nHere's what [SKILL.md](http://skill.md/) actually contains:\n\n# 1. Mode Detection (explicit decision tree)\n\n    1. Check if `lessie` CLI is available: run `lessie status`2. If the command succeeds → use CLI mode\n    3. If the command fails → attempt auto-install: `npm install -g /cli`4. After install, run `lessie status` again to verify\n    5. If install succeeds → use CLI mode\n    6. If install fails → check if MCP tools are available\n    7. If MCP tools are available → use MCP mode\n    8. If neither → inform the user\n\nI originally trusted the agent to \"figure out\" which mode to use. It didn't. It would try MCP when CLI was installed, or keep retrying a broken CLI path. **Agents are terrible at environment sensing unless you make the environment model explicit.**\n\n# 2. Credit Awareness (cost before action)\n\n    **Before executing any command**\n    , you MUST:\n    1. Tell the user what you are about to do and the estimated cost\n    2. Wait for explicit confirmation before executing\n    3. Never batch multiple credit-consuming calls without confirming first\n\n|**Tool**|**Cost**|\n|:-|:-|\n|find-people|20 credits per search|\n|enrich-people|1 credit × number of people|\n|review-people|1 credit × number of people|\n|web-search|1 credit|\n\nThis turned out to be critical. Without it, the agent would cheerfully burn 100 credits on exploratory searches without asking.\n\n# 3. Entity Disambiguation (ask before spending)\n\n    When a user mentions \"Manus\":\n    → Could be Manus AI, Manus Bio, Manus Plus\n    → NEVER silently assume one entity\n    → Ask the user, or state your assumption and confirm\n\nWrong company = wasted credits + irrelevant results. In agent systems, **disambiguation isn't a UX nicety — it's resource allocation.**\n\n# 4. Workflow Patterns (multi-step SOPs)\n\n    ## Search people at a company (domain unknown)\n    1. `lessie web-search --query 'CompanyName official website'`  → find domain\n    2. `lessie enrich-org --domains '[\"candidate.com\"]'`           → verify domain\n    3. `lessie find-people --filter '...' --domain '[\"verified.com\"]'` → search\n\nThe agent needs to know that Step 1 feeds Step 2 feeds Step 3. Without this, it would skip domain verification and search with a guessed domain — getting wrong results.\n\n# 5. Search + Qualify (the triage protocol)\n\n    After find-people returns results:\n    - Obviously good (title/company match) → keep, no review needed\n    - Obviously bad (wrong industry) → discard\n    - Ambiguous (partial match) → send to review-people\n    \n    Only call review for the ambiguous subset.\n\n`review-people` does deep web research per person — 1–3 minutes each. Without this triage instruction, the agent would review every single result, turning a 2-minute task into a 30-minute one.\n\n# What Broke: Five Painful Lessons\n\n# 1. \"We Have an API\" Is Not Enough\n\nI used to think: clean REST APIs → agent-ready. Wrong, for four reasons:\n\n* **Implicit dependencies.** A developer knows endpoint B needs an ID from endpoint A. An agent doesn't — you have to make the data flow explicit.\n* **Missing judgment.** An endpoint returns 20 people. It doesn't tell the agent which 3 are worth deeper review, or whether 0 results means the query was bad vs. the data was sparse.\n* **Error semantics.** A 429 means \"retry\" to a developer. For an agent, you need: retry? wait? change strategy? ask the user? The agent picks the dumbest option if you don't specify.\n* **Auth flows.** OAuth browser redirects are annoying for humans, catastrophic for agents. You need explicit rules for token expiry, re-auth, and what happens in between.\n\n# 2. Fallback Paths Are Non-Negotiable\n\nA CLI shortcut command lagged behind the latest remote schema. The agent would retry the same broken command in a loop. The fix:\n\n    If shortcut commands fail repeatedly:\n    → fall back to `lessie call <tool_name> --args '{...}'`\n    → inspect tool schema first: `lessie tools`\n    → call the raw tool directly with structured args\n\nThe generic escape hatch (lessie call) should have existed from day one.\n\n# 3. Skills ≠ MCP Tools — Different Design Burdens\n\n||**Claude Code Skill**|**MCP Tool**|\n|:-|:-|:-|\n|Guidance|Prompt-injected behavioral rules|Structured schema|\n|Flexibility|High — can express \"don't do X if Y\"|Lower — schema is static|\n|Design focus|Workflow logic, guardrails, \"when to stop\"|Input/output types, clean errors|\n\nSkills need stronger *workflow* guidance. MCP tools need stronger *structural* contracts. If you only build one, you're leaving reliability on the table.\n\n# 4. stdout Corruption Kills Agent Reliability\n\nAlready covered above, but worth repeating: **one stray log line in stdout breaks the entire parsing pipeline.** Agents don't have eyeballs — they have JSON parsers.\n\n# 5. Disambiguation Saves Real Money\n\nIn the first version, \"find the CTO of Manus\" would immediately search — sometimes finding the wrong Manus and burning 20 credits. After adding the disambiguation rule, wrong-company searches dropped to near zero.\n\n# Real Usage Example\n\nUser types one line in Claude Code:\n\n    Find beauty content creators on TikTok with 5K+ followers\n\nThe agent (guided by [SKILL.md](http://skill.md/)) translates this to:\n\n    lessie find-people \\--filter '{\"platform\":\"tiktok\",\"follower_min\":5000,\"content_topics\":[\"beauty\"]}' \\--checkpoint 'TikTok beauty creators 5K+ followers' \\--strategy web_only\n\nResponse (JSON on stdout):\n\n    {\"search_id\": \"mcp_a8f3...\",\"people_count\": 23,\"strategy_used\": \"web_only\",\"elapsed_seconds\": 45,\"credits_used\": 20}\n\nA more complex flow — \"Find 20 Engineering Managers at Stripe and enrich their contact info\":\n\n    # Step 1: Verify domain (1 credit)\n    lessie enrich-org --domains '[\"stripe.com\"]'# Step 2: Search people (20 credits)\n    lessie find-people \\--filter '{\"person_titles\":[\"Engineering Manager\"],\"organization_domains\":[\"stripe.com\"]}' \\--checkpoint 'EMs at Stripe' \\\n      --target-count 20# Step 3: Enrich contacts (1 credit × N matched)\n    lessie enrich-people \\--people '[{\"first_name\":\"Jane\",\"last_name\":\"Doe\",\"domain\":\"stripe.com\"}, ...]'\n\nThe agent chains these automatically, asking for credit confirmation before each step.\n\n# Where I Think This Is Going\n\nI don't think SaaS disappears. But I think the **center of gravity shifts**:\n\n* The UI becomes one client among many (agent, CLI, API, Slack bot...)\n* The API stops being the complete product abstraction — you need **behavioral semantics** on top\n* The real moat becomes: how reliably can an agent operate your product **without a human babysitting it?**\n\nThe questions to ask aren't just \"do we have an API / MCP / CLI?\" but:\n\n* Can an agent tell when *not* to call this?\n* Can it recover from failure without retrying blindly?\n* Can it disambiguate before spending money?\n* Can it chain multi-step workflows in the right order?\n* Can it operate the product safely and autonomously?\n\nIf you're building B2B SaaS today, I'd seriously consider shipping a [SKILL.md](http://skill.md/) alongside your API docs. It's a surprisingly small investment that makes your product dramatically more useful in the agent ecosystem.\n\n# About Lessie AI\n\n[Lessie AI](https://lessie.ai/) is an AI-powered **universal people search agent**. It searches 275M+ professional contacts, enriches profiles with email/phone/social data, qualifies candidates via automated web research, and covers both B2B professionals and KOL/influencer discovery across platforms like LinkedIn, Twitter/X, Instagram, TikTok, and YouTube.\n\nYou can use it through the [web app](https://app.lessie.ai/), the CLI (`npm install -g` u/lessie`/cli`), or as an MCP tool in Claude Code / Cursor.\n\nWhether you're doing sales prospecting, recruiting, influencer outreach, or competitive research — give it a try. New accounts get free trial credits.\n\nI'm the developer, happy to answer questions about the skill-ification process, the architecture, or Lessie itself. What's your experience turning existing products into agent-native tools?",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -1589,71 +1653,6 @@
           "text": "The real win here is that you're treating memory as a routing problem, not a storage problem. Working memory handles speed, summaries handle breadth, and sqlite facts handle the stuff that actually matters for decisions. Most teams skip the third layer and wonder why agents flip-flop on the same choices.",
           "score": 1,
           "created_utc": "2026-04-08 00:10:02",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
-      "id": "1sc9wnm",
-      "title": "Whats the best framework for building agents in javascript?",
-      "subreddit": "LangChain",
-      "url": "https://www.reddit.com/r/LangChain/comments/1sc9wnm/whats_the_best_framework_for_building_agents_in/",
-      "author": "jengle1970",
-      "created_utc": "2026-04-04 13:56:45",
-      "score": 7,
-      "num_comments": 6,
-      "upvote_ratio": 1.0,
-      "text": "I am a javascript developer trying to build a simple AI agent for customer support. Langchain feels like way too much and the python bias is real lol. I want to build agents in javascript ",
-      "is_original_content": false,
-      "link_flair_text": "Question | Help",
-      "permalink": "https://reddit.com/r/LangChain/comments/1sc9wnm/whats_the_best_framework_for_building_agents_in/",
-      "domain": "self.LangChain",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "oefgq2w",
-          "author": "LissaLou79",
-          "text": "Have you tried mastra and I had my agent working in two days. The typescript caught my stupid mistakes before they broke everything",
-          "score": 3,
-          "created_utc": "2026-04-05 13:20:14",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "oekkck2",
-              "author": "mykeeb85",
-              "text": "I am using it too in javascript and it just made sense to me. I can actually see what my agent is doing step by step",
-              "score": 1,
-              "created_utc": "2026-04-06 06:49:44",
-              "is_submitter": false,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "oer0sti",
-          "author": "nicoloboschi",
-          "text": "I agree that Langchain can feel heavy, especially for simpler tasks. Hindsight is an open-source alternative that might align better with your needs, especially given the integrations for LangGraph. [https://hindsight.vectorize.io/sdks/integrations/langgraph](https://hindsight.vectorize.io/sdks/integrations/langgraph)",
-          "score": 1,
-          "created_utc": "2026-04-07 05:23:53",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oe9mv4y",
-          "author": "Fun_Nebula_9682",
-          "text": "honestly for a simple support agent you probably don't even need a framework. most model SDKs (anthropic, openai) have native tool calling in JS. define your tools, model decides when to call them, you handle the results. the whole agent loop is like 50 lines.\n\ni build most of my agent stuff in python but the pattern's the same in JS. vercel AI SDK is the go-to if you want something more structured, it's model-agnostic and way less heavy than langchain. tbh for customer support the hard part isn't the framework — it's defining good tools and handling edge cases in conversations",
-          "score": 1,
-          "created_utc": "2026-04-04 15:12:07",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oea5jte",
-          "author": "The-Only-Real-Way",
-          "text": "I mostly use langgraph now for complex stuff but when its something moderate in a js project I’ll juste use ai sdk by vercel",
-          "score": 1,
-          "created_utc": "2026-04-04 16:44:08",
           "is_submitter": false,
           "replies": []
         }
