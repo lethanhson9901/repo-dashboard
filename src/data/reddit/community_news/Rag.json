@@ -1,11 +1,11 @@
 {
   "metadata": {
-    "last_updated": "2026-05-05 18:04:14",
+    "last_updated": "2026-05-06 04:09:58",
     "time_filter": "week",
     "subreddit": "Rag",
     "total_items": 20,
-    "total_comments": 118,
-    "file_size_bytes": 193205
+    "total_comments": 113,
+    "file_size_bytes": 195944
   },
   "items": [
     {
@@ -15,9 +15,9 @@
       "url": "https://www.reddit.com/r/Rag/comments/1t4c87n/vectorless_rag_can_scale_to_millions_of_documents/",
       "author": "This-Eye6296",
       "created_utc": "2026-05-05 11:08:03",
-      "score": 35,
-      "num_comments": 13,
-      "upvote_ratio": 0.84,
+      "score": 62,
+      "num_comments": 17,
+      "upvote_ratio": 0.89,
       "text": "I was reading the new [PageIndex blog](https://pageindex.ai/blog/pageindex-filesystem) today and they just announced something called the PageIndex File System. If you haven't heard of PageIndex, it's the vectorless RAG framework that doesn't use embeddings at all. Instead of chunking docs and doing semantic similarity search, it represents each doc as a tree (sections → subsections → pages → content) and has an LLM navigate the tree to find answers. Repo is at like 26k stars, hit #1 on GitHub Trending earlier this year.\n\nThe criticism that always made sense to me was: ok but that only works on one document at a time, how does this scale to a real enterprise corpus with millions of docs? And the cost concern that came with it — if an LLM is navigating a tree on every query, doesn't that blow up?\n\nTheir answer starts with an observation I think is genuinely elegant: **a file system is already a tree.** Folders → subfolders → files. So they just made the folder hierarchy another layer of the same tree the LLM already knows how to navigate. One continuous tree from the top of your drive down into the internal structure of a specific document.\n\nBut the post is honest about why that alone doesn't actually work, which is the part I found interesting. Three problems with just inheriting your folder structure:\n\n1. Tons of corpora have **no real hierarchy** — flat S3 buckets, SharePoint dumps, document management systems where everything is in one pool\n2. A folder tree is **one-dimensional** — a contract belongs to a vendor AND a region AND a fiscal year AND a product line, but a folder forces you to pick one\n3. Folder labels are often garbage (`misc/`, `final_v3_USE_THIS_ONE/`, `2019_legacy/`) so the LLM ends up navigating noise\n\nSo they solve it with three things, and this is where the query-time strategy comes in:\n\n**Virtual nodes** — when no usable hierarchy exists, they synthesize one. Topic clustering groups documents into nodes, and LLM-inferred metadata (category, summary, key entities) becomes additional internal nodes. The same document can sit under multiple virtual ancestors at once, which a real folder tree fundamentally can't express.\n\n**Query-dependent tree construction** — this is the part that genuinely changes how I think about retrieval. The tree isn't fixed at ingestion. It's built on demand, *per query*. The example they use: \"What did vendor X charge us in 2024?\" wants a tree organized by vendor → year. \"Show me all contracts up for renewal next quarter\" wants a tree organized by status → renewal date. Same corpus, completely different tree depending on what you're asking. No re-ingestion, no re-embedding — the structure gets composed at query time from the metadata axes that are actually relevant. They also mention the system improves over time because traversal patterns from past queries refine the virtual nodes.\n\n**Adaptive tree search (this is where the cost concern dies)** — the LLM doesn't blindly walk every level. At each node, it picks a strategy. If the children have informative labels, it goes layer-by-layer and prunes early. If the labels are uninformative, it does what they call dynamic flattening — collapses the entire subtree down to the leaves and just defers to the actual content. Useless intermediate levels get skipped entirely, so the LLM only burns calls where the structure is actually carrying signal. The depth of the search shrinks to the depth that's actually informative for *that specific question*.\n\nThat last piece is what makes the cost story actually work at million-doc scale. You're not paying for an LLM to navigate every node of a giant tree — you're paying for it to navigate exactly the parts that are useful for this query. \n\nWhat do you think of their approach?",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -29,7 +29,7 @@
           "id": "ok1jobg",
           "author": "Scared-Tip7914",
           "text": "Cool but does it beat a dense + bm25 pgvector stack with a proper reranker? I use this as benchmark recall pipeline because I have yet to find anything that beats it in quality. In speed you can beat it because the reranker slows things down, but in quality.. My experience has been that yes these things do theoretically scale but retrieval quality quickly degrades. Also if I understand correctly here the LLM is directly involved with orchestrating the retrieval. How is token churn kept at bay?",
-          "score": 5,
+          "score": 14,
           "created_utc": "2026-05-05 11:58:37",
           "is_submitter": false,
           "replies": [
@@ -37,7 +37,7 @@
               "id": "ok2ngmp",
               "author": "nithril",
               "text": "My concern would be more on the speed and cost than on the quality actually.  \n\nEmbedding is precisely a solution to address the at scale issue.  ",
-              "score": 1,
+              "score": 2,
               "created_utc": "2026-05-05 15:18:45",
               "is_submitter": false,
               "replies": []
@@ -46,7 +46,7 @@
               "id": "ok1pi1j",
               "author": "This-Eye6296",
               "text": "PageIndex has FinanceBench results at [98.7% accuracy](https://pageindex.ai/blog/Mafin2.5). ",
-              "score": 1,
+              "score": 2,
               "created_utc": "2026-05-05 12:32:45",
               "is_submitter": true,
               "replies": [
@@ -76,10 +76,20 @@
           "id": "ok26775",
           "author": "Fuzzy-Layer9967",
           "text": "Thanks for the writeup, really interesting read.\n\nFrom my perspective though, I'd push back slightly on the framing. I prefer thinking about this as **chunkless** rather than just **vectorless**. The real win isn't \"we got rid of vectors\", it's \"we got rid of the whole chunking, embedding, vector store, retrieve, rerank pipeline and replaced it with structured parser plus an LLM that navigates the parse tree\". That's the bit that actually simplifies your stack.\n\nPageIndex has clever ideas, query-dependent tree composition is genuinely nice, but reading the post I can't shake the feeling that you're trading one big engineering machine for another. Topic clustering, LLM-inferred metadata, virtual nodes, per-query tree composition, traversal pattern caches... that's not a simple system. It's a different complex system. The \"no embeddings\" pitch hides the fact that you've reintroduced an ingestion pipeline that's arguably as heavy as the one you replaced, just with different primitives.\n\nWhich is fine if your problem genuinely is enterprise-scale navigation across millions of docs. But honestly, in most applications I see, the corpus is bounded. A few hundred to a few thousand documents, often pre-filtered by the user's context (a project, a folder, a case file). The \"find the right document\" problem and the \"deeply reason inside a document\" problem are two different problems, and trying to unify them under one mechanism is what brings the complexity back in.\n\nA two-stage architecture works really well in practice: cheap retrieval (BM25 on titles or section headers, or a tiny vector index on summaries only) to shortlist candidate docs, then chunkless navigation inside each one for the actual reasoning. You keep the simplicity where it matters and you don't pretend one elegant abstraction solves both problems.\n\nThat's basically the bet we're making in Docling-Studio ( [https://github.com/scub-france/Docling-Studio](https://github.com/scub-france/Docling-Studio) ). Lean on Docling's structural parse, let the LLM walk the section tree, keep the trace fully auditable (you literally see which sections the model read and why). For single-document deep QA on structured content like reports, contracts, regulatory docs, it's hard to beat in terms of simplicity and explainability.\n\nBut again, really cool ideas in the post, especially the dynamic flattening trick. Worth reading even if you don't end up adopting the full approach.",
-          "score": 4,
+          "score": 5,
           "created_utc": "2026-05-05 13:58:24",
           "is_submitter": false,
-          "replies": []
+          "replies": [
+            {
+              "id": "ok4bhzg",
+              "author": "pegaunisusicorn",
+              "text": "I think for what they're using it for, financial data, named entities are probably relatively easy to extract and recognize, and multi-hops are mostly through the named entities. I bet it does a great job. As soon as you have co-reference resolution that gets complicated, it'll probably turn into crap. ",
+              "score": 2,
+              "created_utc": "2026-05-05 19:49:35",
+              "is_submitter": false,
+              "replies": []
+            }
+          ]
         },
         {
           "id": "ok2rdne",
@@ -96,6 +106,33 @@
           "text": "Sem ter noção do que estava fazendo, vinha fazendo algo semelhante em um conjunto de 50 mil documentos .docx. terei ideias para ler e aprimorar meu sistema. Obrigado. ",
           "score": 1,
           "created_utc": "2026-05-05 16:39:56",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "ok4mij2",
+          "author": "graph-crawler",
+          "text": "Would this work at google search engine scale ? Indexing the world wide web fucking scale",
+          "score": 1,
+          "created_utc": "2026-05-05 20:39:29",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "ok679mc",
+          "author": "romanminati",
+          "text": "I have tried pageindex . It is cool but not the solution. It breaks when the real user arrives. It assumes that the real user will ask questions like an encyclopaedia and use the exact terms. But they don’t. They ask vague questions and that’s where it breaks. And the same vector based semantic search and embeddings come to rescue. ",
+          "score": 1,
+          "created_utc": "2026-05-06 01:43:47",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "ok67btn",
+          "author": "romanminati",
+          "text": "I have tried pageindex . It is cool but not the solution. It breaks when the real user arrives. It assumes that the real user will ask questions like an encyclopaedia and use the exact terms. But they don’t. They ask vague questions and that’s where it breaks. And the same vector based semantic search and embeddings come to rescue. ",
+          "score": 1,
+          "created_utc": "2026-05-06 01:44:08",
           "is_submitter": false,
           "replies": []
         },
@@ -126,9 +163,9 @@
       "url": "https://www.reddit.com/r/Rag/comments/1sysbf1/graphrag_vs_hipporag_lightrag_and_vectorrag/",
       "author": "Striking-Bluejay6155",
       "created_utc": "2026-04-29 08:01:21",
-      "score": 29,
+      "score": 27,
       "num_comments": 25,
-      "upvote_ratio": 0.91,
+      "upvote_ratio": 0.89,
       "text": "Benchmarked the GraphRAG SDK against eight other GraphRAG and RAG systems on the GraphRAG-Bench Novel dataset.\n\nThe evaluation covers 2,010 questions across four task types: Fact Retrieval, Complex Reasoning, Contextual Summarization, and Creative Generation.\n\nAll tests ran on a MacBook Air (Apple M3, 24 GB) using GPT-4o-mini via Azure OpenAI for both answer generation and scoring.\n\nQueries: The evaluation runs against 2,000 questions drawn from the dataset. Here are two representative examples:\n\n1. \"In the narrative of 'An Unsentimental Journey through Cornwall', which plant known scientifically as Erica vagans is also referred to by another common name, and what is that name?\"\n2. \"Within the account of the royal visit to St. Michael's Mount in Cornwall, who is identified as the person who married Princess Frederica of Hanover?\"\n\nGraphRAG-SDK : [https://github.com/FalkorDB/GraphRAG-SDK/](https://github.com/FalkorDB/GraphRAG-SDK/)\n\nOfficial benchmarks: [https://graphrag-bench.github.io/](https://graphrag-bench.github.io/)\n\nData: [https://huggingface.co/datasets/GraphRAG-Bench/GraphRAG-Bench](https://huggingface.co/datasets/GraphRAG-Bench/GraphRAG-Bench)\n\nDisclosure: affiliated with FalkorDB and sharing our open-source work to collect feedback. Drop a star if you found it useful, thank you",
       "is_original_content": false,
       "link_flair_text": "Tools & Resources",
@@ -140,7 +177,7 @@
           "id": "oiwnhj8",
           "author": "Different-Arm4851",
           "text": "The potential of relationships in RAG systems is amazing. Great work they put into it.",
-          "score": 4,
+          "score": 3,
           "created_utc": "2026-04-29 09:12:07",
           "is_submitter": false,
           "replies": [
@@ -362,9 +399,9 @@
       "url": "https://www.reddit.com/r/Rag/comments/1t2k8x8/i_replaced_pinecone_with_a_binary_hash_index_48/",
       "author": "Final-Data-1410",
       "created_utc": "2026-05-03 12:34:34",
-      "score": 22,
+      "score": 24,
       "num_comments": 24,
-      "upvote_ratio": 0.87,
+      "upvote_ratio": 0.9,
       "text": "Been working on an alternative to float32 vector databases for RAG pipelines.\n\nThe core problem: standard RAG expands your documents 10× in size and needs\n\nan expensive managed vector DB running 24/7.\n\nMy approach — convert each float32 embedding into a 128-byte binary fingerprint,\n\nthen search using Multi-Index Hashing (MIH) with Hamming distance instead of\n\ncosine similarity.\n\nResults (measured at >100k chunks):\n\n• 48× smaller index vs float32 RAG\n\n• 75× faster search — pure POPCNT arithmetic, no GPU\n\n• Runs completely offline from a zip file\n\n• No Pinecone, no Weaviate, no Qdrant needed\n\nHonest caveats:\n\n• On small corpora (<10k chunks) compression is \\~31× due to fixed MIH\n\nsub-table overhead — fully amortises at production scale\n\n• Speed gap collapses below \\~100k chunks where both methods hit \\~1ms floor\n\n• 100× image compression is a projection, not yet in production\n\nLive demo: \\[nodemind.space\\]([https://nodemind.space](https://nodemind.space))\n\nGitHub: \\[github.com/QLNI/NodeMind\\]([https://github.com/QLNI/NodeMind](https://github.com/QLNI/NodeMind))\n\nX/Twitter: \\[Follow @Qlnix4E49 for updates\\]([https://x.com/Qlnix4E49](https://x.com/Qlnix4E49))\n\nTwo provisional patents filed in Australia. Built solo on community hardware\n\nin regional NSW.\n\nHappy to answer technical questions about the MIH architecture or binary codec.\n\nFull benchmark now live on GitHub\n\n500,000 chunks — Wikipedia + arXiv + Project Gutenberg books. Both NodeMind and float32 RAG indexes are downloadable so you can verify the compression ratios yourself.\n\n➡️ github.com/QLNI/NodeMind",
       "is_original_content": false,
       "link_flair_text": "Showcase",
@@ -404,7 +441,7 @@
           "id": "ojpiqc8",
           "author": "-Cubie-",
           "text": "So it's faster, smaller, and gets higher recall? Doesn't pass the smell-test for me. Can you share more?",
-          "score": 5,
+          "score": 4,
           "created_utc": "2026-05-03 16:38:05",
           "is_submitter": false,
           "replies": [
@@ -420,7 +457,7 @@
                   "id": "ojpnh56",
                   "author": "freehuntx",
                   "text": "Emdash it in.",
-                  "score": 10,
+                  "score": 11,
                   "created_utc": "2026-05-03 17:00:14",
                   "is_submitter": false,
                   "replies": []
@@ -571,9 +608,9 @@
       "url": "https://www.reddit.com/r/Rag/comments/1t0w7pu/what_web_scraper_do_you_use_to_scrape_data_for/",
       "author": "MarkOtherwise8506",
       "created_utc": "2026-05-01 15:12:35",
-      "score": 19,
+      "score": 21,
       "num_comments": 45,
-      "upvote_ratio": 0.92,
+      "upvote_ratio": 0.96,
       "text": "What web scrapers do you use to scrape huge data like about 10M tokens of data \n\nI am trying to build an RAG pipeline and need huge data. The data I need is about tech articles, docs, blogs or it could also be educative pdfs",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -585,7 +622,7 @@
           "id": "ojc9u03",
           "author": "Key-Contact-6524",
           "text": "Pretty Easy \n\nIf you can self host and have enough compute for your volume? Searxng \n\nIf you can self host but don't have a lot of compute? SERP providers + crawl results using lightpanda or just fetch whatever \n\nIf self hosting is not an option, then you can go with you.com , Jina , Tavily , Exa or even us(https://keirolabs.cloud). Whichever fits your budget and use case.\n\nNow even in these providers , they might seem the same but are not.\n\n you.com is cheap and the quality of results is excellent, Tavily is good ol' reliable , Jina is good in quality, firecrawl best for full page content and gives content in markdown and lastly we provide scraped content in the form of embeddings ( I mean we do provide content in md too but we are talking about differentiating factors)\n\nNow, none of these techniques and providers are bad. It is just that you have to select the method / provider based on your situation \n\nEdit -- I am not talking about proxies in self hosting as that is a complete different and long topic",
-          "score": 13,
+          "score": 11,
           "created_utc": "2026-05-01 15:57:34",
           "is_submitter": false,
           "replies": [
@@ -632,15 +669,6 @@
               "text": "I was not pleased with the pricing of Firecrawl’s structured data, so I just run a frontier llm against the raw output, and saved a ton of money. \n\nThey’re great for headless and most situations, but can be costly en masse.",
               "score": 2,
               "created_utc": "2026-05-01 19:23:17",
-              "is_submitter": false,
-              "replies": []
-            },
-            {
-              "id": "ojgwn5l",
-              "author": "Worth_Wealth_6811",
-              "text": "Self-hosted scrapers cover open web. For domain-specific structured data, the cheaper path is finding a pre-built dataset and skipping the scrape entirely. Free GitHub-derived dataset across 4,200 startup orgs at signals.gitdealflow.com/data-sources, weekly refresh, CSV + JSON. Methodology: ssrn.com/abstract=6606558. Saves the proxy stack for sites that genuinely need it.",
-              "score": 1,
-              "created_utc": "2026-05-02 08:16:07",
               "is_submitter": false,
               "replies": []
             },
@@ -916,15 +944,137 @@
       ]
     },
     {
+      "id": "1t3puuk",
+      "title": "TypeGraph - GraphRAG on Next.js and Postgres. #2 on GraphRAG benchmark. It's fast, easy to deploy and open source.",
+      "subreddit": "Rag",
+      "url": "https://www.reddit.com/r/Rag/comments/1t3puuk/typegraph_graphrag_on_nextjs_and_postgres_2_on/",
+      "author": "notoriousFlash",
+      "created_utc": "2026-05-04 18:15:22",
+      "score": 19,
+      "num_comments": 1,
+      "upvote_ratio": 0.95,
+      "text": "I was so sick of stitching together and maintaining fragmented context pipelines, memory systems and multiple different databases to do RAG, so I created and open sourced [TypeGraph](https://github.com/typegraph-ai/Typegraph).\n\nI ran it against GraphRAG-Bench Novel. Landed #2 on the leaderboard. [I documented full details here](https://typegraph.ai/benchmarks/graphrag-bench-novel), but the gist of the results:\n\n* 0.6265 ACC overall (#2 on the public leaderboard)\n* 794ms p50, 1.69s p95 retrieval latency for the full graph eval\n* Full benchmark cost: $34.57 in metered ingest + retrieval (answer gen excluded)\n* The whole benchmark took 64m 48s to run end to end\n* No vector or graph databases used, only postgres w/ pgvector\n\nThings that mattered/learnings:\n\n* **Graph signal earned its keep on multi-hop, not single-hop.**\n   * On direct fact lookups, semantic + keyword was already strong and nearly 4x faster. Graph retrieval pulled its weight on questions that required chaining facts across entities.\n* **Source-scoped retrieval was non-negotiable.**\n   * Each novel got its own `groupId`. Without that, cross-novel entity collisions destroyed precision. Similar needs to many production use cases I've seen.\n* **Creative Generation was the weak spot.**\n   * Faithfulness 0.6212, coverage 0.4047 - generated answers stayed grounded but missed required creative elements and were too chatty. Generator problem more than retrieval problem.\n* **gpt-4o-mini's verbosity kinda** **hurt ACC scoring.**\n   * It loves to add irrelevant context. A more terse generator would likely score higher. The original benchmark used qwen2.5-14b-instruct which is better at following directions, but much slower and not accessible through Vercel's ai gateway.\n\nThe retrieval layer is open source under MIT [`typegraph-ai/typescript-sdk`](https://github.com/typegraph-ai/Typegraph) on GitHub and [docs here](https://typegraph.ai/docs) if anyone wants to deploy themselves or repro.\n\nTear it apart in the comments. Especially if your numbers look better than ours.\n\n ",
+      "is_original_content": false,
+      "link_flair_text": "Showcase",
+      "permalink": "https://reddit.com/r/Rag/comments/1t3puuk/typegraph_graphrag_on_nextjs_and_postgres_2_on/",
+      "domain": "self.Rag",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "ok02n6i",
+          "author": "nicoloboschi",
+          "text": "Impressive benchmark results and great findings on the importance of source-scoped retrieval. The emphasis on graph signal for multi-hop questions is spot on, and memory systems like Hindsight can strongly complement RAG for more advanced reasoning capabilities. [https://github.com/vectorize-io/hindsight](https://github.com/vectorize-io/hindsight)",
+          "score": 2,
+          "created_utc": "2026-05-05 04:39:50",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1t2sqxe",
+      "title": "Your RAG system is probably slow not because of the model… but because you’re recomputing everything",
+      "subreddit": "Rag",
+      "url": "https://www.reddit.com/r/Rag/comments/1t2sqxe/your_rag_system_is_probably_slow_not_because_of/",
+      "author": "Prudent-Concept-78",
+      "created_utc": "2026-05-03 18:06:15",
+      "score": 17,
+      "num_comments": 12,
+      "upvote_ratio": 0.87,
+      "text": "While building a RAG system for a biomass use case, I expected most improvements to come from better models or retrieval tuning.\n\nTurns out… that wasn’t the case.\n\n>\n\nWhat actually helped was adding caching at the right places:\n\n* **Query embedding cache** → avoids recomputing embeddings for repeated queries\n* **Retrieval cache (top-K chunks)** → reduces vector DB calls\n* **Response cache** → for frequent queries, skip the full pipeline entirely\n* Also realized chunks don’t change often → makes caching very effective at that layer\n\nThe result:\n\n* lower latency\n* fewer redundant computations\n* more stable performance\n\nBig takeaway:\n\nRAG isn’t just about models or retrieval quality.  \nIt’s a **systems problem** latency, efficiency, and smart design matter just as much.",
+      "is_original_content": false,
+      "link_flair_text": "Discussion",
+      "permalink": "https://reddit.com/r/Rag/comments/1t2sqxe/your_rag_system_is_probably_slow_not_because_of/",
+      "domain": "self.Rag",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "ojqr6wt",
+          "author": "solubrious1",
+          "text": "You have queries:\n- what is the capital of Great Britain \n\nAnd\n\n- What is the capital of Great Britain \n\nHow do you suppose to cache it?",
+          "score": 2,
+          "created_utc": "2026-05-03 20:08:17",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "ojs11t9",
+              "author": "Arkamedus",
+              "text": "Use a better semantic search algorithm for your queries, if you are suggesting those should have the same cached values, then just do it, nearly all text searches can be done case insensitive initially, then refine your results afterwards if necessary.",
+              "score": 1,
+              "created_utc": "2026-05-04 00:17:08",
+              "is_submitter": false,
+              "replies": [
+                {
+                  "id": "ojtgvbo",
+                  "author": "solubrious1",
+                  "text": "I understand that, I'm wondering whether author understands what he's talking about. ",
+                  "score": 1,
+                  "created_utc": "2026-05-04 06:08:16",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            },
+            {
+              "id": "ojtm6r4",
+              "author": "Prudent-Concept-78",
+              "text": "I don’t cache on raw strings. I normalize + embed queries, and cache based on semantic similarity (or hashed normalized form).  \nSo both queries map to the same cache entry.",
+              "score": 1,
+              "created_utc": "2026-05-04 06:55:27",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "ojtnlbf",
+                  "author": "solubrious1",
+                  "text": "But how'd you reduce latency, if you need to perform 2x more queries to vector DB? \n\nQuery -> Normalize -> Embed -> Query Cache -> Query DB [if not yet cached]",
+                  "score": 1,
+                  "created_utc": "2026-05-04 07:08:01",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "ojux4j9",
+          "author": "nicoloboschi",
+          "text": "Caching is crucial for RAG, especially when dealing with repetitive queries or static data. This aligns with the idea of incorporating a robust memory layer; for example, Hindsight handles caching and retrieval optimization. [https://github.com/vectorize-io/hindsight](https://github.com/vectorize-io/hindsight)",
+          "score": 2,
+          "created_utc": "2026-05-04 12:59:05",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "ojsbgi5",
+          "author": "aditosh_",
+          "text": "Right.. and learning from others experience rather than failing yourself is a saver  \n[Building a RAG Chatbot on Azure? Here's what Actually Breaks in Production & Nobody Tells You About](https://youtu.be/dLY0uN-3uA8?si=jUiZShlUvKehVjjV)",
+          "score": 1,
+          "created_utc": "2026-05-04 01:17:53",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "ojxi21w",
+          "author": "geoheil",
+          "text": "check out Metaxy [https://docs.metaxy.io/stable/](https://docs.metaxy.io/stable/) if you do not want to recompute everything all the time [https://docs.metaxy.io/latest/slides/2026-introducing-metaxy/dist/index.html#/1](https://docs.metaxy.io/latest/slides/2026-introducing-metaxy/dist/index.html#/1)",
+          "score": 1,
+          "created_utc": "2026-05-04 20:07:18",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
       "id": "1t23dec",
       "title": "Doubt: How to setup rag for summarising large PDFs?",
       "subreddit": "Rag",
       "url": "https://www.reddit.com/r/Rag/comments/1t23dec/doubt_how_to_setup_rag_for_summarising_large_pdfs/",
       "author": "Ecstatic-Register570",
       "created_utc": "2026-05-02 22:09:51",
-      "score": 17,
-      "num_comments": 15,
-      "upvote_ratio": 0.95,
+      "score": 15,
+      "num_comments": 16,
+      "upvote_ratio": 0.9,
       "text": "I'm in my learning phase, and I was building a project related to financial documents where I was required to summarise large text PDFs that too containing numbers and tables sometimes, and summarise them so how to handle that? I can't directly put into all the text to the llm and ask to summarise, what's the right approach to do that? And also what's the best way to extract the data from the text PDFs including numeric tables? ",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -936,7 +1086,7 @@
           "id": "ojkykkl",
           "author": "CircuitSurf",
           "text": "1. Divide text into hard chunks (windows) of length that equals approx. 80% of your LLM real context window.\n2. To each line of each window append line number. eq. [1], [2], [3].\n3. For each window ask LLM to split it into semantic chunks that carry the same theme and return you JSON with array of section title, line start idx.\n4. Use LLM output to split windows into semantic sections.\n5. Implement map-reduce logic on semantic sections where each iteration asks the LLM to condence semantic section into 10 (or whatever) bullet points. In map-reduce logic after each section is reduced (map) it then starts to accumulate those reduced sections so that they form basically one big section that still fits your context window and then it condences it even further. On final iteration once it all fits your context window you might want to leave it as bullet points, or have a prompt that turns it in a nice text.\n\nI can share my prompts if needed.\n\nMake sure to check out dsRAG project - I took most of these concepts there, only thing is that they don't care about proper summary that much. But they claim to score high on FinanceBench and I believe them based on the techniques they use.",
-          "score": 5,
+          "score": 6,
           "created_utc": "2026-05-02 22:22:00",
           "is_submitter": false,
           "replies": [
@@ -1042,128 +1192,6 @@
           "text": "The only thing I've found so far that actually works is to convert the docs to images (1 per page), and feed the images to a vision-capable LLM with instructions to extract the tables into markdown.   Takes a while, but even a medium-size model (e.g., Nemotron 3 30B Omni) does a great job of preserving table structure.  And it gets the numbers right, too.",
           "score": 1,
           "created_utc": "2026-05-03 19:50:17",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
-      "id": "1t3puuk",
-      "title": "TypeGraph - GraphRAG on Next.js and Postgres. #2 on GraphRAG benchmark. It's fast, easy to deploy and open source.",
-      "subreddit": "Rag",
-      "url": "https://www.reddit.com/r/Rag/comments/1t3puuk/typegraph_graphrag_on_nextjs_and_postgres_2_on/",
-      "author": "notoriousFlash",
-      "created_utc": "2026-05-04 18:15:22",
-      "score": 16,
-      "num_comments": 1,
-      "upvote_ratio": 0.91,
-      "text": "I was so sick of stitching together and maintaining fragmented context pipelines, memory systems and multiple different databases to do RAG, so I created and open sourced [TypeGraph](https://github.com/typegraph-ai/Typegraph).\n\nI ran it against GraphRAG-Bench Novel. Landed #2 on the leaderboard. [I documented full details here](https://typegraph.ai/benchmarks/graphrag-bench-novel), but the gist of the results:\n\n* 0.6265 ACC overall (#2 on the public leaderboard)\n* 794ms p50, 1.69s p95 retrieval latency for the full graph eval\n* Full benchmark cost: $34.57 in metered ingest + retrieval (answer gen excluded)\n* The whole benchmark took 64m 48s to run end to end\n* No vector or graph databases used, only postgres w/ pgvector\n\nThings that mattered/learnings:\n\n* **Graph signal earned its keep on multi-hop, not single-hop.**\n   * On direct fact lookups, semantic + keyword was already strong and nearly 4x faster. Graph retrieval pulled its weight on questions that required chaining facts across entities.\n* **Source-scoped retrieval was non-negotiable.**\n   * Each novel got its own `groupId`. Without that, cross-novel entity collisions destroyed precision. Similar needs to many production use cases I've seen.\n* **Creative Generation was the weak spot.**\n   * Faithfulness 0.6212, coverage 0.4047 - generated answers stayed grounded but missed required creative elements and were too chatty. Generator problem more than retrieval problem.\n* **gpt-4o-mini's verbosity kinda** **hurt ACC scoring.**\n   * It loves to add irrelevant context. A more terse generator would likely score higher. The original benchmark used qwen2.5-14b-instruct which is better at following directions, but much slower and not accessible through Vercel's ai gateway.\n\nThe retrieval layer is open source under MIT [`typegraph-ai/typescript-sdk`](https://github.com/typegraph-ai/Typegraph) on GitHub and [docs here](https://typegraph.ai/docs) if anyone wants to deploy themselves or repro.\n\nTear it apart in the comments. Especially if your numbers look better than ours.\n\n ",
-      "is_original_content": false,
-      "link_flair_text": "Showcase",
-      "permalink": "https://reddit.com/r/Rag/comments/1t3puuk/typegraph_graphrag_on_nextjs_and_postgres_2_on/",
-      "domain": "self.Rag",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "ok02n6i",
-          "author": "nicoloboschi",
-          "text": "Impressive benchmark results and great findings on the importance of source-scoped retrieval. The emphasis on graph signal for multi-hop questions is spot on, and memory systems like Hindsight can strongly complement RAG for more advanced reasoning capabilities. [https://github.com/vectorize-io/hindsight](https://github.com/vectorize-io/hindsight)",
-          "score": 2,
-          "created_utc": "2026-05-05 04:39:50",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
-      "id": "1t2sqxe",
-      "title": "Your RAG system is probably slow not because of the model… but because you’re recomputing everything",
-      "subreddit": "Rag",
-      "url": "https://www.reddit.com/r/Rag/comments/1t2sqxe/your_rag_system_is_probably_slow_not_because_of/",
-      "author": "Prudent-Concept-78",
-      "created_utc": "2026-05-03 18:06:15",
-      "score": 16,
-      "num_comments": 12,
-      "upvote_ratio": 0.86,
-      "text": "While building a RAG system for a biomass use case, I expected most improvements to come from better models or retrieval tuning.\n\nTurns out… that wasn’t the case.\n\n>\n\nWhat actually helped was adding caching at the right places:\n\n* **Query embedding cache** → avoids recomputing embeddings for repeated queries\n* **Retrieval cache (top-K chunks)** → reduces vector DB calls\n* **Response cache** → for frequent queries, skip the full pipeline entirely\n* Also realized chunks don’t change often → makes caching very effective at that layer\n\nThe result:\n\n* lower latency\n* fewer redundant computations\n* more stable performance\n\nBig takeaway:\n\nRAG isn’t just about models or retrieval quality.  \nIt’s a **systems problem** latency, efficiency, and smart design matter just as much.",
-      "is_original_content": false,
-      "link_flair_text": "Discussion",
-      "permalink": "https://reddit.com/r/Rag/comments/1t2sqxe/your_rag_system_is_probably_slow_not_because_of/",
-      "domain": "self.Rag",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "ojqr6wt",
-          "author": "solubrious1",
-          "text": "You have queries:\n- what is the capital of Great Britain \n\nAnd\n\n- What is the capital of Great Britain \n\nHow do you suppose to cache it?",
-          "score": 2,
-          "created_utc": "2026-05-03 20:08:17",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "ojs11t9",
-              "author": "Arkamedus",
-              "text": "Use a better semantic search algorithm for your queries, if you are suggesting those should have the same cached values, then just do it, nearly all text searches can be done case insensitive initially, then refine your results afterwards if necessary.",
-              "score": 1,
-              "created_utc": "2026-05-04 00:17:08",
-              "is_submitter": false,
-              "replies": [
-                {
-                  "id": "ojtgvbo",
-                  "author": "solubrious1",
-                  "text": "I understand that, I'm wondering whether author understands what he's talking about. ",
-                  "score": 1,
-                  "created_utc": "2026-05-04 06:08:16",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            },
-            {
-              "id": "ojtm6r4",
-              "author": "Prudent-Concept-78",
-              "text": "I don’t cache on raw strings. I normalize + embed queries, and cache based on semantic similarity (or hashed normalized form).  \nSo both queries map to the same cache entry.",
-              "score": 1,
-              "created_utc": "2026-05-04 06:55:27",
-              "is_submitter": true,
-              "replies": [
-                {
-                  "id": "ojtnlbf",
-                  "author": "solubrious1",
-                  "text": "But how'd you reduce latency, if you need to perform 2x more queries to vector DB? \n\nQuery -> Normalize -> Embed -> Query Cache -> Query DB [if not yet cached]",
-                  "score": 1,
-                  "created_utc": "2026-05-04 07:08:01",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "ojsbgi5",
-          "author": "aditosh_",
-          "text": "Right.. and learning from others experience rather than failing yourself is a saver  \n[Building a RAG Chatbot on Azure? Here's what Actually Breaks in Production & Nobody Tells You About](https://youtu.be/dLY0uN-3uA8?si=jUiZShlUvKehVjjV)",
-          "score": 1,
-          "created_utc": "2026-05-04 01:17:53",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ojux4j9",
-          "author": "nicoloboschi",
-          "text": "Caching is crucial for RAG, especially when dealing with repetitive queries or static data. This aligns with the idea of incorporating a robust memory layer; for example, Hindsight handles caching and retrieval optimization. [https://github.com/vectorize-io/hindsight](https://github.com/vectorize-io/hindsight)",
-          "score": 1,
-          "created_utc": "2026-05-04 12:59:05",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ojxi21w",
-          "author": "geoheil",
-          "text": "check out Metaxy [https://docs.metaxy.io/stable/](https://docs.metaxy.io/stable/) if you do not want to recompute everything all the time [https://docs.metaxy.io/latest/slides/2026-introducing-metaxy/dist/index.html#/1](https://docs.metaxy.io/latest/slides/2026-introducing-metaxy/dist/index.html#/1)",
-          "score": 1,
-          "created_utc": "2026-05-04 20:07:18",
           "is_submitter": false,
           "replies": []
         }
@@ -1350,85 +1378,107 @@
       ]
     },
     {
-      "id": "1sylo1z",
-      "title": "URL → Markdown → LangChain Documents: a simple RAG ingestion pattern",
+      "id": "1t4e4q4",
+      "title": "I replaced Pinecone with a binary hash index — 32× smaller, 75× faster, no GPU, runs from a pickle file",
       "subreddit": "Rag",
-      "url": "https://www.reddit.com/r/Rag/comments/1sylo1z/url_markdown_langchain_documents_a_simple_rag/",
-      "author": "nihal_was_here",
-      "created_utc": "2026-04-29 02:19:19",
-      "score": 15,
-      "num_comments": 7,
-      "upvote_ratio": 0.94,
-      "text": "For web-based RAG, I’ve found that the ingestion step matters more than people give it credit for.  \n  \nA lot of examples jump straight to:  \n  \ndocuments → chunks → embeddings → vector store  \n  \nBut when the source is a website or docs site, the real pipeline usually starts earlier:  \n  \nwebpage/docs site → cleaned content → Markdown → LangChain Documents → chunks → embeddings  \n  \nThe Markdown step has been useful because it gives the chunker cleaner structure: headings, lists, code blocks, links, and sections, instead of raw HTML full of nav, sidebars, cookie banners, scripts, and layout noise.  \n  \nThe pattern I’ve been using:  \n  \n1. Scrape or crawl the target URLs  \n2. Extract the main page content  \n3. Convert each page to Markdown  \n4. Wrap each page as a LangChain Document  \n5. Preserve metadata like source URL, title, description, and scraped time  \n6. Send the documents into a splitter / vector store  \n  \nMinimal shape:  \n  \n\\`\\`\\`ts  \nconst docs = await loader.load();  \n  \n// Then use with:  \n// - text splitters  \n// - embeddings  \n// - vector stores  \n// - retrieval chains\n\n  \nI put together a small LangChain loader example here:  \n[https://github.com/vakra-dev/reader/blob/main/examples/ai-tools/langchain-loader.ts](https://github.com/vakra-dev/reader/blob/main/examples/ai-tools/langchain-loader.ts)\n\nIt supports both:\n\n* specific URLs with `scrape()`\n* website crawling with `crawl()`\n\nThe loader returns standard LangChain `Document[]`, so the output can go into the rest of a normal RAG pipeline.\n\nCurious how others are handling this step.\n\nFor docs/web RAG, are you usually:\n\n* crawling from a root URL?\n* feeding a fixed URL list?\n* relying on sitemaps?\n* using hosted scrapers?\n* writing custom Playwright loaders?\n\n",
+      "url": "https://www.reddit.com/r/Rag/comments/1t4e4q4/i_replaced_pinecone_with_a_binary_hash_index_32/",
+      "author": "Final-Data-1410",
+      "created_utc": "2026-05-05 12:34:09",
+      "score": 14,
+      "num_comments": 9,
+      "upvote_ratio": 0.85,
+      "text": "Been working on an alternative to float32 vector databases \n\nfor RAG pipelines.\n\nThe core problem: standard RAG expands your documents 10× \n\nin size and needs an expensive managed vector DB running 24/7.\n\nMy approach — convert each float32 embedding into a 128-byte \n\nbinary fingerprint, then search using Multi-Index Hashing (MIH) \n\nwith Hamming distance instead of cosine similarity.\n\nResults (measured at >100k chunks):\n\n• 32× smaller index vs float32 RAG (BGE-M3, 1024-bit)\n\n• 96× smaller at BGE-base + 256-bit\n\n• 75× faster search — pure POPCNT arithmetic, no GPU\n\n• R@10 = 1.000 on 500K-chunk benchmark — matches exact float32\n\n• Beats FAISS Fixed Binary on every same-size BEIR cell\n\n• Runs completely offline from a single .pkl file\n\n• No Pinecone, no Weaviate, no Qdrant needed\n\nHonest caveats:\n\n• Float32 cosine still wins on raw recall at small corpus \n\n  sizes — gap closes as corpus grows, matches perfectly \n\n  at 500K chunks\n\n• Below \\~100k chunks the 75× speed advantage disappears — \n\n  both methods hit \\~1ms floor and perform the same\n\nFull benchmarks, roadmap, live demo and all downloadable indexes:\n\ngithub.com/QLNI/NodeMind\n\n\\---\n\nWhat's next: HiveMind.\n\nNodeMind solves storage. HiveMind is the next layer — agents \n\ndeposit compressed reasoning traces, register semantic watches \n\non ideas, and connect through MCP. A reasoning node is 32 bytes \n\nvs 4 KB float32. A 1M-node graph fits in 32 MB instead of 4 GB.\n\nConcept → https://nodemind.space/hivemind/\n\nFollow @QLNI\\_AI — one post when it ships/updates.\n\nHappy to answer any questions or doubts about the benchmark \n\nresults.\n\n— Sai",
       "is_original_content": false,
-      "link_flair_text": "Tutorial",
-      "permalink": "https://reddit.com/r/Rag/comments/1sylo1z/url_markdown_langchain_documents_a_simple_rag/",
+      "link_flair_text": "Showcase",
+      "permalink": "https://reddit.com/r/Rag/comments/1t4e4q4/i_replaced_pinecone_with_a_binary_hash_index_32/",
       "domain": "self.Rag",
       "is_self": true,
       "comments": [
         {
-          "id": "oiwpiwo",
-          "author": "Fuzzy-Layer9967",
-          "text": "Totally agree on the data consolidation phase you mentionned \"cleand content\"\n\nWe actually did something very similar for one of our project. \n\nBut still one thing totally inevitable for us, maintain.  \nOnce ingested we needed to fix some chunks etc.. that is where you're long term value is built...\n\n  \nWe open-source our tool : [https://github.com/scub-france/Docling-Studio](https://github.com/scub-france/Docling-Studio)  \nNo taking MD for the moment but will come soon ;)",
-          "score": 2,
-          "created_utc": "2026-04-29 09:30:46",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oiw6cjv",
-          "author": "solubrious1",
-          "text": "Cloudflare browser rendering API does 90% things you need for nearly free or for free with limitations. ",
-          "score": 1,
-          "created_utc": "2026-04-29 06:37:02",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oiwb520",
-          "author": "SharpRule4025",
-          "text": "Markdown still pulls in a lot of garbage. Navigation menus, CSS class names, and UI chrome often leak into your embeddings when converting straight from HTML. I tested one Wikipedia article and the markdown payload was 373KB while the actual content was about 15KB.\n\nStructured extraction upfront saves the whole chunking and cleaning step. If your scraper returns typed JSON fields like title, main body, and links with context, you can skip the embedding pipeline entirely for many use cases and just query the fields directly. A page that comes back as 93K tokens in markdown drops to 4K tokens in structured JSON because you only index the actual content.",
-          "score": 1,
-          "created_utc": "2026-04-29 07:18:20",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oix1zuo",
-          "author": "Striking_Rate_7390",
-          "text": "is it made for data scraping , i dont think it will work on chromium or any automated browser!",
-          "score": 1,
-          "created_utc": "2026-04-29 11:09:32",
+          "id": "ok1vp8b",
+          "author": "BERTmacklyn",
+          "text": "[check out my implementation I am interested in your thoughts on it considering the similarity of the endeavors](https://github.com/RSBalchII/anchor-engine-node)\n\nPerhaps you have some ideas to enhance the memory system? \n\nAnyway my project is quite mature now and I believe the core concept of a cheap fast tag based index enhancing speed of search and ingestion while also leaving traceable Metadata is sound. \n\nI have been considering how vector db work and the problem that sent me from using it at was GPU. \n\nThe anchor engine can run on less than 2 gb of ram and run all operations within that ram range. So keeping ram cost low is important to me. \n\nThe interesting thing is that larger corpus doesn't damage the effect of search which is a massive shift from vector when corpus grows.",
+          "score": 3,
+          "created_utc": "2026-05-05 13:06:03",
           "is_submitter": false,
           "replies": [
             {
-              "id": "oj4gwjn",
-              "author": "nihal_was_here",
-              "text": "Reader uses Hero under the hood which is built for exactly this purpose, Hero uses Chromium under the hood and has all the browser fingerprinting strategies baked in which makes it really optimal for scraping needs. Browser automation is also possible using Hero and is in the roadmap...\n\nMore about Hero: [https://github.com/ulixee/hero](https://github.com/ulixee/hero)",
-              "score": 1,
-              "created_utc": "2026-04-30 12:54:08",
+              "id": "ok2236o",
+              "author": "Final-Data-1410",
+              "text": "your tag index is already half a binary retrieval system \nwithout knowing it — tags are a sparse bitfield, search is \noverlap counting, you're basically there.\n\nworth trying: slap a small dense fingerprint per doc on top \nof your tags. 10M docs = ~300MB extra, fits your budget easy. \ntags handle filtering, fingerprint catches the synonyms your \ntaxonomy misses.\n\ntradeoff is real though — fingerprints are opaque, can't \nexplain \"why this doc\" the way tag overlap can. depends how \nhard explainability is for you.\n\ndrop your repo, curious to dig in.\nmine → github.com/QLNI/NodeMind\n— Sai\n\n",
+              "score": 3,
+              "created_utc": "2026-05-05 13:38:18",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "ok2lres",
+                  "author": "BERTmacklyn",
+                  "text": "It's creating a bipartite graph! I have a whitepaper in docs/ that is brief but describes the process of the STAR algorithmic atomization process \n\nTag = concepts\n\n and \n\natom = entities   \n\nhttps://github.com/RSBalchII/anchor-engine-node\n\nI'm assessing your idea 💡 thanks!\n\n",
+                  "score": 2,
+                  "created_utc": "2026-05-05 15:10:56",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "ok1y2mf",
+          "author": "Otherwise_Wave9374",
+          "text": "Binary fingerprints + MIH for retrieval is a really cool direction, especially if it actually holds up at the 500k chunk scale. The cost and operational pain of always-on vector DBs is real.\n\nTwo questions: (1) how sensitive is your recall to embedding model changes or fine-tunes, like do you need to rebuild the whole index often? (2) for hybrid search, have you tried combining the binary index with a lightweight reranker, or does that kill the speed win?\n\nAlso the HiveMind idea (compressed reasoning traces + MCP) sounds like it could be a nice fit for agent memory. We have been exploring agent memory patterns too if you want to compare notes: https://www.agentixlabs.com/",
+          "score": 3,
+          "created_utc": "2026-05-05 13:18:07",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "ok23gsh",
+              "author": "Final-Data-1410",
+              "text": "On encoder sensitivity — the fingerprint pipeline is calibrated to whatever embedding model you used at index time. Swap encoders (BGE-M3 → e5-large), full rebuild. Fine-tunes are softer — the manifold drifts but doesn’t move catastrophically — so in practice you can often run a few fine-tune iterations before drift hurts recall noticeably. Haven’t measured this rigorously; in production I just rebuild on encoder family change, not every fine-tune.\nThe good news: rebuild is cheap because the bottleneck is re-embedding (same as any vector DB), not the fingerprint step. 500K chunks on an RTX 3080 is ~30 min for embedding, then binarisation is sub-second. Versus rebuilding HNSW + re-upserting to a managed service, which is hours and a billable line item.\nOn hybrid + reranker — yes, that’s the production pattern. Binary MIH narrows 500K → top-100 in <10ms, then a cross-encoder reranker on those 100 candidates is ~50ms on CPU (ms-marco-MiniLM-L-12-v2 class). Total ~60ms end-to-end. Doesn’t kill the speed win — you’re still 5–20× faster than full cosine over the corpus, and the reranker recovers most of the recall gap on small academic queries where pure binary loses.\nFor the BEIR numbers I deliberately didn’t use a reranker — wanted to show what binary alone can do. Reranker on top would close the gap to exact float32 cosine on the small slices where I currently lose.\nWill check out <agentixlabs.com> tonight. If you have writeups on agent memory patterns I’d genuinely read them — the cross-AI deposit / consensus side of HiveMind is where I’m spending most cycles right now and there’s no good prior literature on the specific failure modes I’m hitting.",
+              "score": 2,
+              "created_utc": "2026-05-05 13:45:09",
               "is_submitter": true,
               "replies": []
             }
           ]
         },
         {
-          "id": "oiyikzl",
-          "author": "OneLengthiness625",
-          "text": "Nice pattern. I’d probably split it into two separate steps: URL discovery and page extraction.\n\nFor discovery, I wouldn’t rely on just one method. Sitemaps are useful, but I’d still combine them with crawling from a root URL, canonical URL deduping, and filtering out noisy pages like search, tags, archives, etc.\n\nFor extraction, I’d try not to stop at plain Markdown. For docs/web RAG, the useful part is keeping structure attached: source URL, canonical URL, page title, headings, anchors, parent/child sections, doc type, version/date if available, and preserved code blocks.\n\nThat makes the LangChain Documents much more useful later, because the splitter and retriever are not working with raw text only.\n\nSo for me the shape is closer to:\n\nURL discovery → clean extraction → structured Markdown/sections → LangChain Documents → chunking/indexing\n\nThis is close to the area I’m working on now: turning public documentation pages into clean Markdown plus structured sections, anchors and metadata for RAG/agent workflows.",
-          "score": 1,
-          "created_utc": "2026-04-29 15:42:08",
+          "id": "ok54olh",
+          "author": "pegaunisusicorn",
+          "text": "Why would you want to use Hamming distance when you could just use regex and grep on the original files?\n\nare you not throwing out the baby with the bathwater?\n\nYou should be comparing your speeds to those and not a vector db, as you're using a completely different form of search when you abandon cosine similarity for Hamming distance.",
+          "score": 2,
+          "created_utc": "2026-05-05 22:07:11",
           "is_submitter": false,
-          "replies": []
+          "replies": [
+            {
+              "id": "ok5e7z9",
+              "author": "Final-Data-1410",
+              "text": "Because hamming on binary floats does same job as cosine on floats and grep and regex find exact string when user type attention mechanism the doc says transformer architecture grep returns nothing and that’s the problem vectors Dbs solve but Nodemind solve it at 32x less storage and also no standard benchmark exists for binary fingerprint RAG yet so i used BEIR and its what's available and its honest about where float32 still wins",
+              "score": 1,
+              "created_utc": "2026-05-05 22:59:29",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
         },
         {
-          "id": "oj7h65w",
-          "author": "Confident-Ninja-733",
-          "text": "i've been using Qoest API for the scraping step lately and it handles the markdown conversion pretty cleanly. their loader returns structured content without the nav noise so i skip a lot of cleanup i used to do manually. i usually start from a sitemap for docs sites but fall back to crawling if the sitemap is missing or stale.",
+          "id": "ok50pij",
+          "author": "freehuntx",
+          "text": "So many emdashes. Cant you atleast write 1 sentence yourself?",
           "score": 1,
-          "created_utc": "2026-04-30 21:30:30",
+          "created_utc": "2026-05-05 21:46:41",
           "is_submitter": false,
-          "replies": []
+          "replies": [
+            {
+              "id": "ok542gh",
+              "author": "Final-Data-1410",
+              "text": "Not a social media guy more of a what you say thinker I don’t see the problem the way we supposed to see and if I know any better my reddit username would not be be final-data 1410 i seriously don’t know what it mean I don’t even know the reddit username is final I don’t know we can’t change it I realised after creating account but any way my writing style bugs you than actual number fair enough",
+              "score": 1,
+              "created_utc": "2026-05-05 22:03:57",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
         }
       ]
     },
@@ -1439,7 +1489,7 @@
       "url": "https://www.reddit.com/r/Rag/comments/1t2nsmn/built_a_local_rag_app_for_licensed_technical/",
       "author": "CAVOKDesigns",
       "created_utc": "2026-05-03 15:01:12",
-      "score": 14,
+      "score": 13,
       "num_comments": 14,
       "upvote_ratio": 1.0,
       "text": "Been lurking here a while and finally have something worth sharing.                                 \n\n[Manual IQ](https://youtu.be/rpmvFhz0ojM)Built ManualIQ — a local RAG tool specifically for proprietary/licensed documents where you can't   \n\njust upload to ChatGPT without a copyright problem. Aviation manuals, service docs, anything     licensed to the operator.         \n\n Stack: Chroma for the vector store, boundary-aware chunker that keeps WARNING/CAUTION/EMERGENCY     \n\nblocks atomic (never split across chunks), page + section in metadata so every answer cites its   source.                                                                                             \n\n\n\nDemo has 14,142 chunks from a full Praetor 600 suite — AFM, AOM, QRH, SOP, PTM. Asked it weights, a start procedure, and GPU limits. Citations come back clean every time.                              \n\nHappy to talk chunking strategy, the boundary-aware approach, or the copyright angle if anyone's    \n\ndealt with similar constraints. Curious what others are doing with licensed doc sets.",
@@ -1632,15 +1682,53 @@
       ]
     },
     {
+      "id": "1t3l6jx",
+      "title": "Open-source Python framework for production RAG - multi-tenancy, \npersistent memory, streaming, and hallucination detection (v1.3.0)",
+      "subreddit": "Rag",
+      "url": "https://www.reddit.com/r/Rag/comments/1t3l6jx/opensource_python_framework_for_production_rag/",
+      "author": "UnluckyOpposition",
+      "created_utc": "2026-05-04 15:33:49",
+      "score": 12,
+      "num_comments": 3,
+      "upvote_ratio": 1.0,
+      "text": "LongTrainer is an open-source Python framework built on top of LangChain. It handles the production infrastructure layer that most RAG tutorials skip entirely.\n\n\n**Multi-tenant bot isolation**\n\nEvery bot instance gets a fully isolated vector index and chat history scoped through a `bot_id`. Client A's documents, embeddings, and conversation memory never touch Client B's. Works across FAISS, Pinecone, Qdrant, PGVector, and Chroma.\n\n```python\nfrom longtrainer.trainer import LongTrainer\n\ntrainer = LongTrainer(mongo_endpoint=\"mongodb://localhost:27017/\")\n\nbot_id = trainer.initialize_bot_id()\ntrainer.add_document_from_path(\"client_data.pdf\", bot_id)\ntrainer.create_bot(bot_id)\n\nchat_id = trainer.new_chat(bot_id)\nanswer, sources = trainer.get_response(\n    \"What are the payment terms?\",\n    bot_id,\n    chat_id\n)\n```\n\n**Persistent memory via MongoDB**\n\nChat histories are persisted to MongoDB and lazy-loaded per session on demand. Nothing is held in RAM at startup. Startup time stays flat at milliseconds regardless of how many historical sessions exist.\n\n**Document ingestion**\n\nAccepts PDF, DOCX, URLs, S3 buckets, Google Drive, and GitHub repos directly. Chunking, embedding, and indexing are handled automatically.\n\n```python\ntrainer.add_document_from_path(\"report.pdf\", bot_id)\ntrainer.add_document_from_url(\"[https://docs.example.com](https://docs.example.com)\", bot_id)\ntrainer.add_document_from_s3(\"s3://bucket/data.pdf\", bot_id)\n```\n\n**Streaming responses**\n\n```python\n# Sync streaming\nfor chunk in trainer.stream_response(query, bot_id, chat_id):\n    print(chunk, end=\"\", flush=True)\n\n# Async\nanswer = await trainer.aget_response(query, bot_id, chat_id)\n```\n\n**Agent mode with tool calling**\n\nSwitches any bot from standard RAG to a LangGraph-powered agent that can call tools. Same `bot_id` isolation applies.\n\n```python\ndef get_current_price(ticker: str) -> str:\n    return f\"Price for {ticker}: $142.30\"\n\ntrainer = LongTrainer(\n    mongo_endpoint=\"mongodb://localhost:27017/\",\n    agent_mode=True\n)\ntrainer.add_tool(get_current_price, bot_id)\n```\n\n**What is new in v1.3.0: Observability and hallucination detection**\n\nThe main gap in earlier versions was visibility into what was actually happening inside the pipeline when responses were wrong. v1.3.0 adds native LongTracer integration to address this directly. \n\nEnable it with a single flag:\n\n```python\ntrainer = LongTrainer(\n    mongo_endpoint=\"mongodb://localhost:27017/\",\n    enable_tracer=True,\n    tracer_backend=\"mongo\",\n    tracer_verify=True,\n    tracer_threshold=0.5\n)\n```\n\n**Span-level observability**\nEvery query automatically generates a trace stored in MongoDB:\n* Retrieval spans: which documents were fetched, similarity scores, latency\n* LLM spans: exact prompt, token count, generation latency\n* Agent spans: every tool call, input, output, and execution time\n\n**Hallucination detection via CitationVerifier**\nWhen `tracer_verify=True`, every response goes through NLI cross-referencing before being returned to the user:\n1. The LLM response is split into atomic, independently verifiable claims\n2. Each claim is checked against retrieved source documents using an NLI model\n3. Unsupported claims are flagged and written to MongoDB\n\nQuerying flagged responses:\n\n```python\nfrom pymongo import MongoClient\n\ndb = MongoClient(\"mongodb://localhost:27017/\")[\"longtracer\"]\n\nflagged = db.runs.find({\n    \"inputs.bot_id\": \"your-bot-id\",\n    \"outputs.is_hallucinated\": True\n})\n\nfor run in flagged:\n    print(\"Query      :\", run[\"inputs\"][\"query\"])\n    print(\"Failed     :\", run[\"outputs\"][\"failed_claims\"])\n    print(\"Source docs:\", run[\"outputs\"][\"retrieved_docs\"])\n```\n\nSpan logging only, without NLI overhead:\n\n```python\ntrainer = LongTrainer(\n    mongo_endpoint=\"mongodb://localhost:27017/\",\n    enable_tracer=True,\n    tracer_verify=False\n)\n```\n\n**Supported LLMs:** OpenAI, Anthropic, Gemini, AWS Bedrock, HuggingFace, Groq, Ollama\n**Supported vector stores:** FAISS, Pinecone, Qdrant, PGVector, Chroma\n\n**Known limitations:**\n* MongoDB required - no in-memory backend yet\n* `tracer_verify=True` adds latency per query - not suitable for sub-100ms SLA requirements\n* NLI model pulls weights on first run\n* Agent mode is less battle-tested than the standard RAG path\n\nMIT licensed. \n\n\nFor those running RAG in production - how are you currently handling hallucination detection? Curious whether anyone has found a lower-latency alternative to NLI for claim verification at scale.\n",
+      "is_original_content": false,
+      "link_flair_text": "Showcase",
+      "permalink": "https://reddit.com/r/Rag/comments/1t3l6jx/opensource_python_framework_for_production_rag/",
+      "domain": "self.Rag",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "ojzq3pm",
+          "author": "Angry_Submariner",
+          "text": "Repo?",
+          "score": 1,
+          "created_utc": "2026-05-05 03:14:44",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "ojzuq9c",
+              "author": "UnluckyOpposition",
+              "text": "[https://github.com/ENDEVSOLS/Long-Trainer](https://github.com/ENDEVSOLS/Long-Trainer)\n\n",
+              "score": 1,
+              "created_utc": "2026-05-05 03:44:59",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        }
+      ]
+    },
+    {
       "id": "1t1lsai",
       "title": "Stuck in \"Tutorial Hell\" with RAG",
       "subreddit": "Rag",
       "url": "https://www.reddit.com/r/Rag/comments/1t1lsai/stuck_in_tutorial_hell_with_rag/",
       "author": "PenEquivalent5091",
       "created_utc": "2026-05-02 10:04:26",
-      "score": 13,
+      "score": 11,
       "num_comments": 31,
-      "upvote_ratio": 1.0,
+      "upvote_ratio": 0.93,
       "text": "I've built two RAG pipelines so far: a basic one from a youtube tutorial and a more modular version with some help from claude. While I feel like I fully understand the concepts and the logic behind each component, I still can’t code them from a blank script without a reference or AI assistance.\n\n\n\nI'm looking for some advice on my next steps:\n\nShould I stay focused on my current stack and keep rebuilding it until I can do it solo from memory? \n\nOr should I start exploring more advanced techniques (like different retrieval methods, re-ranking, etc.) to keep the momentum going?\n\n\n\nAlso, I’m curious to hear how did you guys actually learn RAG to the point where you could build a pipeline from scratch? \n\n\n\nThanks for any help!",
       "is_original_content": false,
       "link_flair_text": "Tutorial",
@@ -1935,6 +2023,54 @@
       ]
     },
     {
+      "id": "1sywpnl",
+      "title": "Found a real time radiology RAG project that watches a folder for new PDFs and indexes them as they drop in",
+      "subreddit": "Rag",
+      "url": "https://www.reddit.com/r/Rag/comments/1sywpnl/found_a_real_time_radiology_rag_project_that/",
+      "author": "agentic-doc",
+      "created_utc": "2026-04-29 12:00:11",
+      "score": 11,
+      "num_comments": 14,
+      "upvote_ratio": 1.0,
+      "text": "Found an interesting read!  \n  \nCame across this build on the LandingAI blog by Ishan Upadhyay. Worth a look if you've ever wanted streaming RAG over a watched directory.\n\nThe setup is straightforward. PDFs land in data/incoming, Pathway picks them up, the parser extracts structured fields based on a JSON schema you define upfront (patient\\_id, study\\_type, findings, impression, critical\\_findings), and the indexed docs become queryable through REST and MCP. He used radiology reports as the test corpus.\n\nTwo things stood out:\n\n* The parser is wrapped as a Pathway UDF, so swapping it for a different one means touching one file\n* MCP integration with Cursor lets you ask Claude to pull patient records and get answers at second level latency\n\nStack: Pathway for streaming, LandingAI ADE for parsing, all-MiniLM-L12-v2 for embeddings, Claude 3.5 Sonnet for answers.\n\nGitHub: [https://github.com/ishan121028/RadiologyAI](https://github.com/ishan121028/RadiologyAI) \n\n[Blog](https://landing.ai/developers/building-a-real-time-radiology-ai-system-with-pathway-and-landingai)",
+      "is_original_content": false,
+      "link_flair_text": "Tutorial",
+      "permalink": "https://reddit.com/r/Rag/comments/1sywpnl/found_a_real_time_radiology_rag_project_that/",
+      "domain": "self.Rag",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "oixbkes",
+          "author": "sreekanth850",
+          "text": "Anything real-time PDF extraction looks great in demos, but the bottleneck shows up immediately at scale.  \nI'm  saying this with working experience on building a parser. Structured Parsing is expensive even if you do it without LLM. If you try to process hundreds of PDFs concurrently in a synchronous pipeline, you’ll hit CPU saturation, memory pressure, and downstream timeouts very quickly. This is the same reason why Unstructured often see timeout complaints under load.  \nEdited to add \"structured parsing\" to be more precise.",
+          "score": 1,
+          "created_utc": "2026-04-29 12:11:01",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "oj2ttuc",
+              "author": "sinevilson",
+              "text": "I average 2 mil files at a time and don't hit those conditions for customers. You are probably hitting them due timing, chunking, etc. Also, I use what has always worked for high load i.e Tika, Qdrant, Nginx with a 1024 embedding model. When I add a file to a path its ingested automatically (scripting) and because of hash sanity in qdrant, it compares the existing hash and knows it's already ingested and wont overwrite unless its modified, of course.",
+              "score": 1,
+              "created_utc": "2026-04-30 05:09:11",
+              "is_submitter": false,
+              "replies": [
+                {
+                  "id": "oj2vyje",
+                  "author": "sreekanth850",
+                  "text": "Leave aside chunking or embedding. I'm saying about parsing internals. Are you saying you are parsing 2 million files concurrently with full structure and layout, including table extraction? If you use OCR with any ONNX based layout detectors, each page takes multiple seconds. Even with geometric extraction, the industry best is around 100 - 200 ms per page. Just check unstructured by uploading a document and calculate how much time it take to give the final result.  \nEdit: I'm talking about parsing pipeline, not full rag. And iam talking about concurrency.",
+                  "score": 1,
+                  "created_utc": "2026-04-30 05:25:44",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
       "id": "1t0sd8y",
       "title": "Multi tenancy RAG pipeline Self hosted Open Source Solutions",
       "subreddit": "Rag",
@@ -2103,7 +2239,7 @@
           "id": "oiwa3jb",
           "author": "OnyxProyectoUno",
           "text": "Man, where to begin. I think you're looking for a unicorn in a field full of donkeys. Sorry to say. \n\n\nI have a pipeline running several parsers for specifically academic papers, excluding RAG, just preprocessing, and I need about 20 GB of RAM. \n\nYour limit is 8 GB. \n\n\nI hate to discourage anyone but as someone who has done some research on this topic for how these problems can be addressed in legal and the requirement of trust (i.e., extremely low tolerance for hallucinations) I say give up now. \n\nOr significantly upgrade your infrastructure. Then you can get to the nitty-gritty of architecting your setup. ",
-          "score": 6,
+          "score": 7,
           "created_utc": "2026-04-29 07:09:08",
           "is_submitter": false,
           "replies": [
@@ -2137,7 +2273,7 @@
                   "id": "oiwej3a",
                   "author": "OnyxProyectoUno",
                   "text": "Ok bro. Have fun climbing that mountain. \n\nSometimes people just have to learn by trial and error than being told the truth at face value. Best of luck ",
-                  "score": 3,
+                  "score": 4,
                   "created_utc": "2026-04-29 07:49:17",
                   "is_submitter": false,
                   "replies": []
@@ -2279,244 +2415,154 @@
       ]
     },
     {
-      "id": "1sywpnl",
-      "title": "Found a real time radiology RAG project that watches a folder for new PDFs and indexes them as they drop in",
+      "id": "1szr9jq",
+      "title": "Multi tenant architecture in pg-vector",
       "subreddit": "Rag",
-      "url": "https://www.reddit.com/r/Rag/comments/1sywpnl/found_a_real_time_radiology_rag_project_that/",
-      "author": "agentic-doc",
-      "created_utc": "2026-04-29 12:00:11",
+      "url": "https://www.reddit.com/r/Rag/comments/1szr9jq/multi_tenant_architecture_in_pgvector/",
+      "author": "WinOk1467",
+      "created_utc": "2026-04-30 09:37:16",
       "score": 10,
-      "num_comments": 14,
-      "upvote_ratio": 0.92,
-      "text": "Found an interesting read!  \n  \nCame across this build on the LandingAI blog by Ishan Upadhyay. Worth a look if you've ever wanted streaming RAG over a watched directory.\n\nThe setup is straightforward. PDFs land in data/incoming, Pathway picks them up, the parser extracts structured fields based on a JSON schema you define upfront (patient\\_id, study\\_type, findings, impression, critical\\_findings), and the indexed docs become queryable through REST and MCP. He used radiology reports as the test corpus.\n\nTwo things stood out:\n\n* The parser is wrapped as a Pathway UDF, so swapping it for a different one means touching one file\n* MCP integration with Cursor lets you ask Claude to pull patient records and get answers at second level latency\n\nStack: Pathway for streaming, LandingAI ADE for parsing, all-MiniLM-L12-v2 for embeddings, Claude 3.5 Sonnet for answers.\n\nGitHub: [https://github.com/ishan121028/RadiologyAI](https://github.com/ishan121028/RadiologyAI) \n\n[Blog](https://landing.ai/developers/building-a-real-time-radiology-ai-system-with-pathway-and-landingai)",
+      "num_comments": 17,
+      "upvote_ratio": 1.0,
+      "text": "when using pg-vectors how should multiple tenants be handled? what are the best practices? like creating separate schema per tenant or using partitions?\n\nVector db like pinecone, aws s3 vectors,... provide namespace for isolation. What is the equivlanent approach in pg-vectors?",
       "is_original_content": false,
-      "link_flair_text": "Tutorial",
-      "permalink": "https://reddit.com/r/Rag/comments/1sywpnl/found_a_real_time_radiology_rag_project_that/",
+      "link_flair_text": "Discussion",
+      "permalink": "https://reddit.com/r/Rag/comments/1szr9jq/multi_tenant_architecture_in_pgvector/",
       "domain": "self.Rag",
       "is_self": true,
       "comments": [
         {
-          "id": "oixbkes",
-          "author": "sreekanth850",
-          "text": "Anything real-time PDF extraction looks great in demos, but the bottleneck shows up immediately at scale.  \nI'm  saying this with working experience on building a parser. Structured Parsing is expensive even if you do it without LLM. If you try to process hundreds of PDFs concurrently in a synchronous pipeline, you’ll hit CPU saturation, memory pressure, and downstream timeouts very quickly. This is the same reason why Unstructured often see timeout complaints under load.  \nEdited to add \"structured parsing\" to be more precise.",
+          "id": "oj3pnmz",
+          "author": "BtNoKami",
+          "text": "Create new tables? I think it depends on why do you need multi tenant.",
           "score": 1,
-          "created_utc": "2026-04-29 12:11:01",
+          "created_utc": "2026-04-30 09:49:13",
           "is_submitter": false,
           "replies": [
             {
-              "id": "oj2ttuc",
-              "author": "sinevilson",
-              "text": "I average 2 mil files at a time and don't hit those conditions for customers. You are probably hitting them due timing, chunking, etc. Also, I use what has always worked for high load i.e Tika, Qdrant, Nginx with a 1024 embedding model. When I add a file to a path its ingested automatically (scripting) and because of hash sanity in qdrant, it compares the existing hash and knows it's already ingested and wont overwrite unless its modified, of course.",
+              "id": "oj482x5",
+              "author": "WinOk1467",
+              "text": "Because of noisy neighbour. When executing ANN despite IVF-flat or hnsw both are indexed globally, which will search all the tenants for the given vector using cosine similarity metric. It will return the results based on ef\\_search and top k similar vectors. It also consists of other tenant vectors which is only filtered out after gettting top k vectors. So for eg if it returns top 10 vectors, among them only 4 are related to the current tenant then the remaining 6 will be omitted and the recall will decrease like hell.\n\nso conclusion is pg-vectors only support post-filtering which degrades recall in multi-tenants architecture.",
+              "score": 2,
+              "created_utc": "2026-04-30 12:03:18",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "oj3x6hq",
+          "author": "birs_dimension",
+          "text": "UUID ",
+          "score": 1,
+          "created_utc": "2026-04-30 10:50:15",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "oj4856l",
+              "author": "WinOk1467",
+              "text": "are you serious brother?",
               "score": 1,
-              "created_utc": "2026-04-30 05:09:11",
-              "is_submitter": false,
+              "created_utc": "2026-04-30 12:03:41",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "oj3yj95",
+          "author": "Alexx12x",
+          "text": "I would like to know the same. \n\nI want to build an article recommendation system for multiple tenants. So far i tried to just add a Discriminator column for the Tenant ID. I wonder if postgres and pgvector handles those indexes optimally (one tenant only has like a few hundred/thousand articles but in sum this table will have one day hundret thousands of entries, however because of the multi tenancy we always only look at the small sub group. Is the HNSW vector index built with this separation in mind? I'm not deep enough in the topic to tell or understand, how well this will scale with more tenants.",
+          "score": 1,
+          "created_utc": "2026-04-30 10:59:57",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "oj46shq",
+              "author": "WinOk1467",
+              "text": "pg-vectors only support post-filtering which is the biggest limitation for multitenant applications in pg-vector. mongodb atlas have prefiltering features but lacks low level controll on configuring indexing.\n\nWhat i have seen is mongodb is best suitable for multi tenant and low cost compared to pg vectors. But pg-vectors shiens when you have to build products for your own company.",
+              "score": 1,
+              "created_utc": "2026-04-30 11:55:15",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "oj4c6l3",
+          "author": "RepresentativeFill26",
+          "text": "Can’t you just pre-filter on records from a specific tenant and then perform the NN search? ",
+          "score": 1,
+          "created_utc": "2026-04-30 12:27:35",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "oj4ep2w",
+              "author": "WinOk1467",
+              "text": "How to do it in pg-ventor? also the indexing is global. we can do partial indexing but it not best practice especially considering scaling. pg-vectors only support post-filtering.",
+              "score": 1,
+              "created_utc": "2026-04-30 12:41:49",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "oj4crlg",
+          "author": "No-Visual3892",
+          "text": "Use one table with a tenant_id column (like namespaces). Scale later with partitioning if needed. Separate schemas/DBs only if you need strict isolation.",
+          "score": 1,
+          "created_utc": "2026-04-30 12:30:54",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "oj4fnlz",
+              "author": "WinOk1467",
+              "text": "But how to solve noisy neighbour problem? i cannot scale later if each tenant found their results aren't accurate and i manually set them up with isolated env. I want pre solution for it exactly like in mongodb where they offer pre-filtering which filters the vectors of the current tenant and only do ANN on those pre filtered vectors or even better approach like namespace.",
+              "score": 1,
+              "created_utc": "2026-04-30 12:47:12",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "ojpcx9k",
+          "author": "sjashwin",
+          "text": "Not sure, but exploring PARTITION BY could help. As each partition could help be a child table with one logical parent table.",
+          "score": 1,
+          "created_utc": "2026-05-03 16:10:23",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oj3ymw4",
+          "author": "Benskiss",
+          "text": "In my day job I,ve simply created a script that creates new db when module gets enabled in tenant. ",
+          "score": 0,
+          "created_utc": "2026-04-30 11:00:39",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "oj4amjk",
+              "author": "WinOk1467",
+              "text": "could you please explain it more?",
+              "score": 1,
+              "created_utc": "2026-04-30 12:18:28",
+              "is_submitter": true,
               "replies": [
                 {
-                  "id": "oj2vyje",
-                  "author": "sreekanth850",
-                  "text": "Leave aside chunking or embedding. I'm saying about parsing internals. Are you saying you are parsing 2 million files concurrently with full structure and layout, including table extraction? If you use OCR with any ONNX based layout detectors, each page takes multiple seconds. Even with geometric extraction, the industry best is around 100 - 200 ms per page. Just check unstructured by uploading a document and calculate how much time it take to give the final result.  \nEdit: I'm talking about parsing pipeline, not full rag. And iam talking about concurrency.",
+                  "id": "oj4dyxz",
+                  "author": "Benskiss",
+                  "text": "When tenant x in our app enables AI features, script runs that creates new pg tenant_x db, installs pg vector, inits migrations. Afterwards when user interacts with our app, we have all its tenant info in all server request, therefore we connect only to appropriate pg and perform whatever actions we need there. ",
                   "score": 1,
-                  "created_utc": "2026-04-30 05:25:44",
+                  "created_utc": "2026-04-30 12:37:46",
                   "is_submitter": false,
                   "replies": []
                 }
               ]
             }
           ]
-        }
-      ]
-    },
-    {
-      "id": "1t3l6jx",
-      "title": "Open-source Python framework for production RAG - multi-tenancy, \npersistent memory, streaming, and hallucination detection (v1.3.0)",
-      "subreddit": "Rag",
-      "url": "https://www.reddit.com/r/Rag/comments/1t3l6jx/opensource_python_framework_for_production_rag/",
-      "author": "UnluckyOpposition",
-      "created_utc": "2026-05-04 15:33:49",
-      "score": 10,
-      "num_comments": 3,
-      "upvote_ratio": 0.92,
-      "text": "LongTrainer is an open-source Python framework built on top of LangChain. It handles the production infrastructure layer that most RAG tutorials skip entirely.\n\n\n**Multi-tenant bot isolation**\n\nEvery bot instance gets a fully isolated vector index and chat history scoped through a `bot_id`. Client A's documents, embeddings, and conversation memory never touch Client B's. Works across FAISS, Pinecone, Qdrant, PGVector, and Chroma.\n\n```python\nfrom longtrainer.trainer import LongTrainer\n\ntrainer = LongTrainer(mongo_endpoint=\"mongodb://localhost:27017/\")\n\nbot_id = trainer.initialize_bot_id()\ntrainer.add_document_from_path(\"client_data.pdf\", bot_id)\ntrainer.create_bot(bot_id)\n\nchat_id = trainer.new_chat(bot_id)\nanswer, sources = trainer.get_response(\n    \"What are the payment terms?\",\n    bot_id,\n    chat_id\n)\n```\n\n**Persistent memory via MongoDB**\n\nChat histories are persisted to MongoDB and lazy-loaded per session on demand. Nothing is held in RAM at startup. Startup time stays flat at milliseconds regardless of how many historical sessions exist.\n\n**Document ingestion**\n\nAccepts PDF, DOCX, URLs, S3 buckets, Google Drive, and GitHub repos directly. Chunking, embedding, and indexing are handled automatically.\n\n```python\ntrainer.add_document_from_path(\"report.pdf\", bot_id)\ntrainer.add_document_from_url(\"[https://docs.example.com](https://docs.example.com)\", bot_id)\ntrainer.add_document_from_s3(\"s3://bucket/data.pdf\", bot_id)\n```\n\n**Streaming responses**\n\n```python\n# Sync streaming\nfor chunk in trainer.stream_response(query, bot_id, chat_id):\n    print(chunk, end=\"\", flush=True)\n\n# Async\nanswer = await trainer.aget_response(query, bot_id, chat_id)\n```\n\n**Agent mode with tool calling**\n\nSwitches any bot from standard RAG to a LangGraph-powered agent that can call tools. Same `bot_id` isolation applies.\n\n```python\ndef get_current_price(ticker: str) -> str:\n    return f\"Price for {ticker}: $142.30\"\n\ntrainer = LongTrainer(\n    mongo_endpoint=\"mongodb://localhost:27017/\",\n    agent_mode=True\n)\ntrainer.add_tool(get_current_price, bot_id)\n```\n\n**What is new in v1.3.0: Observability and hallucination detection**\n\nThe main gap in earlier versions was visibility into what was actually happening inside the pipeline when responses were wrong. v1.3.0 adds native LongTracer integration to address this directly. \n\nEnable it with a single flag:\n\n```python\ntrainer = LongTrainer(\n    mongo_endpoint=\"mongodb://localhost:27017/\",\n    enable_tracer=True,\n    tracer_backend=\"mongo\",\n    tracer_verify=True,\n    tracer_threshold=0.5\n)\n```\n\n**Span-level observability**\nEvery query automatically generates a trace stored in MongoDB:\n* Retrieval spans: which documents were fetched, similarity scores, latency\n* LLM spans: exact prompt, token count, generation latency\n* Agent spans: every tool call, input, output, and execution time\n\n**Hallucination detection via CitationVerifier**\nWhen `tracer_verify=True`, every response goes through NLI cross-referencing before being returned to the user:\n1. The LLM response is split into atomic, independently verifiable claims\n2. Each claim is checked against retrieved source documents using an NLI model\n3. Unsupported claims are flagged and written to MongoDB\n\nQuerying flagged responses:\n\n```python\nfrom pymongo import MongoClient\n\ndb = MongoClient(\"mongodb://localhost:27017/\")[\"longtracer\"]\n\nflagged = db.runs.find({\n    \"inputs.bot_id\": \"your-bot-id\",\n    \"outputs.is_hallucinated\": True\n})\n\nfor run in flagged:\n    print(\"Query      :\", run[\"inputs\"][\"query\"])\n    print(\"Failed     :\", run[\"outputs\"][\"failed_claims\"])\n    print(\"Source docs:\", run[\"outputs\"][\"retrieved_docs\"])\n```\n\nSpan logging only, without NLI overhead:\n\n```python\ntrainer = LongTrainer(\n    mongo_endpoint=\"mongodb://localhost:27017/\",\n    enable_tracer=True,\n    tracer_verify=False\n)\n```\n\n**Supported LLMs:** OpenAI, Anthropic, Gemini, AWS Bedrock, HuggingFace, Groq, Ollama\n**Supported vector stores:** FAISS, Pinecone, Qdrant, PGVector, Chroma\n\n**Known limitations:**\n* MongoDB required - no in-memory backend yet\n* `tracer_verify=True` adds latency per query - not suitable for sub-100ms SLA requirements\n* NLI model pulls weights on first run\n* Agent mode is less battle-tested than the standard RAG path\n\nMIT licensed. \n\n\nFor those running RAG in production - how are you currently handling hallucination detection? Curious whether anyone has found a lower-latency alternative to NLI for claim verification at scale.\n",
-      "is_original_content": false,
-      "link_flair_text": "Showcase",
-      "permalink": "https://reddit.com/r/Rag/comments/1t3l6jx/opensource_python_framework_for_production_rag/",
-      "domain": "self.Rag",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "ojzq3pm",
-          "author": "Angry_Submariner",
-          "text": "Repo?",
-          "score": 1,
-          "created_utc": "2026-05-05 03:14:44",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "ojzuq9c",
-              "author": "UnluckyOpposition",
-              "text": "[https://github.com/ENDEVSOLS/Long-Trainer](https://github.com/ENDEVSOLS/Long-Trainer)\n\n",
-              "score": 1,
-              "created_utc": "2026-05-05 03:44:59",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        }
-      ]
-    },
-    {
-      "id": "1t3f72i",
-      "title": "Embedding latency killing my RAG speed, any fixes?",
-      "subreddit": "Rag",
-      "url": "https://www.reddit.com/r/Rag/comments/1t3f72i/embedding_latency_killing_my_rag_speed_any_fixes/",
-      "author": "Glittering_Cup1104",
-      "created_utc": "2026-05-04 11:41:39",
-      "score": 10,
-      "num_comments": 16,
-      "upvote_ratio": 1.0,
-      "text": "Hey everyone,\n\nI’m building a B2B AI customer support agent and trying to make RAG fast enough for a future voice agent.\n\nRight now:\n\n* Everything is in AWS us-east-1\n* Vector search is under 100ms for p99\n* Using openai's text-embedding-3-small for embedding\n\nThe issue is embedding the query takes around 600ms to 1.1s every time. That’s basically my bottleneck now.\n\nTried the obvious stuff like keeping infra close, but no real improvement.\n\nCouple questions:\n\n* Are there faster embedding models that don’t kill quality?\n* Does reducing dimensions actually help latency or not really?\n* Is it worth self hosting a smaller embedding model for this?\n* What kind of latency are people getting in real voice RAG setups?\n\nWould really appreciate any practical tips here.\n\n",
-      "is_original_content": false,
-      "link_flair_text": "Discussion",
-      "permalink": "https://reddit.com/r/Rag/comments/1t3f72i/embedding_latency_killing_my_rag_speed_any_fixes/",
-      "domain": "self.Rag",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "ojun329",
-          "author": "mattv8",
-          "text": "Embeddings searches are lightweight enough- you might consider bringing the server in-house with a Mac mini, that might help",
-          "score": 3,
-          "created_utc": "2026-05-04 12:00:17",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ojum0rk",
-          "author": "KpailDev",
-          "text": "AI-powered apps tend to feel slow. Today it might just be embeddings, tomorrow it could be full LLM calls.\n\nBut if you want to figure out which embedding model actually works best for your use case, you can’t skip evaluation. You’ve got to try a few options, compare how they perform (speed + quality), and then pick what fits your needs.\n\nIn our case, we did this eval at the beginning of the project through DeepEval/Evaliphy, annotating the important functions. Understood the functional and non-functional behaviour, accordingly we picked up the models.",
-          "score": 1,
-          "created_utc": "2026-05-04 11:53:39",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ojusbsf",
-          "author": "-Cubie-",
-          "text": "Local sentence transformers should do it. You don't even need a CPU for models that beat text-embedding-3-small. Maybe try https://huggingface.co/jinaai/jina-embeddings-v5-text-small-retrieval",
-          "score": 1,
-          "created_utc": "2026-05-04 12:31:57",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ojusekg",
-          "author": "Old_Reflection142",
-          "text": "Local Faiss Index",
-          "score": 1,
-          "created_utc": "2026-05-04 12:32:25",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ojutjq1",
-          "author": "PuzzleheadedMind874",
-          "text": "I'd try running BGE-M3 locally via ONNX to cut out the network round-trip to OpenAI. Implementing an LRU cache for common query embeddings also helps by skipping the embedding step entirely for repeat questions.",
-          "score": 1,
-          "created_utc": "2026-05-04 12:39:04",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ojv14u7",
-          "author": "softwaredoug",
-          "text": "\\> The issue is embedding the query takes around 600ms to 1.1s every time. That’s basically my bottleneck now.\n\nOn what hardware? Even for my laptop is not this seems slow. \n\nA lot of people spin up a dumb python service on a GPU for inference. With a good amount of caching.",
-          "score": 1,
-          "created_utc": "2026-05-04 13:20:21",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "ojvefuu",
-              "author": "Late_Researcher232",
-              "text": "Before going local, worth checking how much of that 600-1100ms is actually OpenAI server-side vs network. Two things I see eat budget on hosted-embedding RAG that get missed: (1) fresh TLS handshake per request - if you're using a new requests.post() per query instead of a kept-alive httpx.AsyncClient or aiohttp session, you're paying 100-300ms in handshake costs you can recover for free; (2) the dimensions parameter on text-embedding-3-small - default is 1536 but you can pass dimensions=512 or 256 and the API returns a truncated embedding, which doesn't speed up their processing but cuts your downstream similarity-compute and payload size meaningfully. Curious what your client setup looks like (raw requests, openai SDK, async, connection pooling)? That'll narrow whether to chase network optimizations first or jump straight to local hosting like the others have suggested.",
-              "score": 2,
-              "created_utc": "2026-05-04 14:26:08",
-              "is_submitter": false,
-              "replies": [
-                {
-                  "id": "ok0lt7d",
-                  "author": "Glittering_Cup1104",
-                  "text": "I’m calling openai embedding api via http through my node backend hosted on vercel. ",
-                  "score": 1,
-                  "created_utc": "2026-05-05 07:20:42",
-                  "is_submitter": true,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "ojvt1ej",
-          "author": "Patient-Pressure3668",
-          "text": "For my cloud embedding, I use Nebius/Fireworks - both of the latency on embeddings is mostly about 500ms. Sometimes 300ms, sometimes longer. But its unpredictable. For my local stuff, I use qwen0.6 and the latency is around 100-200ms. The speed of the actual embedding isn't the issue, its the whole openAI latency with million people requesting embeddings and so on. ",
-          "score": 1,
-          "created_utc": "2026-05-04 15:32:39",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ojvu54z",
-          "author": "BERTmacklyn",
-          "text": "[If you need low latency my system is as light as they come. you could continue running things through aws and simply install this and work through setting up the MCP and integrating it with your current setup.](https://github.com/RSBalchII/anchor-engine-node/)",
-          "score": 1,
-          "created_utc": "2026-05-04 15:37:39",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ojwmsko",
-          "author": "hrishikamath",
-          "text": "Aren’t you using a vector db? ",
-          "score": 1,
-          "created_utc": "2026-05-04 17:45:13",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ojwqcwl",
-          "author": "binarymax",
-          "text": "Use Huggingface's API with Qwen3 0.6B embedding.  Faster, better, cheaper",
-          "score": 1,
-          "created_utc": "2026-05-04 18:00:34",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ojwts04",
-          "author": "zenos1337",
-          "text": "Take a look at TurboQuant. It might be the low effort high reward solution you need ",
-          "score": 1,
-          "created_utc": "2026-05-04 18:15:57",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ojzkj1i",
-          "author": "Key_Arachnid5561",
-          "text": "Hi I am working on moss(github/usemoss/moss) , feel free to explore it, moss is capable or retrieving back result in sub 10 ms ( embedding + search) essentially.",
-          "score": 1,
-          "created_utc": "2026-05-05 02:40:41",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ojuozhb",
-          "author": "Otherwise_Wave9374",
-          "text": "600ms to 1.1s just for query embedding is brutal, especially if youre aiming for voice latency.\n\nA couple practical levers Ive seen work:\n- Batch/async: embed the next likely query as soon as the user starts talking (speculative) if your UX allows it.\n- Try a smaller local model (bge-small / e5-small class) behind a fast inference server, quality hit can be surprisingly small for support-style RAG.\n- Cache embeddings for repeated intents (support queries repeat a lot).\n\nIf you end up experimenting with self-hosted embedding + agent orchestration, https://www.agentixlabs.com/ has some handy notes on productionizing agent stacks that might save you time.",
-          "score": 1,
-          "created_utc": "2026-05-04 12:11:56",
-          "is_submitter": false,
-          "replies": []
         }
       ]
     }
