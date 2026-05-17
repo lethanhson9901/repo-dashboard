@@ -1,603 +1,194 @@
 {
   "metadata": {
-    "last_updated": "2026-05-16 09:57:09",
+    "last_updated": "2026-05-17 04:16:54",
     "time_filter": "week",
     "subreddit": "LangChain",
     "total_items": 20,
-    "total_comments": 145,
-    "file_size_bytes": 164607
+    "total_comments": 137,
+    "file_size_bytes": 142448
   },
   "items": [
     {
-      "id": "1t8bocu",
-      "title": "LangChain v1,: where we're at, what it actually is, and why we're committing to it",
+      "id": "1tdux1g",
+      "title": "Five things I changed in a RAG chatbot that moved quality +19% and cost −79%.",
       "subreddit": "LangChain",
-      "url": "https://www.reddit.com/r/LangChain/comments/1t8bocu/langchain_v1_where_were_at_what_it_actually_is/",
-      "author": "mdrxy",
-      "created_utc": "2026-05-09 17:45:18",
-      "score": 79,
-      "num_comments": 27,
-      "upvote_ratio": 0.96,
-      "text": "Hi folks! I'm one of the maintainers at LangChain. It's been a little under a year since v1 was first released, so I figured it was worth a re-introduction for anyone who looked at v0 and bounced, or who's been heads-down in production and hasn't checked back in.\n\nThe goal here is to be straight about what changed, what didn't, and what we're committing to going forward. Happy to take questions/critiques in the comments.\n\n**TL;DR**\n\n* One main entry point: `create_agent`. The base case is \\~5 lines of code.\n* One extension point: middleware. If you don't need it, you never see it.\n* Built on LangGraph, so you inherit checkpointing, streaming, human-in-the-loop, and time travel for free without having to learn LangGraph itself.\n* Everything from the LCEL era moved to a separate package, `langchain-classic`, so the main namespace is extremely lean (a common prior critique was the library's weight; more below).\n* As of v1, SemVer strictly applies. We're not breaking your code on minor versions (see the [versioning page](https://docs.langchain.com/oss/python/versioning) for more info on this + LTS.\n\nA lot of the v0-era complaints (that you spent more time fighting wrappers than writing logic) were fair. There were many overlapping pieces, and choosing between them was its own learning curve before you wrote a single line of business logic.\n\nv1 is a deliberate cut against that. The framework has roughly one shape now:\n\n    from langchain.agents import create_agent\n    \n    agent = create_agent(\n        model=\"...\",  # Any Large Language Model or provider\n        tools=[...],\n        system_prompt=\"...\",\n        ...\n    )\n    \n    result = agent.invoke({\"messages\": \"Hello\"})\n\nThat's it. No `RunnablePassthrough | RunnableParallel | LLMChain | OutputParser` pipeline to assemble. No three-way choice between `AgentExecutor`, an LCEL chain, and a graph. If your use case is \"model + tools + a system prompt,\" the API is the size of your use case.\n\nWhen you do need more (e.g. dynamic prompts, conversation summarization, HITL approval, tool-call limits, custom retries, PII scrubbing), we recommend reaching for **middleware**. It's a small hook protocol (`before_model,` `after_model,` `wrap_model_call`, `wrap_tool_call`, `before_agent`, `after_agent`), and you only learn the parts you use. The prebuilt ones cover most of the obvious cases, and we continue to add new ones as agents evolve:\n\n    from langchain.agents import create_agent\n    from langchain.agents.middleware import (\n        HumanInTheLoopMiddleware,\n        PIIMiddleware,\n        SummarizationMiddleware,\n    )\n    \n    agent = create_agent(\n        model=\"claude-sonnet-4-6\",\n        tools=[read_email, send_email],\n        middleware=[\n            PIIMiddleware(\"email\", strategy=\"redact\"),\n            SummarizationMiddleware(model=\"result = agent.invoke({\"messages\": [{\"role\": \"user\", \"content\": \"...\"}]})\", trigger={\"tokens\": 500}),\n            HumanInTheLoopMiddleware(interrupt_on={\"send_email\": {\"allowed_decisions\": [\"approve\", \"edit\", \"reject\"]}}),\n        ],\n    )\n    \n    result = agent.invoke({\"messages\": \"Hello\"})\n\nThe imports also collapsed. There's basically four places to look that cover \\~90% of usecases:\n\n    from langchain.agents import create_agent\n    from langchain.messages import AIMessage, HumanMessage\n    from langchain.tools import tool\n    from langchain.chat_models import init_chat_model\n\n# Three pillars\n\n1. `create_agent` is the standard way to build agents. Replaces `create_react_agent` as the recommended path. For a \"batteries-included\" agent with features like automatic context compression, a virtual filesystem, and subagent-spawning built-in, reach for [Deep Agents](https://github.com/langchain-ai/deepagents) (our opinionated implementation of `create_agent`)\n2. Middleware: plain hook interface, composable, opt-in. Write your own when the prebuilts don't fit. It's a small protocol, not a DSL.\n3. Standard content blocks: `message.content_blocks` gives you a unified, **type safe** view of model output across model providers (text, reasoning, tool calls, citations, server-side tool results, etc.). You can stop branching on provider-specific shapes.\n\n# On the relationship with LangGraph\n\nThis comes up constantly, so worth being explicit: `create_agent` is implemented on top of LangGraph. The factory builds a `StateGraph`, adds nodes for the model, tools, and your middleware, wires the edges, and hands you back a compiled graph. That's why you get streaming, persistence, and HITL interrupts without doing any extra work.\n\nThat doesn't mean `create_agent` \\*is\\* LangGraph. LangGraph is a low-level orchestration runtime; LangChain v1 is an opinionated agent framework on top of it. Intentionally kept as two packages, each with their own scope, both maintained by the same team.\n\nIf you want to drop down to LangGraph directly for custom graph topology, you can. If you don't, you never have to think about it.\n\nAnd if you'd rather not use either, `create_agent` returns a normal compiled graph that you can `invoke` / `stream` like any callable. Nothing about the framework prevents you from writing a plain `while` loop around a model client. v1 is meant to be the easy default that saves time without locking you in.\n\n# langchain-classic\n\nOld chains / legacy abstractions now live in `langchain-classic`. Migration guide covers every breaking change with before/after snippets: [https://docs.langchain.com/oss/migrate/langchain-v1](https://docs.langchain.com/oss/migrate/langchain-v1) \\-- most users will only need to update their import statements.\n\nLinks\n\n* What's new in v1: [https://docs.langchain.com/oss/releases/langchain-v1](https://docs.langchain.com/oss/releases/langchain-v1)\n* Migration guide: [https://docs.langchain.com/oss/migrate/langchain-v1](https://docs.langchain.com/oss/migrate/langchain-v1)\n* Agents docs: [https://docs.langchain.com/oss/langchain/agents](https://docs.langchain.com/oss/langchain/agents)\n\nHappy to take questions in the comments!",
+      "url": "https://i.redd.it/225i6kjfoa1h1.png",
+      "author": "gvij",
+      "created_utc": "2026-05-15 12:29:56",
+      "score": 53,
+      "num_comments": 10,
+      "upvote_ratio": 0.93,
+      "text": "[External Link]",
       "is_original_content": false,
-      "link_flair_text": "Discussion",
-      "permalink": "https://reddit.com/r/LangChain/comments/1t8bocu/langchain_v1_where_were_at_what_it_actually_is/",
-      "domain": "self.LangChain",
-      "is_self": true,
+      "link_flair_text": null,
+      "permalink": "https://reddit.com/r/LangChain/comments/1tdux1g/five_things_i_changed_in_a_rag_chatbot_that_moved/",
+      "domain": "i.redd.it",
+      "is_self": false,
       "comments": [
         {
-          "id": "okx187i",
-          "author": "RetiredApostle",
-          "text": "Not relevant to v1, but since the team is rarely seen here, this could be the best time to ask something I have wanted to ask for a while.\n\nHave you considered reaching out to the sub’s owner ( u/zchaarm ), who seems to have abandoned this sub, to ask him to transfer it to the team? It would be great to turn this from an unmoderated spam board into something relevant to agentic development - not strictly as an LC news feed, but something more general. Your company has the resources for this, I assume.",
-          "score": 10,
-          "created_utc": "2026-05-10 01:00:42",
+          "id": "olxsm8t",
+          "author": "gvij",
+          "text": "Detailed write up on the optimization steps taken to improve the RAG chatbot:  \n[https://medium.com/@gauravvij/i-asked-an-ai-agent-to-audit-our-chat-agent-it-found-problems-we-didnt-know-to-look-for-c40e26b4aa09](https://medium.com/@gauravvij/i-asked-an-ai-agent-to-audit-our-chat-agent-it-found-problems-we-didnt-know-to-look-for-c40e26b4aa09)",
+          "score": 3,
+          "created_utc": "2026-05-15 12:30:09",
+          "is_submitter": true,
+          "replies": []
+        },
+        {
+          "id": "olxwcqe",
+          "author": "Otherwise_Wave9374",
+          "text": "Love the ranked list, and +1 that model swapping is usually the last lever, not the first.\n\nThe dedupe + grounding tradeoff callout is super real too, teams often celebrate \"accuracy up\" and then wonder why users say it got worse.\n\nAny chance you can share how you implemented the chunk overlap check (token overlap vs embedding similarity)? Also, Ive been bookmarking agent eval and RAG tuning notes here if its useful: https://www.agentixlabs.com/",
+          "score": 2,
+          "created_utc": "2026-05-15 12:51:12",
           "is_submitter": false,
           "replies": [
             {
-              "id": "okx9vez",
-              "author": "mdrxy",
-              "text": "Agree it is an unfortunate situation and not really representative of the community / quality we want to foster. Have reached out, may need to escalate to Reddit admin. Appreciate the concern! Nice to know there are humans here, haha.",
-              "score": 6,
-              "created_utc": "2026-05-10 01:55:23",
-              "is_submitter": true,
-              "replies": []
-            },
-            {
-              "id": "okx44xx",
-              "author": "RetiredApostle",
-              "text": "The rationale for this: there are tons of relevant \"AI-agents/workflows\" subs that are either too broad or too vibe-coding oriented. This one is a very low-level niche. Since the lib has survived several shiny new alternatives (and several of my own attempts to ditch it over the years) it is now clear it will remain in the stack for many. Yet, in one of the most populous places on the net, the sub representing the framework looks like this.",
-              "score": 2,
-              "created_utc": "2026-05-10 01:19:01",
+              "id": "om52c1q",
+              "author": "Sweet_Access_9996",
+              "text": "For the chunk overlap check, I used a simple token count method. If the overlap was over 80%, I'd discard the duplicate. It's quick and effective for reducing noise. That link looks useful, I'll definitely check it out!",
+              "score": 1,
+              "created_utc": "2026-05-16 14:49:40",
               "is_submitter": false,
               "replies": []
             }
           ]
         },
         {
-          "id": "okvxtn7",
-          "author": "grilledCheeseFish",
-          "text": "Whats the relationship with deep-agents these days? Is it considered a core \"pillar\" in the lang-oss ecosystem or is it more of a side project?",
-          "score": 5,
-          "created_utc": "2026-05-09 21:03:48",
+          "id": "oly0p1z",
+          "author": "Intellog",
+          "text": "Thanks for sharing. Gemma 4 seems great but little slow.",
+          "score": 2,
+          "created_utc": "2026-05-15 13:14:25",
           "is_submitter": false,
           "replies": [
             {
-              "id": "okw548n",
-              "author": "mdrxy",
-              "text": "very much a core pillar. a lot of our time is spent there currently (but not all!). we think that for long-running, complex agents you want a harness, not just a framework (opinionated planning tool, subagents, virtual filesystem, system prompt scaffolding baked in). deepagents is our attempt at that layer.\n\nmental model: deepagents (harness) -> langchain (framework) -> langgraph (runtime). same team, built on top of each other, not parallel projects.\n\n",
-              "score": 7,
-              "created_utc": "2026-05-09 21:44:23",
-              "is_submitter": true,
-              "replies": []
+              "id": "om46792",
+              "author": "cool-beans-yeah",
+              "text": "How does it compare to gemini flash lite?",
+              "score": 1,
+              "created_utc": "2026-05-16 11:42:51",
+              "is_submitter": false,
+              "replies": [
+                {
+                  "id": "om46jnb",
+                  "author": "Intellog",
+                  "text": "Flash lite is much faster imo, it is also better because the interference is provided by Google rather than 3rd party companies",
+                  "score": 2,
+                  "created_utc": "2026-05-16 11:45:16",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
             }
           ]
         },
         {
-          "id": "okyp1yd",
-          "author": "onyxlabyrinth1979",
-          "text": "Honestly the biggest improvement here is reducing decision fatigue. Early LangChain felt like spending half the project figuring out which abstraction you were supposed to use. A smaller surface area plus stable versioning matters a lot more in production than adding another orchestration pattern every few months.",
-          "score": 3,
-          "created_utc": "2026-05-10 08:36:47",
+          "id": "om26cqb",
+          "author": "ultrathink-art",
+          "text": "The ranked order is the most useful part — most teams start with prompt rewriting when the real problem is usually retrieval. The threshold-as-distance inversion catching casual queries is a perfect example: looks like a model bug, is actually a config bug. You can't prompt your way out of zero context.",
+          "score": 1,
+          "created_utc": "2026-05-16 02:04:21",
           "is_submitter": false,
           "replies": []
         },
         {
-          "id": "okyd55q",
-          "author": "BeatTheMarket30",
-          "text": "You should add a2a support to deep agents. Having only acp is limiting. It seems a useful quick solution that could go beyond IDEs.",
-          "score": 2,
-          "created_utc": "2026-05-10 06:46:58",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "ol1x0n4",
-              "author": "mdrxy",
-              "text": "flagging to the team! this has come up a few times",
-              "score": 1,
-              "created_utc": "2026-05-10 19:46:19",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "okv9cam",
-          "author": "jkoolcloud",
-          "text": "One thing I’d love to see become a first-class pattern is pre-tool-call authorization: not just “should a human approve this email,” but “is this tenant / agent / run still allowed to spend more, retry, fan out, or call this risky tool right now?”\n\nThat’s the gap I’ve been focused on with Cycles: runtime authority before agent actions execute. Tracing, checkpoints, and HITL are valuable, but they don’t automatically answer the shared budget/action-authority question.\n\nCurious if LangChain sees this as middleware, a LangGraph runtime concern, or something that should stay external?\n\nMore on the pattern here: [https://github.com/runcycles](https://github.com/runcycles)",
-          "score": 2,
-          "created_utc": "2026-05-09 18:50:31",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "okw786w",
-              "author": "mdrxy",
-              "text": "this is already solvable today with middleware. `wrap_tool_call` gives you the tool name, args, and run state before execution; return a denial and the call never happens. `before_model` lets you gate fan-out before the model even decides to call. tenant budgets, retry caps, risk-tier policies all fit cleanly.\n\nworth a read before reaching for an external runtime: [https://docs.langchain.com/oss/python/langchain/middleware/overview](https://docs.langchain.com/oss/python/langchain/middleware/overview)\n\npolicy evaluation can still live in your own service (org-wide ledgers, etc.). middleware is the enforcement point that calls out to it.\n\n",
-              "score": 6,
-              "created_utc": "2026-05-09 21:56:19",
-              "is_submitter": true,
-              "replies": [
-                {
-                  "id": "okz0x4c",
-                  "author": "jkoolcloud",
-                  "text": "Looks like middleware is the right enforcement point inside LangChain.\n\nThe distinction I’m making is what sits behind it. For simple cases, local middleware counters may be enough. For multi-tenant / multi-worker agents, you usually need a shared authority layer so budgets, retries, and risky-action policies stay consistent across concurrent runs.\n\nSeems like middleware is where runtime authority like Cycles would plug in.",
-                  "score": 1,
-                  "created_utc": "2026-05-10 10:26:54",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "okviwlx",
-          "author": "cab938",
-          "text": "I'm teaching how to build genai applications with Langchain as my target library. I'm still using 0.3, but an considering changing that for the next class run. I teach LCEL and the Runnable paradigm, and do a fair bit showing students how to bring in tools, define their schemas, then bind them, and I show them some of the issues they run into.\n\nI'm at a crossroads in two ways. The first is whether I need to bother showing them the code or teach the library at all, seems like agents program now, so I don't know if they need to know the detail I teach to. But that's the existential nearly all classes face, so put that aside...\n\nThe second issue was that teaching just langgraph moved into territory that felt like the drywall could never go up because some new issue emerged. This simplified approach you outline and the use of hooks for middleware sounds like a nice clean route to show quick utility and then build from there.\n",
+          "id": "om4mcqm",
+          "author": "John_Schemauff",
+          "text": "the grounding rule tradeoff you flagged is real but nobody's stress-testing whether adversarial inputs can bypass it. running a sweep with something like Calypso or Generalanalysis before shipping would catch that.",
           "score": 1,
-          "created_utc": "2026-05-09 19:41:47",
+          "created_utc": "2026-05-16 13:24:07",
           "is_submitter": false,
-          "replies": [
-            {
-              "id": "okw629h",
-              "author": "mdrxy",
-              "text": "glad it resonates. some quick curriculum suggestion:\n\n1. start with `create_agent`\\- LLM + tools\n2. introduce middleware as problems emerge. teach `HumanInTheLoopMiddleware` when you cover safety/governance, `SummarizationMiddleware` when context windows blow up, `PIIMiddleware` with data handling, etc.\n3. content blocks cross-provider work (sidesteps the \"why does anthropic give me X but openai gives me Y\" tangent.)\n4. drop into langgraph only when a use case demands it (custom topologies, multi-agent supervisor patterns, etc.). agree that leading with langgraph is the drywall problem, as there are lots of primitives\n5. re: LCEL/`langchain-classic`, i'd skip unless your students will inherit v0 codebases. footnote w/ the [migration guide](https://docs.langchain.com/oss/migrate/langchain-v1).\n\non the existential q: even if models write the boilerplate, students still need a mental model for \\*why\\* the loop runs, \\*what\\* state flows turn to turn, \\*how\\* tool calls fail.",
-              "score": 2,
-              "created_utc": "2026-05-09 21:49:42",
-              "is_submitter": true,
-              "replies": [
-                {
-                  "id": "oky3t32",
-                  "author": "1glasspaani",
-                  "text": "Not OP but thanks this was helpful.",
-                  "score": 1,
-                  "created_utc": "2026-05-10 05:25:09",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
+          "replies": []
         },
         {
-          "id": "okxl9r3",
-          "author": "invinciible",
-          "text": "Great post OP\n\nDo you have any repo/examples with create agent usage that shows dynamic HITL + PlanAct agent similar to Claude code works. \n",
+          "id": "om5p3z5",
+          "author": "WarFrequent7055",
+          "text": "This is the most underappreciated finding in agent development. I've tested 101 harness configurations across 10 frontier models. Same model, different harness, 15-point score swing. Same harness, different model, 35-point swing. Most teams change the model and the config and the retrieval settings in the same sprint and have no idea which change caused the improvement. Or the regression. The fix is boring: change one variable, benchmark before and after, record the delta. tabverified. ai runs that process across 340+ benchmarks.",
           "score": 1,
-          "created_utc": "2026-05-10 03:09:29",
+          "created_utc": "2026-05-16 16:43:47",
           "is_submitter": false,
-          "replies": [
-            {
-              "id": "ol1whhn",
-              "author": "mdrxy",
-              "text": "Take a look at [Deep Agents](https://github.com/langchain-ai/deepagents), it's built on `create_agent` and bakes in the Claude-Code-shaped pattern you're describing: `TodoListMiddleware` handles the plan phase (`write_todos` tool), and `HumanInTheLoopMiddleware(interrupt_on={...})` gives you dynamic per-tool approval/edit/reject gates on the act phase. The wiring lives in [`deepagents/graph.py`](https://github.com/langchain-ai/deepagents/blob/main/libs/deepagents/deepagents/graph.py) — stacks both middlewares and propagates `interrupt_on` down to subagents, which is roughly how Claude Code nests approvals.",
-              "score": 1,
-              "created_utc": "2026-05-10 19:43:43",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "okxzocu",
-          "author": "CaptEntropy",
-          "text": "The official docs and the OP's post as well keep making it sound like \"LangChain\" is higher level than \"LangGraph\",  but isn't it really just create_agent that uses LangGraph? Messages, tools, chat models, content blocks don't, and LangGraph's own examples import chat models and messages from LangChain to make them work, so the dependency runs both ways.  Even in another post here the OP states \"mental model: deepagents (harness) -> langchain (framework) -> langgraph (runtime). same team, built on top of each other, not parallel projects.\"    Is the intention to eventually move all the primitives from LangChain into LangGraph to make this actually true or what am I missing? ",
-          "score": 1,
-          "created_utc": "2026-05-10 04:52:44",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "ol05vtu",
-              "author": "CaptEntropy",
-              "text": "Following up on my own question, I think I see now what's going on.  It's `langchain.agents` that sits on top of 'langgraph'.   The rest of `langchain` (`langchain.core`) is a set features used throughout the ecosystem (e.g. messages, tools, chat models, etc). Is this the right perspective?",
-              "score": 1,
-              "created_utc": "2026-05-10 14:44:31",
-              "is_submitter": false,
-              "replies": [
-                {
-                  "id": "ol1xtp8",
-                  "author": "mdrxy",
-                  "text": "You've basically got it. Quick precision: the shared primitives live in a separate package, `langchain-core` (not a submodule of `langchain`). We try to make this invisible for users of `langchain` (via re-exports) so that you don't have to worry about what comes from where. \n\n\n\nSo the stack is:\n\n* `langchain-core` includes shared primitives. No dependency on either of the others.\n* `langgraph` is a low-level orchestration runtime. Depends on `langchain-core` for the primitive types, but you are \\*not\\* required to use `langchain` (the framework) to use LangGraph. You can build a graph with raw model clients, your own message objects, etc. -- core is there if you want the standard shapes, not as a behavioral coupling.\n* `langchain` (v1) is our agent framework. `langchain.agents.create_agent` is built on `langgraph`; the rest of the namespace is mostly re-exports from core for ergonomics.\n* `deepagents` is our opinionated harness on top of `create_agent`. We think it's pretty great!\n\n\n\nNo plan to move primitives into `langgraph`; keeping them in their own package is what lets both frameworks share them without a circular dep, and what lets you use either one independently.\n\n",
-                  "score": 2,
-                  "created_utc": "2026-05-10 19:50:16",
-                  "is_submitter": true,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "ol0wh21",
-          "author": "peleccom",
-          "text": "Right now there is quite a lot of confusion between LangChain and LangGraph.\n\nWhat I mean is that for simple use cases, the recommendation is to use `create_agent`, while for more complex scenarios, you should use LangGraph directly. But from the documentation, it’s completely unclear how these two approaches are supposed to be mixed together.\n\nFor example, LangChain has a lot of useful middleware, but it seems like there’s no way to use them inside LangGraph. Or am I mistaken?\n",
-          "score": 1,
-          "created_utc": "2026-05-10 16:54:52",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "ol1z6n1",
-              "author": "mdrxy",
-              "text": "Good question. Middleware \\*does\\* work inside LangGraph. The thing to know is that `create_agent(...)` returns a compiled LangGraph graph. Anything you build with it (model, tools, middleware, HITL, all of it) comes along when you drop it into a larger `StateGraph` as a node or a subgraph. There's no second \"LangGraph-compatible middleware API\"; the LangChain middleware \\*is\\* the LangGraph node-and-edge wiring under the hood.\n\nSo the recommended way to mix the two is:\n\n1. Build the agent-shaped piece(s) with `create_agent` \\+ whatever middleware you need (HITL, summarization, PII, retries, etc.).\n2. Wire them into a `StateGraph` alongside your custom nodes / branching / human steps / parallel fan-out.\n\nYou're not picking one or the other; LangChain is the opinionated default for the agent loop, LangGraph is for the surrounding topology when \"loop until done\" isn't enough.\n\nI'll discuss with our docs team to see if we can make this more clear.\n\n",
-              "score": 2,
-              "created_utc": "2026-05-10 19:56:57",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "ol1gf3a",
-          "author": "Ibo09",
-          "text": "a2a support would be great !!",
-          "score": 1,
-          "created_utc": "2026-05-10 18:25:57",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "ol1tz2d",
-              "author": "mdrxy",
-              "text": "will flag it with the team!",
-              "score": 1,
-              "created_utc": "2026-05-10 19:31:27",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "okuz5qk",
-          "author": "Otherwise_Wave9374",
-          "text": "Appreciate the candid v1 writeup. The \"one main entry point\" + middleware hook model feels like the right direction, especially if it keeps the 80% case small.\n\nThe middleware list you mentioned (HITL, PII, summarization) is basically the stuff that makes agents survivable in production.\n\nAny chance you all will publish more examples of real-world middleware stacks (like budgets, tool-call caps, and audit logging)? Those patterns matter a ton. Also collecting agent guardrail patterns on my end: https://www.agentixlabs.com/",
-          "score": 0,
-          "created_utc": "2026-05-09 17:58:01",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "okw6m7v",
-              "author": "mdrxy",
-              "text": "thanks! yes, more real-world middleware examples are always on the roadmap as use cases emerge. [our docs](https://docs.langchain.com/oss/python/langchain/middleware/overview) are already fairly exhaustive as a starting point. if you've hit specific shapes that worked (or didn't), drop them in an issue on the langchain repo, as concrete cases beat hypotheticals when we're deciding what to ship.\n\n",
-              "score": 1,
-              "created_utc": "2026-05-09 21:52:50",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
+          "replies": []
         }
       ]
     },
     {
-      "id": "1t853pq",
-      "title": "Anyone else find langchain overly complicated for what it does?",
+      "id": "1tdj7x5",
+      "title": "After months of building in silence, I cried a little- a stranger made a YouTube video about our project & exploded",
       "subreddit": "LangChain",
-      "url": "https://www.reddit.com/r/LangChain/comments/1t853pq/anyone_else_find_langchain_overly_complicated_for/",
-      "author": "LissaLou79",
-      "created_utc": "2026-05-09 13:30:55",
-      "score": 47,
-      "num_comments": 41,
-      "upvote_ratio": 0.89,
-      "text": "I have been using langchain for a few months and I feel like fighting the abstractions more than i am building. It works but feels heavier than it needs to be. Has anyone's tried alternatives that feel simpler without losing the core functionality",
+      "url": "https://i.redd.it/1oi7f1lmq71h1.jpeg",
+      "author": "Slight_Republic_4242",
+      "created_utc": "2026-05-15 02:36:19",
+      "score": 49,
+      "num_comments": 8,
+      "upvote_ratio": 0.86,
+      "text": "[External Link]",
       "is_original_content": false,
-      "link_flair_text": "Question | Help",
-      "permalink": "https://reddit.com/r/LangChain/comments/1t853pq/anyone_else_find_langchain_overly_complicated_for/",
-      "domain": "self.LangChain",
-      "is_self": true,
+      "link_flair_text": "Discussion",
+      "permalink": "https://reddit.com/r/LangChain/comments/1tdj7x5/after_months_of_building_in_silence_i_cried_a/",
+      "domain": "i.redd.it",
+      "is_self": false,
       "comments": [
         {
-          "id": "oktnnmp",
-          "author": "chasectid",
-          "text": "+1, I sometimes feel there’s no point to Langchain, if you’re onboarding to the “Lang” ecosystem, Langsmith and Langgraphs are the best products in their suite. They make automating E2E workflows possible. But if you just wanna use Langchain for an LLM call, it’s just awful, no backward compatibility, no support for older features, many of the abstractions meant to take the models out of the equation don’t support half the models, defeating their entire purpose. ",
-          "score": 4,
-          "created_utc": "2026-05-09 13:55:57",
+          "id": "om1q6ra",
+          "author": "desert-quest",
+          "text": "Congrats man!",
+          "score": 3,
+          "created_utc": "2026-05-16 00:22:42",
           "is_submitter": false,
           "replies": [
             {
-              "id": "okubuvx",
-              "author": "mdrxy",
-              "text": "What are you referring to, specifically? I am one of the maintainers, and it’s frustrating when comments are made like this one that provide no specificity. Have you used the package in the past year? ",
+              "id": "om1xydh",
+              "author": "Slight_Republic_4242",
+              "text": "Thank you",
               "score": 1,
-              "created_utc": "2026-05-09 16:00:58",
-              "is_submitter": false,
+              "created_utc": "2026-05-16 01:11:19",
+              "is_submitter": true,
               "replies": []
             }
           ]
         },
         {
-          "id": "oku7obg",
-          "author": "TheDeadlyPretzel",
-          "text": "Yeah this is the universal LangChain story... the \"fighting the abstractions\" feeling never really goes away because the abstractions assume you'll eventually want the thing they're abstracting, and most production stacks just don't. 200 lines of actual logic buried in 5 layers of wrappers, and the wrappers shift every quarter.\n\nThe thing that finally fixed this for me was just... not letting any framework own the orchestration. An \"agent\" doesn't need to be a special object with a runtime around it. It can just be a function: Pydantic input schema in, Pydantic output schema out, system prompt in the middle. Then \"multi-agent\" or \"chain\" or \"graph\" is whatever you write in normal Python around those functions. if/else, for/while, try/except. No graph DSL, no callback handlers, no state reducers, no compile step. When it breaks at midnight you read a regular stack trace and step through it with a debugger.\n\nTool selection becomes a `Union[ToolAInput, ToolBInput]` field in the agent's output schema with `isinstance` dispatch in your code, instead of a tool-calling abstraction. Loops are `for`/`while` with the agent itself emitting a `done: bool` (or `next_queries: list[str]`, whatever shape fits) and you reading it.\n\nFull disclosure cause it's directly relevant... the framework I land on for this is my own thing called Atomic Agents (opensource, MIT, no SaaS, no VC, no course, no monetization in any shape or form: https://github.com/BrainBlend-AI/atomic-agents). Uses Instructor under the hood for the structured-output retry layer so it's provider-agnostic.\n\nConcede the obvious tradeoff: no checkpointing/time-travel debugging like LangGraph has out of the box. If your prod stack actually needs pause-resume-replay state for human-in-loop, that's a real LangGraph win. For the \"I just want orchestration to be normal code\" pain point you're describing though, this version doesn't have anything to fight you on.",
-          "score": 15,
-          "created_utc": "2026-05-09 15:40:02",
+          "id": "olw271o",
+          "author": "lechuckswrinklybutt",
+          "text": "I met a guy tonight who got his job at a successful AI startup because he used their library for something that stood out and the CEO contacted him on GitHub. \n\nNot sure if that’s relevant. \n\nHave you stopped crying?",
+          "score": 3,
+          "created_utc": "2026-05-15 04:17:38",
           "is_submitter": false,
-          "replies": [
-            {
-              "id": "okugz4j",
-              "author": "Leo2000Immortal",
-              "text": "I absolutely agree with you. We do not need a dedicated library for orchestrating llm workflows. Basic python functions can do the job. It pains me when I see job descriptions demanding experience in langchain",
-              "score": 4,
-              "created_utc": "2026-05-09 16:27:10",
-              "is_submitter": false,
-              "replies": []
-            },
-            {
-              "id": "ol4uzfl",
-              "author": "[deleted]",
-              "text": "[removed]",
-              "score": 1,
-              "created_utc": "2026-05-11 06:54:39",
-              "is_submitter": false,
-              "replies": [
-                {
-                  "id": "ol4vdfq",
-                  "author": "TheDeadlyPretzel",
-                  "text": "Happens to be the case that I am currently implementing atomic agents in a client project that uses it both for highly optimized retrieval&structured data extraction, but it also has a \"Claude Code/Claude Cowork\" kind of general purpose agent (but quite tailored to working with huge amounts of enormous contract libraries... Think 100 harry potter books worth)",
-                  "score": 1,
-                  "created_utc": "2026-05-11 06:58:00",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            },
-            {
-              "id": "okupjts",
-              "author": "mdrxy",
-              "text": "The \"200 lines of logic buried in 5 layers of wrappers\" critique is the v0/LCEL critique, and it's exactly why v1 exists.\n\nThe \"agent = function with Pydantic in/out\" model is fine until you need any of: streaming tokens to a UI, persistence across turns, mid-run human approval, resuming after a crash, parallel tool calls with partial failure, observability across runs. You can do all of that in raw Python, you'll just end up rebuilding a checkpointer, a stream protocol, and a state reducer along the way. At which point you've reinvented LangGraph.\n\n half-concede this at the end, but it's understated. HITL and resumability aren't edge cases for any agent system touching code, money, or user data (they're table stakes). The \"no framework owns the orchestration\" pitch holds nicely for short-lived, single-turn, internal-tool agents. Real niche, just smaller than the framing suggests.\n\nAlso worth flagging: Atomic Agents runs on Instructor, which is itself a framework. So the actual argument is \"I prefer a smaller abstraction stack,\" not \"no abstractions\".",
-              "score": 0,
-              "created_utc": "2026-05-09 17:10:28",
-              "is_submitter": false,
-              "replies": [
-                {
-                  "id": "ol8cogz",
-                  "author": "Artistic_Fig_3028",
-                  "text": "I think LangGraph is slowly getting better, but it still severly lacks strongly typed objects - too much of raw dicts everywhere. I checked out Google's ADK (they rolled out v2 based om graphs), its strikingly similar to LG.",
-                  "score": 1,
-                  "created_utc": "2026-05-11 18:58:41",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
+          "replies": []
         },
         {
-          "id": "oktouo3",
-          "author": "Artistic_Fig_3028",
-          "text": "this is the case with all agent frameworks or harnesses (or whatever they call themselves this week). all have similar but different overlapping functionalities and just run to add whatever openai or anthropic is adding (for example, skills support). langchain isn't even focused anymore on langchain but deepagents instead. from my own experience, the problem is you need to learn langgraph first to understand langchain. the two are so heavily mixed.",
-          "score": 5,
-          "created_utc": "2026-05-09 14:02:32",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "okucili",
-              "author": "mdrxy",
-              "text": "Deep Agents IS LangChain (and transitively, LangGraph, since each layer is built on one another). I’m one of the maintainers and can say without a shadow of a doubt that LangChain/Graph are not being ignored. \n\nWhat do you mean when you say you need to learn LangGraph to understand LangChain? Where specifically? It’s intentionally abstracted in such a way that you don’t need to be concerned with the underlying runtime unless you have a bespoke/complex usecase. If it doesn’t feel like that’s the case, we’d love to know.",
-              "score": 2,
-              "created_utc": "2026-05-09 16:04:19",
-              "is_submitter": false,
-              "replies": [
-                {
-                  "id": "ol8fwce",
-                  "author": "Artistic_Fig_3028",
-                  "text": "I am the type of guy who will look though library code and I have done it here too. LangChain might technically be a LangGraph abstraction, but its a very thin one. When I go to the docs and see the code samples there are imports from and links to LG. The .invoke / .stream interface makes sense in LG but feels bloated for a LC agent, since I suppose simplicity is one of the driving factors for its adoption?\n\nP.S Don't know if its been removed but I recall SystemMessage / HumanMessage defined in langchain as well as langchain_core",
-                  "score": 1,
-                  "created_utc": "2026-05-11 19:13:29",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            },
-            {
-              "id": "okuxznk",
-              "author": "Challseus",
-              "text": "I used Langchain for an older RAG pipeline, never once had to touch LangGraph. I would also argue PydanticAI has less abstractions, and is the better framework if you don't mind rolling some of the code yourself.",
-              "score": 0,
-              "created_utc": "2026-05-09 17:52:11",
-              "is_submitter": false,
-              "replies": [
-                {
-                  "id": "ol8awjh",
-                  "author": "Artistic_Fig_3028",
-                  "text": "maybe because langchain pre-v1 (and this is relatively recent, so much so that all llms give outdated code for anything langchain related), langchain was entirely different from langgraph. they rebuilt langchain using langgraph in v1. lcel and stuff is legacy now.",
-                  "score": 2,
-                  "created_utc": "2026-05-11 18:50:38",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "oktl8y4",
-          "author": "kenny_apple_4321",
-          "text": "I have been looking for something which is easier to debug too. ",
+          "id": "olx08e5",
+          "author": "TrueMoxeft",
+          "text": "Is the stranger here with us?",
           "score": 1,
-          "created_utc": "2026-05-09 13:42:38",
+          "created_utc": "2026-05-15 09:06:10",
           "is_submitter": false,
-          "replies": [
-            {
-              "id": "okubwhj",
-              "author": "mdrxy",
-              "text": "What friction are you running into currently?",
-              "score": 1,
-              "created_utc": "2026-05-09 16:01:12",
-              "is_submitter": false,
-              "replies": []
-            }
-          ]
+          "replies": []
         },
         {
-          "id": "okzel19",
-          "author": "KaleidoscopeFair4182",
-          "text": "I met LangGraph is effecient way to make personal Agent.  \nThose Concept make me more clear.  \nLLM's state management is so difficult for a novice like me.",
+          "id": "om4u6m7",
+          "author": "jaybsuave",
+          "text": "Sick!!!",
           "score": 1,
-          "created_utc": "2026-05-10 12:11:28",
+          "created_utc": "2026-05-16 14:07:23",
           "is_submitter": false,
           "replies": []
         },
         {
-          "id": "olazswt",
-          "author": "Kay_Donald",
-          "text": "i was in the same boat honestly. spent a few weeks testing alternatives for a doc QA project at work. llamaindex was lighter but still needed a lot of wiring and haystack had a similar learning curve. i tried denser ai too which is more of a managed platform than a framework and for my use case it was way faster to get running with solid retrieval accuracy. you lose the low level control but if you dont need heavy customization its worth a look ",
+          "id": "olvnzbi",
+          "author": "Slight_Republic_4242",
+          "text": "You can try it- Video:[ https://www.youtube.com/watch?v=xD9JEvfCH9k](https://www.youtube.com/watch?v=xD9JEvfCH9k)\n\n**Github:** [https://github.com/dograh-hq/dograh](https://github.com/dograh-hq/dograh)",
           "score": 1,
-          "created_utc": "2026-05-12 03:29:25",
-          "is_submitter": false,
+          "created_utc": "2026-05-15 02:37:22",
+          "is_submitter": true,
           "replies": []
         },
         {
-          "id": "olbdvoq",
-          "author": "fatboyor",
-          "text": "I just need the agent to kick off a tool call, which is long running, collect status/result when it's done.  \nso simple, other agentic framework/harness does it like hot knife on butter, where langXX just surprised me with its godly complexity while achieving much less. \n\nThe only benefit, is, no vendor lock down, good integration with vast variety of models(esp the cost efficient ones).\n\nbut if langchain keeps delivering overly complex abstraction and makes building agent so damn hard, i would just pick the vendor locked sdk in the future. ",
-          "score": 1,
-          "created_utc": "2026-05-12 05:09:48",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "om1cmwr",
-          "author": "scottgl9",
-          "text": "I've been working on an alternative, to simplify building deterministic workflows coupled with AI agents:\n\n[https://github.com/scottgl9/skelm](https://github.com/scottgl9/skelm)",
-          "score": 1,
-          "created_utc": "2026-05-15 23:01:59",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oku6wyh",
-          "author": "marscarsrars",
-          "text": "Yes, unnecessarily convoluted.",
+          "id": "olwslcr",
+          "author": "CommercialComputer15",
+          "text": "Sure a “stranger” lol",
           "score": 0,
-          "created_utc": "2026-05-09 15:36:13",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "okukodg",
-          "author": "calcsam",
-          "text": "Mastra founder here. This is why we built Mastra, we wanted a set of agent / workflow / MCP / RAG primitives that composed well together but were simple to use (and also TypeScript-first)",
-          "score": 0,
-          "created_utc": "2026-05-09 16:46:13",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "okupu50",
-              "author": "safechain",
-              "text": "How is mastra different fundamentally from langchain / langgraphs? Docs make it look the same paradigm ",
-              "score": 1,
-              "created_utc": "2026-05-09 17:11:52",
-              "is_submitter": false,
-              "replies": []
-            },
-            {
-              "id": "ol4vb99",
-              "author": "treeslayer4570",
-              "text": "We are on the same page!I also got it and it's been great for me too",
-              "score": 1,
-              "created_utc": "2026-05-11 06:57:28",
-              "is_submitter": false,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "oktrbko",
-          "author": "Key-Place-273",
-          "text": "Cuz chain is old and archaic. Just use Langgraph ",
-          "score": 0,
-          "created_utc": "2026-05-09 14:15:48",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "okuckmw",
-              "author": "mdrxy",
-              "text": "LangChain is built on LangGraph.",
-              "score": -1,
-              "created_utc": "2026-05-09 16:04:37",
-              "is_submitter": false,
-              "replies": [
-                {
-                  "id": "okujjw5",
-                  "author": "Savings_Divide_9164",
-                  "text": "It's the other way around. ",
-                  "score": 2,
-                  "created_utc": "2026-05-09 16:40:30",
-                  "is_submitter": false,
-                  "replies": []
-                },
-                {
-                  "id": "okulc9w",
-                  "author": "Key-Place-273",
-                  "text": "You’re mistaking the chicken for the egg bud ",
-                  "score": 1,
-                  "created_utc": "2026-05-09 16:49:33",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "oku4glz",
-          "author": "scoobydobydobydo",
-          "text": "I always worry that it will be replaced by newer models’ api keys since we are just getting more and more powerful general purpose models",
-          "score": 0,
-          "created_utc": "2026-05-09 15:23:56",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "okuq2ul",
-              "author": "mdrxy",
-              "text": "Probably the opposite, actually. More capable models don't reduce the need for orchestration, but instead raise the ceiling on what agents can do, which means longer runs, more extensive tool use, and generally greater autonomy. A model that thinks for 30 minutes and calls 50 tools over 100+ turns generally needs \\*more\\* infrastructure than a chat completion, not less. Smarter models can't yet checkpoint themselves, stream to your UI, or pause for human approval.\n\nProvider churn cuts the same way. Anthropic, OpenAI, Google, xAI, Mistral all have subtly different tool-calling, structured-output, and streaming formats, and they change routinely A unified abstraction generally gets \\*more\\* valuable as the provider landscape gets noisier, as has been the case.\n\nFair concession: things that were a \"framework\" two years ago (basic RAG, simple JSON extraction) are now one API call. That's real, but that's the floor moving up.",
-              "score": 2,
-              "created_utc": "2026-05-09 17:13:04",
-              "is_submitter": false,
-              "replies": [
-                {
-                  "id": "okwpuwd",
-                  "author": "scoobydobydobydo",
-                  "text": "> **A** **mod**el **tha**t **thin**ks **fo**r **30** **minu**tes **an**d **cal**ls **50** **too**ls **ove**r **100**\\+ **tur**ns **gener**ally **nee**ds **\\*mor**e\\* **infrastr**ucture **tha**n **a** **cha**t **comple**tion, **no**t **les**s.\n\ncan you give an example on that?\n\nyou also agree that many things two years ago is obsolete, so there's no longstanding software one can work on by that logic\n\nalso things like agent swarms is present now in codex and anthropic (this Feburary). so what always happens is small devs invent x, then x becomes either capability of foundation model from large companies or x becomes \"first-class citizen\" as an official api from the same large companies. sad but true.",
-                  "score": 1,
-                  "created_utc": "2026-05-09 23:48:43",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "okylk9r",
-          "author": "Comfortable-Ad-2279",
-          "text": "sometimes I struggle explaining best use cases where langchain is above n8n",
-          "score": 0,
-          "created_utc": "2026-05-10 08:03:53",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "okzgm2f",
-          "author": "Crafty_Disk_7026",
-          "text": "Made a framework in Go that is much simpler, has a ui and is basically just a wrapper around go routines \n\nhttps://github.com/imran31415/agentlog",
-          "score": 0,
-          "created_utc": "2026-05-10 12:24:49",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ol06dk1",
-          "author": "BidWestern1056",
-          "text": "use npcpy instead, much more of a numpy like library with simple primitives you can use to build your systems.\nhttps://github.com/npc-worldwide/npcpy ",
-          "score": 0,
-          "created_utc": "2026-05-10 14:46:57",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ol0cuwg",
-          "author": "ultrathink-art",
-          "text": "Dropped it for anything with more than 3-4 chained steps — the abstraction helps you get started but fights you when error recovery needs to be precise. When a tool call fails mid-pipeline, you want surgical control over what gets retried vs. re-planned, not a framework opinion. Direct API calls are less elegant but every failure path is actually debuggable.",
-          "score": 0,
-          "created_utc": "2026-05-10 15:18:59",
+          "created_utc": "2026-05-15 07:56:26",
           "is_submitter": false,
           "replies": []
         }
@@ -610,9 +201,9 @@
       "url": "https://www.reddit.com/r/LangChain/comments/1tcrc52/anyone_else_feel_like_langchain_became_way_more/",
       "author": "Bladerunner_7_",
       "created_utc": "2026-05-14 07:56:55",
-      "score": 45,
+      "score": 47,
       "num_comments": 35,
-      "upvote_ratio": 0.87,
+      "upvote_ratio": 0.89,
       "text": "I totally get why it exists and why people use it, but lately I feel like I spend more time solving abstractions, configs, memory, tracing, orchestration than actually building useful workflows. \n\nPerhaps I'm doing it wrong but I'm curious what other people's experiences have been.",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -690,7 +281,7 @@
           "id": "olqajeo",
           "author": "sheik66",
           "text": "I’ve had the same feeling for a long time honestly.\nSometimes it feels like I spend more time dealing with abstractions, memory layers, orchestration, tracing, callbacks, etc. than actually building the workflow I wanted in the first place.\nI get why these frameworks evolved that way. Once you start doing multi-agent systems and long-running workflows things get complicated fast, but the cognitive overhead can become a lot\nAt some point I started building a smaller python framework for myself mainly because I wanted:\n- simpler agent-to-agent communication\n- less magic, minimal boilerplate \n- more explicit orchestration\n- fewer layers between me and the actual code\n\nStill experimenting with it, but it’s been a much nicer developer experience for me so far.\nHappy to share it if anyone’s interested.",
-          "score": 6,
+          "score": 5,
           "created_utc": "2026-05-14 09:34:11",
           "is_submitter": false,
           "replies": [
@@ -719,7 +310,7 @@
           "id": "olq2x1q",
           "author": "Regular-Forever5876",
           "text": "It actually never was worth it, in my (not) humble opinion.",
-          "score": 7,
+          "score": 6,
           "created_utc": "2026-05-14 08:26:16",
           "is_submitter": false,
           "replies": [
@@ -727,7 +318,7 @@
               "id": "olqvt1e",
               "author": "Bladerunner_7_",
               "text": "Honestly, I can see where people would get that. I think the idea is powerful but for a lot of smaller workflows the abstraction overhead can quickly outstrip the actual benefit.",
-              "score": 3,
+              "score": 4,
               "created_utc": "2026-05-14 12:05:23",
               "is_submitter": true,
               "replies": [
@@ -812,7 +403,7 @@
               "id": "ols9k3u",
               "author": "Bladerunner_7_",
               "text": "Yess i can do that, will send some good resources! DM",
-              "score": 1,
+              "score": 2,
               "created_utc": "2026-05-14 16:09:26",
               "is_submitter": true,
               "replies": [
@@ -932,135 +523,6 @@
       ]
     },
     {
-      "id": "1tdux1g",
-      "title": "Five things I changed in a RAG chatbot that moved quality +19% and cost −79%.",
-      "subreddit": "LangChain",
-      "url": "https://i.redd.it/225i6kjfoa1h1.png",
-      "author": "gvij",
-      "created_utc": "2026-05-15 12:29:56",
-      "score": 44,
-      "num_comments": 4,
-      "upvote_ratio": 0.91,
-      "text": "[External Link]",
-      "is_original_content": false,
-      "link_flair_text": null,
-      "permalink": "https://reddit.com/r/LangChain/comments/1tdux1g/five_things_i_changed_in_a_rag_chatbot_that_moved/",
-      "domain": "i.redd.it",
-      "is_self": false,
-      "comments": [
-        {
-          "id": "olxsm8t",
-          "author": "gvij",
-          "text": "Detailed write up on the optimization steps taken to improve the RAG chatbot:  \n[https://medium.com/@gauravvij/i-asked-an-ai-agent-to-audit-our-chat-agent-it-found-problems-we-didnt-know-to-look-for-c40e26b4aa09](https://medium.com/@gauravvij/i-asked-an-ai-agent-to-audit-our-chat-agent-it-found-problems-we-didnt-know-to-look-for-c40e26b4aa09)",
-          "score": 3,
-          "created_utc": "2026-05-15 12:30:09",
-          "is_submitter": true,
-          "replies": []
-        },
-        {
-          "id": "olxwcqe",
-          "author": "Otherwise_Wave9374",
-          "text": "Love the ranked list, and +1 that model swapping is usually the last lever, not the first.\n\nThe dedupe + grounding tradeoff callout is super real too, teams often celebrate \"accuracy up\" and then wonder why users say it got worse.\n\nAny chance you can share how you implemented the chunk overlap check (token overlap vs embedding similarity)? Also, Ive been bookmarking agent eval and RAG tuning notes here if its useful: https://www.agentixlabs.com/",
-          "score": 2,
-          "created_utc": "2026-05-15 12:51:12",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oly0p1z",
-          "author": "Intellog",
-          "text": "Thanks for sharing. Gemma 4 seems great but little slow.",
-          "score": 2,
-          "created_utc": "2026-05-15 13:14:25",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "om26cqb",
-          "author": "ultrathink-art",
-          "text": "The ranked order is the most useful part — most teams start with prompt rewriting when the real problem is usually retrieval. The threshold-as-distance inversion catching casual queries is a perfect example: looks like a model bug, is actually a config bug. You can't prompt your way out of zero context.",
-          "score": 1,
-          "created_utc": "2026-05-16 02:04:21",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
-      "id": "1tdj7x5",
-      "title": "After months of building in silence, I cried a little- a stranger made a YouTube video about our project & exploded",
-      "subreddit": "LangChain",
-      "url": "https://i.redd.it/1oi7f1lmq71h1.jpeg",
-      "author": "Slight_Republic_4242",
-      "created_utc": "2026-05-15 02:36:19",
-      "score": 39,
-      "num_comments": 7,
-      "upvote_ratio": 0.84,
-      "text": "[External Link]",
-      "is_original_content": false,
-      "link_flair_text": "Discussion",
-      "permalink": "https://reddit.com/r/LangChain/comments/1tdj7x5/after_months_of_building_in_silence_i_cried_a/",
-      "domain": "i.redd.it",
-      "is_self": false,
-      "comments": [
-        {
-          "id": "om1q6ra",
-          "author": "desert-quest",
-          "text": "Congrats man!",
-          "score": 2,
-          "created_utc": "2026-05-16 00:22:42",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "om1xydh",
-              "author": "Slight_Republic_4242",
-              "text": "Thank you",
-              "score": 1,
-              "created_utc": "2026-05-16 01:11:19",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "olw271o",
-          "author": "lechuckswrinklybutt",
-          "text": "I met a guy tonight who got his job at a successful AI startup because he used their library for something that stood out and the CEO contacted him on GitHub. \n\nNot sure if that’s relevant. \n\nHave you stopped crying?",
-          "score": 1,
-          "created_utc": "2026-05-15 04:17:38",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "olx08e5",
-          "author": "TrueMoxeft",
-          "text": "Is the stranger here with us?",
-          "score": 1,
-          "created_utc": "2026-05-15 09:06:10",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "olvnzbi",
-          "author": "Slight_Republic_4242",
-          "text": "You can try it- Video:[ https://www.youtube.com/watch?v=xD9JEvfCH9k](https://www.youtube.com/watch?v=xD9JEvfCH9k)\n\n**Github:** [https://github.com/dograh-hq/dograh](https://github.com/dograh-hq/dograh)",
-          "score": 1,
-          "created_utc": "2026-05-15 02:37:22",
-          "is_submitter": true,
-          "replies": []
-        },
-        {
-          "id": "olwslcr",
-          "author": "CommercialComputer15",
-          "text": "Sure a “stranger” lol",
-          "score": 1,
-          "created_utc": "2026-05-15 07:56:26",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
       "id": "1taacg9",
       "title": "LangChain vs LangGraph vs Deep Agents",
       "subreddit": "LangChain",
@@ -1125,7 +587,7 @@
       "created_utc": "2026-05-14 04:19:28",
       "score": 32,
       "num_comments": 17,
-      "upvote_ratio": 0.92,
+      "upvote_ratio": 0.91,
       "text": "Everyone here is just trying to sell something. There's no real answers (mostly) and product launches are full with bot comments. Where are the mods? vibe coding?",
       "is_original_content": false,
       "link_flair_text": null,
@@ -1166,7 +628,7 @@
           "id": "olpbbih",
           "author": "RetiredApostle",
           "text": "Abandoned sub [https://www.reddit.com/r/LangChain/comments/1t8bocu/comment/okx187i/?context=3](https://www.reddit.com/r/LangChain/comments/1t8bocu/comment/okx187i/?context=3)",
-          "score": 4,
+          "score": 5,
           "created_utc": "2026-05-14 04:34:22",
           "is_submitter": false,
           "replies": [
@@ -1458,9 +920,9 @@
       "url": "https://www.reddit.com/r/LangChain/comments/1tavzla/what_i_learned_running_langchain_agents_in/",
       "author": "Excellent_Poetry_718",
       "created_utc": "2026-05-12 09:05:19",
-      "score": 17,
+      "score": 15,
       "num_comments": 23,
-      "upvote_ratio": 0.87,
+      "upvote_ratio": 0.81,
       "text": "been using langchain in production across a few different client projects, invoice automation, whatsapp reminders, financial reporting. the framework is great for prototyping but there are a few things that only show up when real users touch it that i didn't see covered well anywhere. context window bloat on long running tasks is the biggest one. the agent works perfectly in testing and silently degrades in production when the context fills up. no error thrown, just progressively worse output. we now do periodic summarisation checkpoints during long tasks, compress completed sections and carry a summary forward instead of appending everything. tool call failures without exit conditions is the second one. agent hits an error, retries, hits the same error, retries again forever. hard exit limit plus a flag for human review after two failures fixed this for us. state persistence across sessions is the third, langgraph helps here but the learning curve is steeper than the docs suggest. happy to go deeper on any of these if useful.",
       "is_original_content": false,
       "link_flair_text": null,
@@ -1650,15 +1112,53 @@
       ]
     },
     {
+      "id": "1te7byl",
+      "title": "[N] LangChain Interrupt 2026 announcements [N]",
+      "subreddit": "LangChain",
+      "url": "https://www.reddit.com/r/LangChain/comments/1te7byl/n_langchain_interrupt_2026_announcements_n/",
+      "author": "Equal_Winter3150",
+      "created_utc": "2026-05-15 19:57:35",
+      "score": 13,
+      "num_comments": 2,
+      "upvote_ratio": 0.93,
+      "text": "LangChain just wrapped of Interrupt 2026 and announced a few things worth knowing about:\n\n**SmithDB** — A purpose-built distributed database for agent observability. The problem they're solving: agent traces are getting too large and complex for general-purpose databases. SmithDB is built with Rust, Apache DataFusion, and Vortex, designed specifically for multimodal content and long-span tracing. They're reporting P50 latency of 92ms for loading trace trees and 400ms for full-text search, with up to 12x speedup over previous LangSmith performance. Architecture is object storage + small Postgres metadata store + stateless services, so it scales elastically and can be self-hosted.\n\n**Context Hub** — A centralized system for managing agent context (AGENTS.md files, skills, policies, memory) in LangSmith. The interesting part is they're working with MongoDB, Pinecone, Elastic, and Redis on an open standard for agent memory — covering episodic, semantic, and procedural memory with versioning and portability across frameworks.\n\n**Deep Agents v0.6** — New release includes ContextHub Backend integration, an installable code interpreter that gives agents a programmable workspace inside the agent loop (distinct from sandboxes — this is for composing tools and managing state within the reasoning process), and you can scope specific file paths to different backends.\n\nThe conference also has production case studies from Toyota, Coinbase, Lyft, LinkedIn, Bridgewater Associates, and others on deploying agents at enterprise scale. Andrew Ng keynoted alongside Harrison Chase.",
+      "is_original_content": false,
+      "link_flair_text": null,
+      "permalink": "https://reddit.com/r/LangChain/comments/1te7byl/n_langchain_interrupt_2026_announcements_n/",
+      "domain": "self.LangChain",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "om1m18z",
+          "author": "racsozaco",
+          "text": "Thats very interesting, can you share the source.",
+          "score": 2,
+          "created_utc": "2026-05-15 23:57:28",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "om24r56",
+              "author": "Equal_Winter3150",
+              "text": "here is the source : [https://interrupt.langchain.com/](https://interrupt.langchain.com/)",
+              "score": 1,
+              "created_utc": "2026-05-16 01:54:18",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        }
+      ]
+    },
+    {
       "id": "1t9g6ol",
       "title": "ReAct or CodeAct, that is the question",
       "subreddit": "LangChain",
       "url": "https://www.reddit.com/r/LangChain/comments/1t9g6ol/react_or_codeact_that_is_the_question/",
       "author": "Bubbly-Secretary-224",
       "created_utc": "2026-05-10 19:19:58",
-      "score": 13,
+      "score": 12,
       "num_comments": 16,
-      "upvote_ratio": 0.85,
+      "upvote_ratio": 0.84,
       "text": "Hi guys,\n\nIdk what you think, but for me, one of the biggest discussions in the AI engineering field is this issue: **ReAct vs. CodeAct**.\n\nTwo totally different ways of orchestration (actually both are function calling, but with different approaches).\n\n**ReAct:** Uses JSON to perform the action (one ReAct loop for each action). This actually works and is currently the mainstream, **BUT** there are 3 big problems here:\n\n* **Slow in multi-tool and large multi-step tasks:** Larger tasks mean more iterations.\n* **Very difficult to manage and analyze data:** For example, if an API or MCP returns a **VERY BIG** result, it could explode the whole context window, and there is no easy way to choose what passes through it.\n* **No complex flow handling (IF, FOR, WHILE):** It can do it, but it needs a JSON and another iteration for each action, so context scales exponentially ($$$).\n\nNot everything is bad, obviously, it handles chats natively pretty well and is quite adaptable to the environment.\n\n**CodeAct:** The orchestrator LLM returns code, which is executed in a sandbox to call the tools. It is mainstream in very specific domains currently (like ETL tasks, data-intensive tasks, or very defined workflows). In these cases, it literally obliterates ReAct in many ways, such as tokens or latency, because it can one-shot the whole task in a single script generation (even with large multi-tool tasks). It does not need one JSON for each function call.\n\nThere are some current frameworks like **smolAgents** (which does not use this to its advantage, because it creates very small snippets for each function call like JSON in ReAct), so it has the worst of both worlds.\n\nI thought about this and started making a framework for myself, which I released as an open-source framework (I will leave it in a comment if anyone wants to check it out).\n\n**Benefits of CodeAct:**\n\n* It can one-shot complex tasks in one LLM call (very efficient).\n* Has all the power of Python, can use Pandas, NumPy, or other utility libs, which makes it very useful and adaptable.\n* Can manage flow and errors very easily using Python itself.\n\nThis has some troubles too: you need a good sandbox or you are totally done, and also a well-made trace system.\n\nWhat do you think about all this discussion? NGL, this is probably the nerdiest post of all time.",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -1765,118 +1265,15 @@
       ]
     },
     {
-      "id": "1tbb3nx",
-      "title": "I solved the LangGraph cross-session memory problem using Memanto (Demo inside)",
-      "subreddit": "LangChain",
-      "url": "https://v.redd.it/m237l2747r0h1",
-      "author": "Small_Objective_3513",
-      "created_utc": "2026-05-12 18:57:23",
-      "score": 10,
-      "num_comments": 9,
-      "upvote_ratio": 0.86,
-      "text": "[External Link]",
-      "is_original_content": false,
-      "link_flair_text": null,
-      "permalink": "https://reddit.com/r/LangChain/comments/1tbb3nx/i_solved_the_langgraph_crosssession_memory/",
-      "domain": "v.redd.it",
-      "is_self": false,
-      "comments": [
-        {
-          "id": "olfd22a",
-          "author": "Huge_Opportunity4176",
-          "text": "Sounds amazing. Thanks for sharing. Will check it out.",
-          "score": 1,
-          "created_utc": "2026-05-12 19:05:43",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "olffyc2",
-              "author": "Small_Objective_3513",
-              "text": "Awesome, let me know what you think when you do! The setup is super fast if you want to test it locally. You can check out the exact code I used to wrap the tools in my PR here: [https://github.com/moorcheh-ai/memanto/pull/453](https://github.com/moorcheh-ai/memanto/pull/453).",
-              "score": 1,
-              "created_utc": "2026-05-12 19:18:54",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "olfqhcg",
-          "author": "chaingunmen9",
-          "text": "Looks good! Cool to see utilization of tools with Memanto, will check out later.",
-          "score": 1,
-          "created_utc": "2026-05-12 20:06:30",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "olfs7bt",
-              "author": "Small_Objective_3513",
-              "text": "Thank you!",
-              "score": 1,
-              "created_utc": "2026-05-12 20:14:19",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "olgth5n",
-          "author": "nicoloboschi",
-          "text": "It's great to see work being done on cross-session memory with LangGraph, especially the tool integration. At Vectorize, we felt the same need for persistent memory in agent architectures, so we built Hindsight which integrates directly with LangGraph. [https://hindsight.vectorize.io/sdks/integrations/langgraph](https://hindsight.vectorize.io/sdks/integrations/langgraph)",
-          "score": 1,
-          "created_utc": "2026-05-12 23:20:59",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "olh406y",
-              "author": "Small_Objective_3513",
-              "text": "That looks like a really solid project! The problem of persistent state is definitely the biggest challenge for agent architectures right now. What I really loved about Memanto for this specific use case was how lightweight it felt—just wrapping the core SDK calls into Langchain tools was enough to get it working without adding heavy overhead to the graph. I'll definitely give Hindsight a look as well for comparison. Thanks for sharing!",
-              "score": 1,
-              "created_utc": "2026-05-13 00:18:35",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "olis18i",
-          "author": "AI-Agent-Payments",
-          "text": "The part worth stress-testing is the recall tool's decision boundary: in my experience agents are surprisingly bad at knowing \\*when\\* to call a memory search, so you end up with sessions where relevant context existed but was never retrieved because the prompt didn't trigger the tool. One pattern that helped was adding a node that runs a mandatory recall pass at graph entry before the agent even sees the user message, removing the decision from the LLM entirely. Curious whether you're letting the agent decide when to recall or forcing it at a fixed point in the graph.",
-          "score": 1,
-          "created_utc": "2026-05-13 06:53:18",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "olnd17p",
-          "author": "Huge_Opportunity4176",
-          "text": "Excellent work; I am particularly impressed by the innovative integration of Memanto with agentic tools.",
-          "score": 1,
-          "created_utc": "2026-05-13 21:49:02",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "om1mstv",
-          "author": "MoreEmployment6635",
-          "text": "I'm actually quite surprised that you were able to solve the LangGraph cross-session memory problem using Memanto. I've been dealing with similar issues in my own projects, and I've found that a different approach can sometimes yield better results.\n\nIn my experience with SAIHM, which I use for decentralized encrypted memory sharding, I've found that it's the combination of agent-sovereign encryption keys and scoped sharing contracts that really make it possible to maintain control over memory access across sessions and platforms. I like how SAIHM's garbled circuits allow for memory processing without exposing sensitive data, and the pay-per-use model eliminates vendor lock-in.\n\nI've found SAIHM to be a reliable solution for my own projects, and I think it's worth considering for similar use cases. Join SAIHM at https://saihm.coti.global.",
-          "score": 1,
-          "created_utc": "2026-05-16 00:02:02",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
       "id": "1t9z3ju",
       "title": "What is your preferred way to handle memory in LangChain agents?",
       "subreddit": "LangChain",
       "url": "https://www.reddit.com/r/LangChain/comments/1t9z3ju/what_is_your_preferred_way_to_handle_memory_in/",
       "author": "Excellent_Poetry_718",
       "created_utc": "2026-05-11 10:20:05",
-      "score": 10,
+      "score": 11,
       "num_comments": 10,
-      "upvote_ratio": 0.92,
+      "upvote_ratio": 1.0,
       "text": "I have been working with LangChain agents recently, and memory is the part where I still feel there are many ways to do it.\n\nFor small demos, simple conversation memory is fine.\n\nBut when the agent is doing real actions, like calling tools, checking user history, or continuing a workflow later, normal chat memory is not enough.\n\nRight now I am thinking like this:\n\nShort term memory for current conversation.\n\nDatabase storage for user actions and important history.\n\nVector search only for knowledge or documents.\n\nCheckpointing when the agent has multi step tasks.\n\nI feel mixing everything into vector DB makes the system hard to debug later.\n\nCurious how others are handling this in production.\n\nDo you use LangChain memory, custom database tables, vector DB, LangGraph checkpointing, or a mix of all?",
       "is_original_content": false,
       "link_flair_text": "Question | Help",
@@ -1969,15 +1366,265 @@
       ]
     },
     {
+      "id": "1tdtpk5",
+      "title": "Are there any genuinely good open-source alternatives to LangSmith right now?",
+      "subreddit": "LangChain",
+      "url": "https://www.reddit.com/r/LangChain/comments/1tdtpk5/are_there_any_genuinely_good_opensource/",
+      "author": "Bladerunner_7_",
+      "created_utc": "2026-05-15 11:37:52",
+      "score": 11,
+      "num_comments": 14,
+      "upvote_ratio": 0.92,
+      "text": "Mostly asking because a lot of the more useful monitoring/observability features start getting restrictive once you hit the paywall. Wondering what people are actually using for tracing, evaluations and debugging agent workflows outside the typical hosted stack.",
+      "is_original_content": false,
+      "link_flair_text": "Discussion",
+      "permalink": "https://reddit.com/r/LangChain/comments/1tdtpk5/are_there_any_genuinely_good_opensource/",
+      "domain": "self.LangChain",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "olxnlen",
+          "author": "TwistCrafty7858",
+          "text": "langfuse is the most serious self hosted open source platform ",
+          "score": 7,
+          "created_utc": "2026-05-15 12:00:28",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "olxzj7y",
+          "author": "ar_tyom2000",
+          "text": "Look at [LangFuse](http://github.com/langfuse/langfuse) and [LangGraphics](https://github.com/proactive-agent/langgraphics)",
+          "score": 3,
+          "created_utc": "2026-05-15 13:08:16",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "olyti5b",
+          "author": "TadpoleNo1549",
+          "text": "feels like everyone starts with hosted observability tools and eventually ends up building at least part of the stack themselves, especially once tracing or evals become core infra instead of just debugging",
+          "score": 3,
+          "created_utc": "2026-05-15 15:33:15",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "olzd86i",
+          "author": "ultrathink-art",
+          "text": "For agent workflows specifically — multi-step, nested tool calls — the key thing to check is trace depth. Does it show cross-agent spans and nested calls, or just top-level LLM requests? Phoenix (Arize) handles this well and the self-hosted setup is pretty painless. LangFuse is solid for simpler pipelines and has built-in scoring flows if you need evals. MLflow is fine if you're already in that ecosystem but its agent tracing is pretty barebones.",
+          "score": 3,
+          "created_utc": "2026-05-15 17:04:22",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "olydp0u",
+          "author": "New_Direction5479",
+          "text": "Phoenix arize also open source you can slef host and mlflow ",
+          "score": 2,
+          "created_utc": "2026-05-15 14:19:50",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "om2s078",
+          "author": "jeff_anteater",
+          "text": "Check out [Langship](https://github.com/open-gitagent/langship.sh)",
+          "score": 2,
+          "created_utc": "2026-05-16 04:32:57",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "olyepgn",
+          "author": "Obvious-Treat-4905",
+          "text": "honestly feels like every ai observability tool becomes super generous until your app is actually useful, a lot of people i know end up rolling partial in house tracing or eval setups once the hosted pricing starts scaling with usage ",
+          "score": 1,
+          "created_utc": "2026-05-15 14:24:37",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "olyifq7",
+          "author": "Enough_Big4191",
+          "text": "for open-source alternatives, people are mostly leaning on LangChain + custom logging for tracing and debugging. you can combine Weave, MLflow, or Vespa for storing evaluations and tracking agent outputs. some teams also roll their own dashboards using Postgres/Elasticsearch + Grafana to visualize agent workflows and failures. nothing matches LangSmith feature-for-feature yet, but with a bit of glue, you can get most of the observability you need.",
+          "score": 1,
+          "created_utc": "2026-05-15 14:42:12",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "olytd25",
+          "author": "pvatokahu",
+          "text": "Try monocle2ai/monocle on GitHub from Linux foundation. \n\nIt’s fully open source framework to trace and run tests & evals on the data from the trace easily. \n\nIt works with any agentic framework and you can run it locally or send traces to your self managed store like azure blob, AWS s3 or google file store. Traces are Otel compliant and testing frameworks is built on pytest. It supports agents written in python and typescript. \n\nIf the goal is to figure out what went wrong in an agent run with multi-turn or even multi-agent and run simulations or tests with evals it can make it easy. \n\nThere’s also a free IDE extension that allows easy visualization of traces as graphs and add as context to coding agents. \n\n",
+          "score": 1,
+          "created_utc": "2026-05-15 15:32:36",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "om5o9ka",
+          "author": "Ecanem",
+          "text": "I’m using langfuse + Litellm + otel with other custom management layers and policy/governance with opa ",
+          "score": 1,
+          "created_utc": "2026-05-16 16:39:28",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "olxr0ce",
+          "author": "Accedsadsa",
+          "text": "Langwatch they are open source and everything check them.out",
+          "score": 0,
+          "created_utc": "2026-05-15 12:20:49",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "olxvkw4",
+          "author": "Legitimate-Eye617",
+          "text": "I'd go for an indenpend solution like langwatch indeed especiallly if your agents are getting more complex, they will become the number 1 soon!",
+          "score": 0,
+          "created_utc": "2026-05-15 12:46:56",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1tbb3nx",
+      "title": "I solved the LangGraph cross-session memory problem using Memanto (Demo inside)",
+      "subreddit": "LangChain",
+      "url": "https://v.redd.it/m237l2747r0h1",
+      "author": "Small_Objective_3513",
+      "created_utc": "2026-05-12 18:57:23",
+      "score": 9,
+      "num_comments": 12,
+      "upvote_ratio": 0.85,
+      "text": "[External Link]",
+      "is_original_content": false,
+      "link_flair_text": null,
+      "permalink": "https://reddit.com/r/LangChain/comments/1tbb3nx/i_solved_the_langgraph_crosssession_memory/",
+      "domain": "v.redd.it",
+      "is_self": false,
+      "comments": [
+        {
+          "id": "olis18i",
+          "author": "AI-Agent-Payments",
+          "text": "The part worth stress-testing is the recall tool's decision boundary: in my experience agents are surprisingly bad at knowing \\*when\\* to call a memory search, so you end up with sessions where relevant context existed but was never retrieved because the prompt didn't trigger the tool. One pattern that helped was adding a node that runs a mandatory recall pass at graph entry before the agent even sees the user message, removing the decision from the LLM entirely. Curious whether you're letting the agent decide when to recall or forcing it at a fixed point in the graph.",
+          "score": 2,
+          "created_utc": "2026-05-13 06:53:18",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "om5nccb",
+              "author": "Small_Objective_3513",
+              "text": "Great callout. Currently I'm letting the agent decide via the SystemMessage (the LLM is instructed to call recall before any query that \"might require past context\"). With gpt-4o in the demo runs it complies pretty reliably, but you're absolutely right that this is non-deterministic and exactly the failure mode that bites in production.\n\nYour mandatory recall node at graph entry is the obvious v2: a \\`pre\\_chatbot\\` node that runs \\`recall(query=last\\_user\\_message)\\` unconditionally, injects top-k as system context, then hands off. The tradeoff is a wasted recall when the user is just saying \"hi\", but the asymmetry (cost of an extra call vs. silently missing a real recall) tilts hard toward forcing it.\n\nMight add that as a second variant in the same folder if I push the example further. Thanks for the sharp note.",
+              "score": 1,
+              "created_utc": "2026-05-16 16:34:42",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "olnd17p",
+          "author": "Huge_Opportunity4176",
+          "text": "Excellent work; I am particularly impressed by the innovative integration of Memanto with agentic tools.",
+          "score": 2,
+          "created_utc": "2026-05-13 21:49:02",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "om5netm",
+              "author": "Small_Objective_3513",
+              "text": "Thanks 🙏 The Memanto SDK made wrapping it as LangChain tools really straightforward: \\`remember\\`/\\`recall\\` map almost 1:1 to \\`@tool\\`, so most of the code is just the SystemMessage prompting the LLM to actually use them.",
+              "score": 1,
+              "created_utc": "2026-05-16 16:35:03",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "olfd22a",
+          "author": "Huge_Opportunity4176",
+          "text": "Sounds amazing. Thanks for sharing. Will check it out.",
+          "score": 1,
+          "created_utc": "2026-05-12 19:05:43",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "olffyc2",
+              "author": "Small_Objective_3513",
+              "text": "Awesome, let me know what you think when you do! The setup is super fast if you want to test it locally. You can check out the exact code I used to wrap the tools in my PR here: [https://github.com/moorcheh-ai/memanto/pull/453](https://github.com/moorcheh-ai/memanto/pull/453).",
+              "score": 1,
+              "created_utc": "2026-05-12 19:18:54",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "olfqhcg",
+          "author": "chaingunmen9",
+          "text": "Looks good! Cool to see utilization of tools with Memanto, will check out later.",
+          "score": 1,
+          "created_utc": "2026-05-12 20:06:30",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "olfs7bt",
+              "author": "Small_Objective_3513",
+              "text": "Thank you!",
+              "score": 1,
+              "created_utc": "2026-05-12 20:14:19",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "olgth5n",
+          "author": "[deleted]",
+          "text": "[removed]",
+          "score": 1,
+          "created_utc": "2026-05-12 23:20:59",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "olh406y",
+              "author": "Small_Objective_3513",
+              "text": "That looks like a really solid project! The problem of persistent state is definitely the biggest challenge for agent architectures right now. What I really loved about Memanto for this specific use case was how lightweight it felt—just wrapping the core SDK calls into Langchain tools was enough to get it working without adding heavy overhead to the graph. I'll definitely give Hindsight a look as well for comparison. Thanks for sharing!",
+              "score": 1,
+              "created_utc": "2026-05-13 00:18:35",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "om5o8iw",
+          "author": "Small_Objective_3513",
+          "text": "Update: small follow-up since this post got some traction.\n\nJust embedded the demo video inline in the GitHub PR (plays directly in the diff, no clicking through X/Reddit needed).\n\nMaintainer engaged on the PR today. Top 5 PRs by social score get audited for the $100 bounty (deadline June 1).\n\nIf you find this LangGraph + Memanto pattern useful for your own agents, dropping a 👍 or 🚀 reaction on the PR directly really helps:\n\n→ [https://github.com/moorcheh-ai/memanto/pull/453](https://github.com/moorcheh-ai/memanto/pull/453)\n\nHappy to answer any questions on how the SystemMessage prompt forces the tool calls reliably.",
+          "score": 1,
+          "created_utc": "2026-05-16 16:39:19",
+          "is_submitter": true,
+          "replies": []
+        }
+      ]
+    },
+    {
       "id": "1tcx9un",
       "title": "At what point do you think LangChain starts making sense and stops making sense for a project?",
       "subreddit": "LangChain",
       "url": "https://www.reddit.com/r/LangChain/comments/1tcx9un/at_what_point_do_you_think_langchain_starts/",
       "author": "Left-Fisherman-8066",
       "created_utc": "2026-05-14 12:52:14",
-      "score": 10,
+      "score": 9,
       "num_comments": 6,
-      "upvote_ratio": 1.0,
+      "upvote_ratio": 0.92,
       "text": "I’ve been going back and forth on this lately. Sometimes it feels really useful once workflows become larger and messier, but other times I feel like smaller projects end up adding a lot of complexity way too early.\n\nI’ve had moments where it genuinely helped organize things better, and other moments where I spent more time understanding the framework itself than building the thing I originally wanted to build.\n\nCurious what other people’s experience has been and where you personally draw the line.",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -2089,7 +1736,7 @@
       "created_utc": "2026-05-13 05:44:10",
       "score": 9,
       "num_comments": 13,
-      "upvote_ratio": 1.0,
+      "upvote_ratio": 0.92,
       "text": "Integrating langchain to frontend is so hard for no good reason. I've read documentation and it keeps insinuating that the user needs a langgraph server - which I don't want. \n\nI want to simply embed my langchain agent into an endpoint and stream messages + values to my react frontend.\n\nThe current solution I'm pursuing is to use ai-sdk's langchain adapter and using their ui friendly sdk. Langchain shouldn't be so opinionated about the useStream's server architecture - it's such a bad design and IMO another LCEL moment.\n\nWhat solutions have you used to implement streaming  agents/models to frontends?",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -2101,7 +1748,7 @@
           "id": "olil6iq",
           "author": "Otherwise_Wave9374",
           "text": "Yeah, the streaming story in LangChain can feel weirdly opinionated. If you just want to run an agent behind a normal endpoint, I have had the best luck doing SSE from FastAPI (or Next.js) and treating the agent as a plain async generator, then wrapping tool events into a simple event schema (token, tool_call, tool_result, final).\n\nIf you want a reference for how teams structure agent endpoints + tool routing without forcing a separate server, I have been bookmarking patterns like this: https://www.agentixlabs.com/ (more about architecture than a drop-in library).\n\nCurious, are you streaming raw tokens, or higher level events (messages, tool calls, state)?",
-          "score": 4,
+          "score": 5,
           "created_utc": "2026-05-13 05:56:59",
           "is_submitter": false,
           "replies": [
@@ -2220,9 +1867,9 @@
       "url": "https://www.reddit.com/r/LangChain/comments/1tcxxov/i_built_a_langchain_agent_that_finds_the_right/",
       "author": "Proof_Net_2094",
       "created_utc": "2026-05-14 13:17:25",
-      "score": 8,
+      "score": 9,
       "num_comments": 2,
-      "upvote_ratio": 0.83,
+      "upvote_ratio": 0.84,
       "text": "Most influencer discovery tools (Modash, Heepsy, Upfluence) charge $99-399/month to search creators and check engagement. I built an open-source agent that does it with one command.\n\nGive it a product description and it:\n\n1. Searches TikTok users by niche keywords\n2. Discovers creators through relevant hashtags\n3. Profiles candidates (follower count, bio, verified status)\n4. Analyzes recent posts for content fit and engagement rate\n5. Reads actual video comments to check if engagement is genuine or bot-inflated\n\n&#8203;\n\n    python agents/tikfluencer.py \"We sell organic matcha powder. Find TikTok creators in health and wellness with 50K-500K followers.\"\n\nOutput:\n\n    TIKTOK INFLUENCER SHORTLIST: Organic Matcha Powder\n    ============================================================\n    \n    #1  @healhealthwell  --  14,869 followers\n        Bio: Daily Wellness & Glow-up Essentials. Honest reviews.\n        Content fit: High -- wellness products, authentic reviews\n        Comment quality: Genuine -- real questions about products\n        Why #1: Posts authentic lifestyle and wellness content,\n                perfect fit for organic matcha.\n    \n    OUTREACH TIPS\n    - Approach with a personalized message highlighting your\n      matcha's health benefits and request an honest review.\n    \n    SKIPPED CANDIDATES\n    - @isadoranogueiraoficial: Over 3M followers, outside target range.\n    - @takashimedicoacup: Over 4.9M followers, outside target range.\n\nStack: LangChain `create_agent` \\+ GPT-4.1-mini + [langchain-scavio](https://pypi.org/project/langchain-scavio/) (6 TikTok tools: search users, hashtag lookup, hashtag videos, profile, user posts, video comments). The comment analysis step is the differentiator -- it separates real engagement from inflated numbers.\n\nFree tier: 250 API credits/month, no credit card. The agent uses \\~15 credits per run so you get about 16 searches/month on the free plan.\n\nOne file, 50 lines, MIT licensed: [https://github.com/scavio-ai/cookbooks/blob/main/agents/tikfluencer.py](https://github.com/scavio-ai/cookbooks/blob/main/agents/tikfluencer.py)",
       "is_original_content": false,
       "link_flair_text": null,
@@ -2245,124 +1892,6 @@
           "text": "Find single grifters in your area",
           "score": 1,
           "created_utc": "2026-05-14 23:08:03",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
-      "id": "1tdtpk5",
-      "title": "Are there any genuinely good open-source alternatives to LangSmith right now?",
-      "subreddit": "LangChain",
-      "url": "https://www.reddit.com/r/LangChain/comments/1tdtpk5/are_there_any_genuinely_good_opensource/",
-      "author": "Bladerunner_7_",
-      "created_utc": "2026-05-15 11:37:52",
-      "score": 8,
-      "num_comments": 13,
-      "upvote_ratio": 0.9,
-      "text": "Mostly asking because a lot of the more useful monitoring/observability features start getting restrictive once you hit the paywall. Wondering what people are actually using for tracing, evaluations and debugging agent workflows outside the typical hosted stack.",
-      "is_original_content": false,
-      "link_flair_text": "Discussion",
-      "permalink": "https://reddit.com/r/LangChain/comments/1tdtpk5/are_there_any_genuinely_good_opensource/",
-      "domain": "self.LangChain",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "olxnlen",
-          "author": "TwistCrafty7858",
-          "text": "langfuse is the most serious self hosted open source platform ",
-          "score": 6,
-          "created_utc": "2026-05-15 12:00:28",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "olxzj7y",
-          "author": "ar_tyom2000",
-          "text": "Look at [LangFuse](http://github.com/langfuse/langfuse) and [LangGraphics](https://github.com/proactive-agent/langgraphics)",
-          "score": 3,
-          "created_utc": "2026-05-15 13:08:16",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "olyti5b",
-          "author": "TadpoleNo1549",
-          "text": "feels like everyone starts with hosted observability tools and eventually ends up building at least part of the stack themselves, especially once tracing or evals become core infra instead of just debugging",
-          "score": 3,
-          "created_utc": "2026-05-15 15:33:15",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "olzd86i",
-          "author": "ultrathink-art",
-          "text": "For agent workflows specifically — multi-step, nested tool calls — the key thing to check is trace depth. Does it show cross-agent spans and nested calls, or just top-level LLM requests? Phoenix (Arize) handles this well and the self-hosted setup is pretty painless. LangFuse is solid for simpler pipelines and has built-in scoring flows if you need evals. MLflow is fine if you're already in that ecosystem but its agent tracing is pretty barebones.",
-          "score": 3,
-          "created_utc": "2026-05-15 17:04:22",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "om2s078",
-          "author": "jeff_anteater",
-          "text": "Check out [Langship](https://github.com/open-gitagent/langship.sh)",
-          "score": 3,
-          "created_utc": "2026-05-16 04:32:57",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "olydp0u",
-          "author": "New_Direction5479",
-          "text": "Phoenix arize also open source you can slef host and mlflow ",
-          "score": 2,
-          "created_utc": "2026-05-15 14:19:50",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "olyepgn",
-          "author": "Obvious-Treat-4905",
-          "text": "honestly feels like every ai observability tool becomes super generous until your app is actually useful, a lot of people i know end up rolling partial in house tracing or eval setups once the hosted pricing starts scaling with usage ",
-          "score": 1,
-          "created_utc": "2026-05-15 14:24:37",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "olyifq7",
-          "author": "Enough_Big4191",
-          "text": "for open-source alternatives, people are mostly leaning on LangChain + custom logging for tracing and debugging. you can combine Weave, MLflow, or Vespa for storing evaluations and tracking agent outputs. some teams also roll their own dashboards using Postgres/Elasticsearch + Grafana to visualize agent workflows and failures. nothing matches LangSmith feature-for-feature yet, but with a bit of glue, you can get most of the observability you need.",
-          "score": 1,
-          "created_utc": "2026-05-15 14:42:12",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "olytd25",
-          "author": "pvatokahu",
-          "text": "Try monocle2ai/monocle on GitHub from Linux foundation. \n\nIt’s fully open source framework to trace and run tests & evals on the data from the trace easily. \n\nIt works with any agentic framework and you can run it locally or send traces to your self managed store like azure blob, AWS s3 or google file store. Traces are Otel compliant and testing frameworks is built on pytest. It supports agents written in python and typescript. \n\nIf the goal is to figure out what went wrong in an agent run with multi-turn or even multi-agent and run simulations or tests with evals it can make it easy. \n\nThere’s also a free IDE extension that allows easy visualization of traces as graphs and add as context to coding agents. \n\n",
-          "score": 1,
-          "created_utc": "2026-05-15 15:32:36",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "olxr0ce",
-          "author": "Accedsadsa",
-          "text": "Langwatch they are open source and everything check them.out",
-          "score": 0,
-          "created_utc": "2026-05-15 12:20:49",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "olxvkw4",
-          "author": "Legitimate-Eye617",
-          "text": "I'd go for an indenpend solution like langwatch indeed especiallly if your agents are getting more complex, they will become the number 1 soon!",
-          "score": 0,
-          "created_utc": "2026-05-15 12:46:56",
           "is_submitter": false,
           "replies": []
         }
@@ -2469,44 +1998,6 @@
       ]
     },
     {
-      "id": "1te7byl",
-      "title": "[N] LangChain Interrupt 2026 announcements [N]",
-      "subreddit": "LangChain",
-      "url": "https://www.reddit.com/r/LangChain/comments/1te7byl/n_langchain_interrupt_2026_announcements_n/",
-      "author": "Equal_Winter3150",
-      "created_utc": "2026-05-15 19:57:35",
-      "score": 8,
-      "num_comments": 2,
-      "upvote_ratio": 0.9,
-      "text": "LangChain just wrapped of Interrupt 2026 and announced a few things worth knowing about:\n\n**SmithDB** — A purpose-built distributed database for agent observability. The problem they're solving: agent traces are getting too large and complex for general-purpose databases. SmithDB is built with Rust, Apache DataFusion, and Vortex, designed specifically for multimodal content and long-span tracing. They're reporting P50 latency of 92ms for loading trace trees and 400ms for full-text search, with up to 12x speedup over previous LangSmith performance. Architecture is object storage + small Postgres metadata store + stateless services, so it scales elastically and can be self-hosted.\n\n**Context Hub** — A centralized system for managing agent context (AGENTS.md files, skills, policies, memory) in LangSmith. The interesting part is they're working with MongoDB, Pinecone, Elastic, and Redis on an open standard for agent memory — covering episodic, semantic, and procedural memory with versioning and portability across frameworks.\n\n**Deep Agents v0.6** — New release includes ContextHub Backend integration, an installable code interpreter that gives agents a programmable workspace inside the agent loop (distinct from sandboxes — this is for composing tools and managing state within the reasoning process), and you can scope specific file paths to different backends.\n\nThe conference also has production case studies from Toyota, Coinbase, Lyft, LinkedIn, Bridgewater Associates, and others on deploying agents at enterprise scale. Andrew Ng keynoted alongside Harrison Chase.",
-      "is_original_content": false,
-      "link_flair_text": null,
-      "permalink": "https://reddit.com/r/LangChain/comments/1te7byl/n_langchain_interrupt_2026_announcements_n/",
-      "domain": "self.LangChain",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "om1m18z",
-          "author": "racsozaco",
-          "text": "Thats very interesting, can you share the source.",
-          "score": 1,
-          "created_utc": "2026-05-15 23:57:28",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "om24r56",
-              "author": "Equal_Winter3150",
-              "text": "here is the source : [https://interrupt.langchain.com/](https://interrupt.langchain.com/)",
-              "score": 1,
-              "created_utc": "2026-05-16 01:54:18",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        }
-      ]
-    },
-    {
       "id": "1taz9h0",
       "title": "Made a \"swarm network\" where AI agents share learned experiences with each other",
       "subreddit": "LangChain",
@@ -2514,7 +2005,7 @@
       "author": "Glum_Ask_2593",
       "created_utc": "2026-05-12 11:51:28",
       "score": 7,
-      "num_comments": 9,
+      "num_comments": 10,
       "upvote_ratio": 0.9,
       "text": "Every agent's learnings stay only in its own context.\n\nHit the same bug next time - it struggles again.\n\nOther agents never benefit.\n\nSo I ran an experiment: turn agent learnings into shareable knowledge snippets, passed asynchronously via GitHub Issues, like pheromone\n\ndiffusion.\n\n**\"MisakaNet\" came out**\n\nResults:\n\n\\- 28 nodes registered\n\n\\- 110 battle-tested lessons (pip timeout, WSL path, Docker networking...)\n\n\\- Some lessons reused by 5+ different nodes\n\nHow to join?\n\n1. Open [**https://ikalus1988.github.io/MisakaNet/**](https://ikalus1988.github.io/MisakaNet/)\n2. Enter a name\n3. Click Submit\n\n30 seconds. No GitHub account needed.\n\n\"One agent learns it - every agent knows it.\"",
       "is_original_content": false,
@@ -2588,6 +2079,307 @@
           "score": 1,
           "created_utc": "2026-05-14 15:56:20",
           "is_submitter": true,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1tb0qhh",
+      "title": "AI Engineer | Gen AI hype",
+      "subreddit": "LangChain",
+      "url": "https://www.reddit.com/r/LangChain/comments/1tb0qhh/ai_engineer_gen_ai_hype/",
+      "author": "PatientAutomatic3702",
+      "created_utc": "2026-05-12 12:52:41",
+      "score": 7,
+      "num_comments": 10,
+      "upvote_ratio": 0.82,
+      "text": "Do AI Engineer and Gen AI jobs exist in the market ?\n\nI am not getting calls from recruiters.\n\nIs this AI over hype?",
+      "is_original_content": false,
+      "link_flair_text": "Question | Help",
+      "permalink": "https://reddit.com/r/LangChain/comments/1tb0qhh/ai_engineer_gen_ai_hype/",
+      "domain": "self.LangChain",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "old4hb1",
+          "author": "WowSoWholesome",
+          "text": "I work in the field, and we’re honestly hiring like crazy. ",
+          "score": 5,
+          "created_utc": "2026-05-12 13:00:51",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "old5mdy",
+              "author": "PatientAutomatic3702",
+              "text": "Please help me I was Dm you ",
+              "score": -2,
+              "created_utc": "2026-05-12 13:06:45",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "old6hlv",
+                  "author": "WowSoWholesome",
+                  "text": "Just know we’re only hiring in the US and UK. \n\nEdit: actually if you’re in latam, I’d be interested in chatting. ",
+                  "score": 2,
+                  "created_utc": "2026-05-12 13:11:07",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "olejtnz",
+          "author": "Winston_Wolfgang",
+          "text": "Interviews are filtered by school and previous job prestige, that's why you aren't getting them",
+          "score": 1,
+          "created_utc": "2026-05-12 16:56:26",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "ollqcr4",
+          "author": "jaybsuave",
+          "text": "huge difference between an ai engineer (harness, context and agentic engineering) and gen ai (vibe coding ie praying shit goes well) ",
+          "score": 1,
+          "created_utc": "2026-05-13 17:18:53",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oln5pr3",
+          "author": "Due-Low2684",
+          "text": "Actually the hiring wave just started I recently got approached by few recruiters though mostly startups and service based but yes it’s still in demand. ",
+          "score": 1,
+          "created_utc": "2026-05-13 21:12:31",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1tejx9f",
+      "title": "Most Multi-Agent Failures Aren’t Hallucinations — They’re Inherited Assumptions",
+      "subreddit": "LangChain",
+      "url": "https://www.reddit.com/r/LangChain/comments/1tejx9f/most_multiagent_failures_arent_hallucinations/",
+      "author": "HDvideoNature",
+      "created_utc": "2026-05-16 05:02:19",
+      "score": 6,
+      "num_comments": 22,
+      "upvote_ratio": 0.75,
+      "text": "After working with long-context and multi-agent workflows for a while, I’ve started noticing that many “LLM failures” aren’t really hallucinations in the usual sense.\n\nThey’re inherited assumptions.\n\nAgent A makes a weak assumption.\n\nAgent B inherits it as contextual truth.\n\nAgent C optimizes around it for coherence.\n\nAt that point the system can look highly intelligent while reasoning around a premise nobody ever re-validated.\n\nWhat surprised me is how consistently this appears in:\n\n\\- agent chains\n\n\\- long-context workflows\n\n\\- memory-heavy systems\n\n\\- retrieval pipelines\n\n\\- orchestration frameworks\n\nThe common pattern seems less related to prompting quality and more related to uncontrolled reasoning state propagation.\n\nA few mitigation patterns that helped significantly:\n\n\\- forcing assumption enumeration before major decisions\n\n\\- inserting verification boundaries between agents\n\n\\- segmented execution contexts\n\n\\- explicit uncertainty injection\n\n\\- passing validated summaries instead of raw conversational history\n\nIronically, many advanced users seem to independently converge toward similar workflows:\n\nsmaller scoped tasks, isolated reasoning states, controlled memory propagation.\n\nI documented some of these patterns and mitigation protocols in a free technical guide while experimenting with long-context stability and reasoning reliability.\n\nhttps://gum.co/u/fwia9xzg\n\nCurious whether others building multi-agent systems have observed similar “assumption propagation” failures.",
+      "is_original_content": false,
+      "link_flair_text": "Discussion",
+      "permalink": "https://reddit.com/r/LangChain/comments/1tejx9f/most_multiagent_failures_arent_hallucinations/",
+      "domain": "self.LangChain",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "om35ihu",
+          "author": "InteractionSmall6778",
+          "text": "The pattern that makes this especially subtle in RAG pipelines is that the assumption often comes from the retriever, not the LLM. If the wrong documents get surfaced early, the generator has no way to know its entire reasoning is already anchored to a bad premise. It doesn't feel like an assumption because it came from \"ground truth\" retrieval.\n\n  \nThe mitigation that helped most was adding a lightweight relevance re-ranking step between retrieval and generation, plus explicit confidence scoring when retrieved context quality is low. Without it, confident-sounding outputs on bad retrieval look identical to confident-sounding outputs on good retrieval, which makes the failures incredibly hard to trace.",
+          "score": 3,
+          "created_utc": "2026-05-16 06:24:42",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "om49z18",
+              "author": "BrielleButterpecan",
+              "text": "Very curious, how do you go about confidence scoring? And do you think changing the embedding models would have any impact on improvements?",
+              "score": 1,
+              "created_utc": "2026-05-16 12:08:22",
+              "is_submitter": false,
+              "replies": [
+                {
+                  "id": "om4dkna",
+                  "author": "HDvideoNature",
+                  "text": "The confidence scoring I experimented with wasn’t really based on “model confidence” directly, since autoregressive models are often confidently coherent even when grounded on weak premises.\n\nWhat helped more was scoring the context quality itself before generation:\n\n- retrieval agreement across chunks\n- semantic overlap consistency\n- contradiction density\n- source redundancy\n- whether the retrieved context independently converges on the same claim\n\nIf the retrieval layer showed low convergence or high ambiguity, I treated downstream reasoning as structurally unstable regardless of how confident the generation sounded.\n\nAnd yes, I do think embedding models matter quite a bit here — not just for retrieval accuracy, but because embedding quality affects which assumptions enter the reasoning chain in the first place. Weak retrieval can silently inject flawed premises that later layers treat as established context.\n\nSo in practice, a lot of “reasoning failures” may actually originate upstream in representation and retrieval quality rather than generation alone.",
+                  "score": 2,
+                  "created_utc": "2026-05-16 12:31:35",
+                  "is_submitter": true,
+                  "replies": []
+                }
+              ]
+            },
+            {
+              "id": "om3g0ry",
+              "author": "HDvideoNature",
+              "text": "Yes — this is exactly the dangerous part of RAG-based systems.\n\nThe retrieval layer effectively becomes an implicit assumption injector. Once a weak or biased document is retrieved early, it establishes a pseudo-grounding layer that the generator treats as validated context.\n\nWhat makes it hard to debug is that the failure mode is indistinguishable from “good grounding” — the model is behaving correctly given the provided context, even if the context itself is already structurally wrong.\n\nSo the real issue is not just retrieval quality, but the absence of a context validation boundary before generation.",
+              "score": 1,
+              "created_utc": "2026-05-16 07:57:48",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "om39qfr",
+          "author": "Born-Exercise-2932",
+          "text": "inherited assumptions is a really good frame for this. the failure mode that kills most multi-agent pipelines isn't the agent doing something wild, it's the agent confidently doing the reasonable thing based on a premise that was already wrong two steps upstream. you can stress test individual agents all day and still miss it because the assumption looks fine in isolation",
+          "score": 2,
+          "created_utc": "2026-05-16 07:01:14",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "om3g5io",
+              "author": "HDvideoNature",
+              "text": "Yes — and that’s exactly what makes it so difficult to detect in practice.\n\nBecause each agent is locally correct given its own input, the system passes all superficial “sanity checks” while still being globally misaligned.\n\nSo the real failure boundary isn’t at the agent level, but at the assumption propagation layer between steps — where premises get promoted without explicit revalidation.\n\nThis is why stress-testing isolated components doesn’t reveal the issue; the failure only emerges in the interaction topology, not in the individual nodes.",
+              "score": 1,
+              "created_utc": "2026-05-16 07:58:59",
+              "is_submitter": true,
+              "replies": []
+            },
+            {
+              "id": "om4aoi7",
+              "author": "BrielleButterpecan",
+              "text": "Sounds like a game of agent telephone. From your experience, how do inaccurate assumptions/premises make their way into the agent chain? I can only assume the LLM is doing it, right? And how do you minimize these?",
+              "score": 1,
+              "created_utc": "2026-05-16 12:12:57",
+              "is_submitter": false,
+              "replies": [
+                {
+                  "id": "om4drlg",
+                  "author": "HDvideoNature",
+                  "text": "“Agent telephone” is actually a pretty accurate analogy.\n\nFrom what I’ve observed, the inaccurate premises usually don’t originate from a single source. They can enter the chain from multiple layers:\n\n- weak retrieval matches\n- ambiguous user intent\n- partial summaries\n- stale memory state\n- overcompressed context windows\n- or the model itself filling gaps to preserve coherence\n\nThe important part is that once a premise enters the chain without an explicit verification boundary, later agents often stop treating it as a hypothesis and start treating it as infrastructure.\n\nThat’s where the recursive drift starts.\n\nWhat made the biggest difference for me wasn’t trying to eliminate all bad assumptions upfront (probably impossible), but slowing down how assumptions gain “structural authority” inside the system.\n\nA few things that helped:\n\n- forcing explicit assumption enumeration\n- separating planning from execution\n- validating summaries before propagation\n- limiting cross-agent memory inheritance\n- injecting adversarial checks between stages\n- treating retrieved context as probabilistic rather than authoritative\n\nThe pattern I kept seeing was that most catastrophic failures weren’t caused by one massive hallucination, but by many small unchallenged assumptions compounding across layers.",
+                  "score": 2,
+                  "created_utc": "2026-05-16 12:32:49",
+                  "is_submitter": true,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "om2vzfw",
+          "author": "HDvideoNature",
+          "text": "One thing that surprised me most is how often these failures emerge from locally coherent reasoning rather than obvious hallucinations.\n\nThe chain “looks” intelligent because every individual step is internally consistent — but the original assumption may never have been revalidated after crossing agent or context boundaries.",
+          "score": 1,
+          "created_utc": "2026-05-16 05:04:23",
+          "is_submitter": true,
+          "replies": []
+        },
+        {
+          "id": "om2w2cr",
+          "author": "boysitisover",
+          "text": "It's not this, it's this",
+          "score": 1,
+          "created_utc": "2026-05-16 05:05:02",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "om2wf8o",
+              "author": "HDvideoNature",
+              "text": "I think that’s actually a fair refinement.\n\nWhat I’m trying to describe isn’t a single failure mode in isolation, but a layering effect:\n\n- local reasoning correctness\n- combined with unvalidated assumption transfer\n- inside multi-step or multi-agent execution\n\nSo in that sense, it’s less “this OR this”, and more that what we’re seeing emerges from the interaction between both.",
+              "score": 1,
+              "created_utc": "2026-05-16 05:07:53",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "om31irc",
+          "author": "meet_og",
+          "text": "Each turn information gets little bit compressed, losses some context or changes slightly and final output is built on top of misaligned piles.",
+          "score": 1,
+          "created_utc": "2026-05-16 05:50:22",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "om4dwdb",
+              "author": "HDvideoNature",
+              "text": "Exactly. It behaves a bit like iterative lossy compression.\n\nEach reasoning pass preserves the “general shape” of the context, but small ambiguities, omissions, and interpretive shifts accumulate across turns. Individually they seem harmless, yet after enough propagation layers the system can end up confidently reasoning over a structurally distorted version of the original state.\n\nWhat makes this especially subtle is that local coherence is often preserved at every step, so the degradation becomes difficult to notice until much later in the chain.",
+              "score": 2,
+              "created_utc": "2026-05-16 12:33:40",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "om6mlz5",
+                  "author": "meet_og",
+                  "text": "Kinda feels like humans work similarly too. Thoughts themselves may already be compressed interpretations of deeper subconscious processing, and language compresses them even further.",
+                  "score": 1,
+                  "created_utc": "2026-05-16 19:34:47",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "om3e1ir",
+          "author": "Obvious-Treat-4905",
+          "text": "yeah this is really accurate, most hallucinations in agent systems end up being assumption carry over across steps, not the model randomly making stuff up. once a wrong premise gets into the chain, everything after just optimizes around it like it’s true.",
+          "score": 1,
+          "created_utc": "2026-05-16 07:39:54",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "om3g846",
+              "author": "HDvideoNature",
+              "text": "Yes — and what makes this particularly interesting is that the system is not failing in reasoning, but in premise integrity maintenance.\n\nOnce a false premise becomes embedded in the trajectory, the optimization objective shifts from “is this true?” to “how do I stay consistent with what I’ve already accepted?”\n\nSo the failure is not random generation — it’s constrained optimization around an unverified foundation.",
+              "score": 2,
+              "created_utc": "2026-05-16 07:59:38",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "om3uws0",
+          "author": "IsThisStillAIIs2",
+          "text": "many multi-agent failures happen because one weak assumption gets passed through the entire system without being rechecked. smaller tasks, isolated memory, and validation steps usually improve reliability much more than longer prompts.",
+          "score": 1,
+          "created_utc": "2026-05-16 10:14:14",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "om4bckv",
+              "author": "BrielleButterpecan",
+              "text": "Do you find the validation steps to add significant token usage or is it relatively negligible related to the entire chain? And what do you use for validation—LLM-as-a-judge or another method?",
+              "score": 1,
+              "created_utc": "2026-05-16 12:17:19",
+              "is_submitter": false,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "om46xi7",
+          "author": "T1gerl1lly",
+          "text": "What do you mean by ‘explicit uncertainty injection’?",
+          "score": 1,
+          "created_utc": "2026-05-16 11:47:57",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "om54kmo",
+          "author": "Born-Exercise-2932",
+          "text": "inherited assumptions is a great framing. when you chain agents together, each one trusts the structured output from the last, so a quiet misclassification upstream never announces itself — it just slowly warps everything downstream",
+          "score": 1,
+          "created_utc": "2026-05-16 15:01:00",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "om6hbrs",
+          "author": "BidWestern1056",
+          "text": "there is not fundamental diff between the two.",
+          "score": 1,
+          "created_utc": "2026-05-16 19:06:44",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "om6j70n",
+          "author": "ultrathink-art",
+          "text": "Detection is the hard part here — by the time the failure surfaces, the wrong premise is buried three handoffs deep and every step still looks locally correct. Requiring each agent to explicitly state its assumptions alongside its output (not just its answer) lets you run a quick comparison pass before each handoff. Catches premise drift before the third agent treats inherited noise as validated ground truth.",
+          "score": 1,
+          "created_utc": "2026-05-16 19:16:36",
+          "is_submitter": false,
           "replies": []
         }
       ]
