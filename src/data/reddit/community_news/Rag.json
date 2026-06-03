@@ -1,11 +1,11 @@
 {
   "metadata": {
-    "last_updated": "2026-06-03 05:10:01",
+    "last_updated": "2026-06-03 12:59:59",
     "time_filter": "week",
     "subreddit": "Rag",
     "total_items": 20,
-    "total_comments": 145,
-    "file_size_bytes": 224748
+    "total_comments": 141,
+    "file_size_bytes": 221380
   },
   "items": [
     {
@@ -15,9 +15,9 @@
       "url": "https://www.reddit.com/r/Rag/comments/1ttdh20/i_mapped_out_the_4_fundamentally_different/",
       "author": "Equivalent_Pen8241",
       "created_utc": "2026-06-01 01:21:39",
-      "score": 100,
+      "score": 102,
       "num_comments": 29,
-      "upvote_ratio": 0.92,
+      "upvote_ratio": 0.93,
       "text": "I've been deep in retrieval-augmented generation for a while now, and one thing that bugs me is how the community treats \"RAG\" like it's a single thing. It's not. There are at least four architecturally distinct paradigms, and they fail in completely different ways. I wrote a detailed technical comparison, but here's the core of it:\n\n---\n\n### 1. Vector RAG (the one everyone uses)\n\nEmbed chunks → index in a vector DB → cosine similarity → top-K → stuff into prompt.\n\n**Where it works:** FAQ bots, documentation search, simple Q&A. Anything where documents are self-contained.\n\n**Where it breaks:** The moment your answer requires connecting facts across documents. Ask \"If we change the auth token format, what customer-facing features break?\" and Vector RAG returns 5 chunks that each mention \"auth\" from 5 unrelated contexts. It has zero concept of relationships because the data structure — a flat vector space — has no edges.\n\nAlso: needle-in-a-haystack failures. A rare but critical fact buried in one chunk among 100K gets outranked by more \"semantically popular\" but less accurate chunks.\n\n---\n\n### 2. Graph RAG (Microsoft's approach)\n\nExtract entities and relationships with an LLM → build a knowledge graph → detect communities via Leiden clustering → query with local search (traverse neighborhood) or global search (community summaries).\n\n**Where it works:** Investigative research. Multi-hop reasoning like \"How is Person A connected to Event C through Company B?\" Graph traversal handles this natively.\n\n**Where it breaks at scale:** A knowledge graph is fundamentally flat. Every entity lives at the same level. At 10M nodes with avg 20 edges per node, a 5-hop traversal visits 3.2 million intermediate nodes. The combinatorial explosion is real:\n\n| Nodes | Avg edges | 5-hop frontier |\n|-------|-----------|----------------|\n| 1K | 5 | 3,125 |\n| 100K | 12 | 248,832 |\n| 10M | 20 | 3,200,000 |\n\nCommunity summaries help for global queries but they're static — they can't answer \"What's the shortest path from A to Z through this cluster?\"\n\nAlso expensive to build. Processing 100K documents through an LLM for entity extraction can cost thousands of dollars and take days.\n\n---\n\n### 3. Topology RAG (hierarchical structural maps)\n\nThis is the one I find most interesting architecturally. Instead of embedding chunks or extracting entity graphs, you build a **topology** — a multi-layered, hierarchical map of the knowledge space.\n\nEvery element is classified into dimensional layers (for code: Components → Blocks → Functions → Data → Access → Events). Edges are typed (`calls`, `uses`, `triggers`, `depends-on`). Queries are resolved by *structural traversal*, not similarity search.\n\n**The key insight — the Wormhole Effect:**\n\nA topology isn't flat. It has abstraction layers. Instead of traversing through every intermediate node at the function level (like a flat graph), you can:\n\n1. **Ascend** from a function to its parent Component\n2. **Traverse** at the Component level (hundreds of nodes, not millions)\n3. **Descend** to the target function\n\nHere's the difference:\n\n    Flat graph traversal (Graph RAG):\n      validateTkn → refreshTkn → sessionCheck → userLookup → \n      permissionVerify → apiGateway → routeMatch → chargeInit → \n      processCharge\n      (9 hops, 117,800 nodes visited)\n\n    Topology traversal:\n      validateTkn → [ascend] → AuthSystem → [component edge] → \n      PaymentPlatform → [descend] → processCharge\n      (3 hops, ~50 nodes visited)\n\nSame query. \\~117,800 nodes vs \\~50 nodes. That's not optimization, that's a different computational complexity class entirely: O(b^H) for flat graphs vs O(L × b\\_level) for topologies.\n\n**Where it breaks:** Cold start (topology must be built first), and if your query is genuinely \"find me documents similar to this paragraph,\" topology traversal is the wrong tool. It's structural, not semantic.\n\n---\n\n### 4. TurboQuant RAG (quantized vector search)\n\nBased on Google Research's [TurboQuant algorithm](https://arxiv.org/abs/2504.19874). Doesn't change *what* gets indexed (still embeddings), but radically improves *how* vectors are stored and searched.\n\n- **8x memory reduction**: 10M 1536-dim vectors: 31 GB (float32) → \\~4 GB (4-bit quantized)\n- **Faster than FAISS**: hand-written SIMD kernels (NEON for ARM, AVX-512BW for x86) beat FAISS IndexPQFastScan by 12-20%\n- **No train phase**: vectors are immediately searchable, unlike PQ which needs a training step\n- **Kernel-level filtering**: pass an allowlist into the SIMD loop — hybrid retrieval without over-fetching\n\n[TurboVec](https://github.com/RyanCodrai/turbovec) is the open-source implementation. Drop-in replacements for LangChain, LlamaIndex, Haystack, Agno.\n\n**Where it breaks:** Still Vector RAG at its core. All the fundamental limitations (no relationships, no multi-hop, no structural understanding) still apply. It's a faster engine in the same car.\n\n---\n\n### The complementary stack\n\nThe insight I keep coming back to: these aren't competing approaches. They're layers.\n\n    [APPLICATION]  LLM receives grounded, multi-source context\n    [TOPOLOGY]     Structural retrieval — dependencies, events, components\n    [GRAPH]        Entity relationships — people, orgs, causal chains  \n    [VECTOR]       Semantic similarity — fast, compressed, filtered\n\nUse TurboVec at the bottom for the heavy lifting. Graph RAG in the middle for entity relationships. Topology at the top for structural architecture. The LLM gets context that's semantically relevant AND relationally connected AND structurally grounded.\n\n---\n\n### Links\n\n- **Full blog post with comparison tables and the multi-hop deep dive:** [https://fastbuilder.ai/blog/four-paradigms-of-rag](https://fastbuilder.ai/blog/four-paradigms-of-rag)\n- **FastMemory (open-source topology engine, MIT):** [https://github.com/FastBuilderAI/memory](https://github.com/FastBuilderAI/memory)\n- **TurboVec (open-source quantized search):** [https://github.com/RyanCodrai/turbovec](https://github.com/RyanCodrai/turbovec)\n- **Microsoft GraphRAG:** [https://github.com/microsoft/graphrag](https://github.com/microsoft/graphrag)\n- **TurboQuant paper (Google Research):** [https://arxiv.org/abs/2504.19874](https://arxiv.org/abs/2504.19874)\n\nHappy to discuss tradeoffs, implementation details, or benchmarks. We ran FastMemory against 13 major RAG benchmarks and the results are on [HuggingFace](https://huggingface.co/datasets/fastbuilderai/fastmemory-supremacy-benchmarks).\n",
       "is_original_content": false,
       "link_flair_text": "Showcase",
@@ -29,7 +29,7 @@
           "id": "op1ud9l",
           "author": "334578theo",
           "text": "What about Hybrid - Vector + BM25/FTS + RRF? \n\nThats what the majority of teams end up on once they realise that Vector alone sucks, and the other 3 are too complex.",
-          "score": 8,
+          "score": 9,
           "created_utc": "2026-06-01 01:50:39",
           "is_submitter": false,
           "replies": [
@@ -45,7 +45,7 @@
                   "id": "op22nhe",
                   "author": "Dense_Gate_5193",
                   "text": "well if you’re looking for a database that is designed for AI memory and is researched backed by multiple institutions, check out NornicDB. i am the author. [https://github.com/orneryd/NornicDB](https://github.com/orneryd/NornicDB) 754 stars and counting. MIT Licensed",
-                  "score": 4,
+                  "score": 3,
                   "created_utc": "2026-06-01 02:42:51",
                   "is_submitter": false,
                   "replies": []
@@ -61,20 +61,20 @@
               "is_submitter": false,
               "replies": [
                 {
+                  "id": "opemzvj",
+                  "author": "334578theo",
+                  "text": "I’ve been running a RAG system for the last 2.5 years that’s used by millions on a federal government website. If was I starting over again I would start with query classification (extract keywords and remove stop words) and BM25/FTS until you find out what you gaps are. It’s deterministic and easy to evaluate.\n\nSemantic search is non-deterministic and has weird nuances like capitalisation producing different results - end users do weird things you don’t expect. It’s also unreliable for exact match phrases like form/document IDs like ABC123 when you have a whole load of forms like ABC124, ABC125.",
+                  "score": 2,
+                  "created_utc": "2026-06-02 22:28:28",
+                  "is_submitter": false,
+                  "replies": []
+                },
+                {
                   "id": "opbzpau",
                   "author": "qalc",
                   "text": "you just chunk and embed and then set up bm25 retrieval alongside the standard semantic retrieval, after which you fuse both sets of results with RRF. claude/codex can walk you through it. pretty straightforward and ive gotten good results, much better than pure semantic search. and like 334578theo says, way less complicated than what OP is discussing. IMO all that is overkill for 99% of use cases where you're just trying to give your agent context from a reasonably sized knowledge base; sort of analogous to adopting a microservices architecture at your 50 person startup. ",
                   "score": 1,
                   "created_utc": "2026-06-02 15:16:12",
-                  "is_submitter": false,
-                  "replies": []
-                },
-                {
-                  "id": "opemzvj",
-                  "author": "334578theo",
-                  "text": "I’ve been running a RAG system for the last 2.5 years that’s used by millions on a federal government website. If was I starting over again I would start with query classification (extract keywords and remove stop words) and BM25/FTS until you find out what you gaps are. It’s deterministic and easy to evaluate.\n\nSemantic search is non-deterministic and has weird nuances like capitalisation producing different results - end users do weird things you don’t expect. It’s also unreliable for exact match phrases like form/document IDs like ABC123 when you have a whole load of forms like ABC124, ABC125.",
-                  "score": 1,
-                  "created_utc": "2026-06-02 22:28:28",
                   "is_submitter": false,
                   "replies": []
                 }
@@ -111,7 +111,7 @@
                   "id": "op21227",
                   "author": "Dense_Gate_5193",
                   "text": "everyone needs cash to scale. but adoption requires trust which requires transparency, large companies won’t even look at new things with arbitrary license clauses. because of AI, anyone can rewrite what you wrote in their own preferred language. i think only one license will remain and that’s MIT. everything else is arbitrary BS that literally already has an easy workaround to just re-implement whatever they want to pearl-clutch. if you want to retain IP over your ideas, you need to remain closed source. but the problem with that is trust has to be built and that’s hard to do without a ton of cash and demos to throw at marketing.\n\nedit: typos",
-                  "score": 5,
+                  "score": 6,
                   "created_utc": "2026-06-01 02:32:42",
                   "is_submitter": false,
                   "replies": []
@@ -270,7 +270,7 @@
       "url": "https://www.reddit.com/r/Rag/comments/1tqcxb3/i_made_an_epstein_files_rag/",
       "author": "Prestigious_Bear5424",
       "created_utc": "2026-05-28 19:00:35",
-      "score": 70,
+      "score": 72,
       "num_comments": 19,
       "upvote_ratio": 0.97,
       "text": "A lot of people talk about the Epstein files.\n\nAlmost nobody actually reads them.\n\nSo I made a searchable version where you can just ask questions naturally instead of digging through thousands of pages manually.\n\nYou can explore names, timelines, mentions, connections, locations, etc. way faster now.\n\nRepo: https://github.com/AbhisumatK/Epstein\\_Files\\_RAG",
@@ -284,7 +284,7 @@
           "id": "ooffggs",
           "author": "theelevators13",
           "text": "Now this is a good use of AI.. starred!!! ",
-          "score": 10,
+          "score": 12,
           "created_utc": "2026-05-28 19:07:47",
           "is_submitter": false,
           "replies": [
@@ -292,7 +292,7 @@
               "id": "oofgh86",
               "author": "Prestigious_Bear5424",
               "text": "Thanks bro 😆",
-              "score": 4,
+              "score": 3,
               "created_utc": "2026-05-28 19:12:20",
               "is_submitter": true,
               "replies": [
@@ -431,7 +431,7 @@
       "url": "https://www.reddit.com/r/Rag/comments/1tqby53/book_announcement_handson_rag_for_production/",
       "author": "ofermend",
       "created_utc": "2026-05-28 18:25:49",
-      "score": 56,
+      "score": 55,
       "num_comments": 20,
       "upvote_ratio": 0.95,
       "text": "After many months of writing, editing, and trying to turn hard-won RAG lessons into something useful, I’m excited to share that our book, \"Hands-On RAG for Production\", is now live on O’Reilly.  \n  \n[https://learning.oreilly.com/library/view/hands-on-rag-for/9798341621701/](https://learning.oreilly.com/library/view/hands-on-rag-for/9798341621701/)  \n[https://www.amazon.com/Hands-RAG-Production-Production-Ready-Applications-ebook/dp/B0H34XLNYJ/](https://www.amazon.com/Hands-RAG-Production-Production-Ready-Applications-ebook/dp/B0H34XLNYJ/)\n\n[](https://learning.oreilly.com/library/view/hands-on-rag-for/9798341621701/)  \nI hope this can be helpful for folks here building RAG.  \n",
@@ -483,7 +483,7 @@
           "id": "ooh0ebc",
           "author": "Ok-Clue2532",
           "text": "So is it possible RAG to has zero hallucination with 100% accuracy?",
-          "score": 3,
+          "score": 4,
           "created_utc": "2026-05-28 23:45:32",
           "is_submitter": false,
           "replies": [
@@ -584,7 +584,7 @@
       "url": "https://www.reddit.com/r/Rag/comments/1tpebrh/i_benchmarked_postgres_bm25_pgvector_on/",
       "author": "CountlessFlies",
       "created_utc": "2026-05-27 18:32:32",
-      "score": 38,
+      "score": 37,
       "num_comments": 13,
       "upvote_ratio": 0.97,
       "text": "[EnterpriseRAG-Bench](https://github.com/onyx-dot-app/EnterpriseRAG-Bench) is a benchmark of 500k+ synthetic documents that tests how well RAG systems can find the source and answer questions across company-internal data (e.g., Drive, Gmail, Slack etc). It's been discussed here earlier: [https://www.reddit.com/r/Rag/comments/1t5cgd6/an\\_open\\_benchmark\\_for\\_testing\\_rag\\_on\\_realistic/](https://www.reddit.com/r/Rag/comments/1t5cgd6/an_open_benchmark_for_testing_rag_on_realistic/) (Thanks to the [Onyx](https://onyx.app/enterpriserag-bench) team for this benchmark!)\n\nNow I've been building Omni ([https://github.com/getomnico/omni](https://github.com/getomnico/omni)), an agent platform for work, and it uses Postgres as the only storage and search system. So I decided to benchmark it to see how well a Postgres-only stack will hold up against other systems that use a variety of text and vector search systems.\n\nThe results are quite promising, Omni's agentic RAG system scored 68.07 - landing quite close to OpenClaw at 68.22 and Onyx at 72.4 on the leaderboard.\n\nThe setup:\n\n* 511k documents, loaded into Postgres\n* BM25 index (via [ParadeDB](https://github.com/paradedb/paradedb))\n* pgvector HNSW index, \\~2M vectors, 1024-dim\n* Embedding model: BAAI/bge-large-en-v1.5\n* Agent model: DeepSeek v4 Pro\n\nThe agentic search loop gives the model 3 main tools: search, read and submit\\_answer; allowing the model to, well, search the index (hybrid search with reciprocal rank fusion), read any document, and submit the final answer.\n\nI hope to show that you can get a solid RAG system going using Postgres alone, and that you might not need to reach for the more sophisticated vector databases for most use-cases.\n\nLet me know what you think, and please drop a star if you find the project interesting, thanks!\n\nBlog post with more details: [https://getomni.co/blog/omni-enterprise-rag-bench](https://getomni.co/blog/omni-enterprise-rag-bench)\n\nGitHub: [https://github.com/getomnico/omni](https://github.com/getomnico/omni)\n\nBenchmark artifacts:  [https://huggingface.co/datasets/getomnico/omni-enterprise-rag-bench](https://huggingface.co/datasets/getomnico/omni-enterprise-rag-bench)\n\n",
@@ -598,7 +598,7 @@
           "id": "oo8nptm",
           "author": "McNiiby",
           "text": "Postgress + PGvector is great when you have a sensible amount of vectors, but the memory usage scales poorly. Although I'd imagine for most setups it is perfectly adequate. You'll learn quickly whether it isn't for your use case anyways.",
-          "score": 5,
+          "score": 6,
           "created_utc": "2026-05-27 20:11:03",
           "is_submitter": false,
           "replies": [
@@ -727,9 +727,9 @@
       "url": "https://www.reddit.com/r/Rag/comments/1ttbavs/whats_currently_considered_the_best_pdfdocument/",
       "author": "ComparisonLiving6793",
       "created_utc": "2026-05-31 23:45:04",
-      "score": 30,
-      "num_comments": 44,
-      "upvote_ratio": 1.0,
+      "score": 31,
+      "num_comments": 45,
+      "upvote_ratio": 0.96,
       "text": "I'm evaluating tools like Docling, MarkItDown, Marker, Unstructured, LlamaParse, Google Document AI, AWS Textract, and Azure Document Intelligence.\n\nMy goal is to extract high-quality text, tables, images, and document structure from PDFs and Office documents for use with LLMs/RAG systems.\n\n**This is for a small business that is incorporating a lot of LLM's into our operations and workflow.**\n\nFor those who've used multiple options:\n\n* Which gives the best extraction quality?\n* Which handles complex PDFs, tables, and scanned documents best?\n* Are paid tools like LlamaParse or Document AI noticeably better than open-source options like Docling or Marker?\n* What are you using in production today and why?\n\nInterested in both self-hosted and managed/cloud solutions.\n\nThanks all :)",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -741,7 +741,7 @@
           "id": "op1jclm",
           "author": "DJ_Beardsquirt",
           "text": "I'm convinced this is the hardest challenge in RAG systems. There's not really a one-size fits all solution. A lot depends on the structure of your PDFs and what you're looking to extract. Do you need to preserve italics? Footnotes? Figure captions? Each will require special handling and will have a < 100% success rate.",
-          "score": 8,
+          "score": 7,
           "created_utc": "2026-06-01 00:42:19",
           "is_submitter": false,
           "replies": []
@@ -750,7 +750,7 @@
           "id": "op1omg1",
           "author": "CalypsoTheKitty",
           "text": "I'm very satisfied with Llama Parse, and they just put out a nice parsing benchmark.\n\nhttps://www.llamaindex.ai/blog/parsebench",
-          "score": 6,
+          "score": 5,
           "created_utc": "2026-06-01 01:14:44",
           "is_submitter": false,
           "replies": [
@@ -778,7 +778,7 @@
           "id": "op1zljv",
           "author": "Mameiro",
           "text": "I don’t think there’s a universal “best” parser. For clean PDFs, open-source options may be enough. For scanned docs, complex tables, and messy layouts, managed OCR/document AI tools can be better, but they still need validation. For RAG, I’d judge tools by structure preservation, table accuracy, page/citation tracking, failure visibility, cost, and latency — not just text extraction quality. Best approach: take 20–50 real documents from your workflow and benchmark the tools against those. The winner will depend more on your documents than on the tool’s reputation.",
-          "score": 4,
+          "score": 5,
           "created_utc": "2026-06-01 02:23:26",
           "is_submitter": false,
           "replies": []
@@ -1107,80 +1107,13 @@
       ]
     },
     {
-      "id": "1tsec5s",
-      "title": "Open-source: a six-signal hybrid retrieval pipeline (HNSW + BM25 + graph + temporal + cross-encoder) that hits 96.2% on LongMemEval real-retrieval",
-      "subreddit": "Rag",
-      "url": "https://www.reddit.com/r/Rag/comments/1tsec5s/opensource_a_sixsignal_hybrid_retrieval_pipeline/",
-      "author": "Emdubs117",
-      "created_utc": "2026-05-30 23:04:59",
-      "score": 22,
-      "num_comments": 6,
-      "upvote_ratio": 1.0,
-      "text": "Sharing a retrieval pipeline I built for long-term agent memory, in case the design is useful to anyone here doing RAG over conversational history.\n\nInstead of pure vector search it fuses six signals into one score:\n\n  \\- semantic (dense cosine via HNSW)\n\n  \\- lexical (BM25)\n\n  \\- graph spreading activation (entities linked at ingestion)\n\n  \\- importance (learned per-node)\n\n  \\- temporal proximity (event-time Gaussian)\n\n  \\- cross-encoder reranking (ms-marco-MiniLM) on the top candidates\n\n  \nThen it does session-balanced / topic-dense context assembly under a token budget.\n\nOn LongMemEval real retrieval answers come only from retrieved memory, not the transcript, and it scores 96.2% (481/500). Honest caveat though: single deterministic run, generator is Claude Opus 4.6, and the context-assembly is tuned per question type, so read it as a basis to build off of for your own use cases. Methodology audit and per-case results are in the repo.\n\nOne thing I learned that's RAG-relevant: for bounded conversational corpora, graph + temporal signals mattered more than I expected, dedup and recency beat raw semantic similarity on the multi-session aggregation questions.\n\nRepo: [https://github.com/JordanMcCann/agentmemory](https://github.com/JordanMcCann/agentmemory)\n\nCurious how others here weight lexical vs semantic vs rerank for conversational memory, what's worked for you?",
-      "is_original_content": false,
-      "link_flair_text": "Showcase",
-      "permalink": "https://reddit.com/r/Rag/comments/1tsec5s/opensource_a_sixsignal_hybrid_retrieval_pipeline/",
-      "domain": "self.Rag",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "oox909y",
-          "author": "DorkyMcDorky",
-          "text": "So this is great.. thanks for sharing!\n\ntl;dr - now create AB tests against multiple pipeline setups and see how they work against each other.  Once you create one that does well in your automated testing, it needs people.  Without this, you are not going to ever know.  Focus on creating a baseline\n\nThe next big step is to test against real data.  You'll find that different models/data provisioning/embedding strategies all differ - there's no \"global\" one that is good.  it tends to be temporal, based on user and most affected by the quality of data given.  \n\nWhat I've found is to create a flexible system that lets you reindex fast and often and to experiement with live AB testing.  The problem is entirely due to data and context:\n\nSearch results are often dependent on too many factors you cannot control.  News events, day of week, region the users run their searches, language spoken, etc.. there's a lot so there is no one good \"recipie\".. \n\nYou'll need a baseline.  Measure your results.  Then you compare them with others.\n\nAs far as what's worked?  it was always vastly different.  I have had search engines work best on BM25 alone.  I've had datasets that need to run 3-4 searches before getting a good answer.  Sometimes the search agent needs to be more intereactive with the user and pause to give the research update.  It all depends.  ",
-          "score": 3,
-          "created_utc": "2026-05-31 11:09:16",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "oozfnnw",
-              "author": "Emdubs117",
-              "text": "Honestly this is the comment I was hoping for. You're right that LongMemEval is a frozen, single-user corpus, so a lot of what I did is really just fitting a static target. The per-question-type tuning wouldn't survive real traffic and I know it. It's a borrowed baseline, not one on my own data with people in the loop. And the BM25-alone thing tracks even here. Lexical carried the single-session questions, the graph and temporal signals only really paid off on multi-session. How do you keep the human eval loop cheap enough to run it often? That's a part I haven't figured out.",
-              "score": 1,
-              "created_utc": "2026-05-31 18:06:09",
-              "is_submitter": true,
-              "replies": [
-                {
-                  "id": "op00nsy",
-                  "author": "DorkyMcDorky",
-                  "text": "So that's the kicker - \n\nYou can use a GPU machine and have a service specialize on pushing embeddings.  I use DJL - but you can roll your own and there's a lot of APIs (CUDA directly, OpenVINO, Pytorch - anything really)..  I don't use bedrock directly - that costs too much.\n\nIf you're summarizing chunks, just use gemma or something like that..",
-                  "score": 2,
-                  "created_utc": "2026-05-31 19:46:35",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "ooxdonh",
-          "author": "-Cubie-",
-          "text": "Very cool!\nHave you also tried using newer embedding and reranker models? E.g. the new Ettin rerankers and/or embeddinggemma or something.",
-          "score": 2,
-          "created_utc": "2026-05-31 11:43:59",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "oozg0wp",
-              "author": "Emdubs117",
-              "text": "No, not yet. I stuck with all-mpnet and a MiniLM cross-encoder, mostly so it'd run locally without heavy deps, and I put my time into the fusion side instead of chasing the newest encoders. So there's definitely headroom there. Both are on my list though. My hunch is a better reranker like Ettin helps more than a better embedder here, since my weak spot was multi-session dedup/recency and that's more graph/temporal than raw embedding quality. Could be wrong. If you've put Ettin up against a MiniLM cross-encoder anywhere I'd be curious what you got. Otherwise I'll just swap them in and post the before/after.",
-              "score": 2,
-              "created_utc": "2026-05-31 18:07:51",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        }
-      ]
-    },
-    {
       "id": "1tugebm",
       "title": "Best way to build a knowledge graph from a vector database?",
       "subreddit": "Rag",
       "url": "https://www.reddit.com/r/Rag/comments/1tugebm/best_way_to_build_a_knowledge_graph_from_a_vector/",
       "author": "vankoala",
       "created_utc": "2026-06-02 04:35:51",
-      "score": 22,
+      "score": 24,
       "num_comments": 12,
       "upvote_ratio": 0.97,
       "text": "I’m working on a RAG system where documents are chunked, embedded, and stored in a vector database.  \nInitially I thought I could build a graph directly from chunk similarity, but the more I look into it, the more it seems like similarity graphs and knowledge graphs are very different things.\n\nMy goal is to build a detailed and accurate graph that can support multi-hop retrieval and reasoning. For example, I’d like to capture entities, relationships, provenance, timestamps, and supporting evidence from the source documents (which are highly scientific on nature).\n\nA few questions:  \nDo people generally build the graph from extracted entities/relationships rather than from vector similarity?\n\nHow much of the graph construction is usually LLM-based versus traditional NLP/entity resolution?\n\nWhat’s the best way to handle entity deduplication and canonicalization?\n\nDo you store chunks in the graph, or only entities and relationships?\n\nAre there any open-source GraphRAG implementations that you’ve found particularly well designed?\n\nI’m less interested in “quick and dirty” and more interested in building something that stays accurate as the corpus grows. Would love to hear how people are approaching this in production systems.",
@@ -1286,63 +1219,44 @@
       ]
     },
     {
-      "id": "1tsvly3",
-      "title": "Fine-tuned RAG: teaching your retriever which embedding dimensions matter (+11% hit rate, +12% completeness, +9% faithfulness)",
+      "id": "1tsec5s",
+      "title": "Open-source: a six-signal hybrid retrieval pipeline (HNSW + BM25 + graph + temporal + cross-encoder) that hits 96.2% on LongMemEval real-retrieval",
       "subreddit": "Rag",
-      "url": "https://www.reddit.com/r/Rag/comments/1tsvly3/finetuned_rag_teaching_your_retriever_which/",
-      "author": "Much_Pie_274",
-      "created_utc": "2026-05-31 13:37:28",
-      "score": 17,
-      "num_comments": 7,
-      "upvote_ratio": 0.95,
-      "text": "Hi all,\n\nI developed a fine-tuned retrieval head (neural net) for RAG that transforms query embeddings before retrieval, so the system learns which embedding dimensions actually matter for your corpus — rather than weighting them all equally as standard cosine similarity does.\n\n# The problem\n\nIn any domain-specific corpus, some embedding dimensions are highly predictive for matching queries to the right passages, while others are effectively noise. Standard cosine similarity can't distinguish between the two, so retrieval gets pulled toward superficially similar but substantively irrelevant passages. The fine-tuned RAG is designed to prevent exactly that.\n\n# How it works\n\n1. **Synthetic question generation** — An LLM generates multiple questions per chunk in the corpus, for which the answers can be inferred from that chunk. This creates a dataset of question-chunk pairs (QA-pairs). These are embedded using an embedding model and divided into a training and validation set.\n2. **Neural net training** — A lightweight neural network using MNR loss is trained on the training QA-pairs. After each epoch, the model is evaluated on the validation set by measuring retrieval hit rate: the proportion of validation questions for which the correct chunk appears in the top-5 retrieved results. Retrieval works by embedding the question, passing it through the neural network to transform the embedding, and ranking all corpus chunks by cosine similarity to the transformed embedding.\n\nThrough this mechanism, the projection head learns for these '**type of questions**' which dimensions in the embeddings are informative for finding the best chunks — and which are irrelevant.\n\n# Results\n\nTo validate the architecture, I used the Legal RAG Bench dataset as a proof of concept — evaluating on 100 held-out test questions.\n\n**Retrieval Hit Rate:**\n\n* The fine-tuned retriever achieves **82% Hit Rate (k = 20)**, compared to **71% for the standard cosine retriever** — an 11 percentage point improvement, meaning the correct chunk appears in the top 20 results significantly more often when the query embedding is first transformed through the fine-tuned retriever.\n\n**Answer quality (LLM-as-judge, 1–5 scale across 6 metrics):**\n\n* Outperforms traditional RAG (top-k cosine sim) on all 6 metrics\n* Largest gains in completeness (+12%) and faithfulness (+9%)\n* Consistent improvement across every metric — not just isolated gains — suggesting that retrieving more relevant context has a broad positive effect on answer quality\n\nCode and full write-up available on GitHub: [https://github.com/BartAmin/Fine-tuned-RAG](https://github.com/BartAmin/Fine-tuned-RAG)",
+      "url": "https://www.reddit.com/r/Rag/comments/1tsec5s/opensource_a_sixsignal_hybrid_retrieval_pipeline/",
+      "author": "Emdubs117",
+      "created_utc": "2026-05-30 23:04:59",
+      "score": 22,
+      "num_comments": 6,
+      "upvote_ratio": 1.0,
+      "text": "Sharing a retrieval pipeline I built for long-term agent memory, in case the design is useful to anyone here doing RAG over conversational history.\n\nInstead of pure vector search it fuses six signals into one score:\n\n  \\- semantic (dense cosine via HNSW)\n\n  \\- lexical (BM25)\n\n  \\- graph spreading activation (entities linked at ingestion)\n\n  \\- importance (learned per-node)\n\n  \\- temporal proximity (event-time Gaussian)\n\n  \\- cross-encoder reranking (ms-marco-MiniLM) on the top candidates\n\n  \nThen it does session-balanced / topic-dense context assembly under a token budget.\n\nOn LongMemEval real retrieval answers come only from retrieved memory, not the transcript, and it scores 96.2% (481/500). Honest caveat though: single deterministic run, generator is Claude Opus 4.6, and the context-assembly is tuned per question type, so read it as a basis to build off of for your own use cases. Methodology audit and per-case results are in the repo.\n\nOne thing I learned that's RAG-relevant: for bounded conversational corpora, graph + temporal signals mattered more than I expected, dedup and recency beat raw semantic similarity on the multi-session aggregation questions.\n\nRepo: [https://github.com/JordanMcCann/agentmemory](https://github.com/JordanMcCann/agentmemory)\n\nCurious how others here weight lexical vs semantic vs rerank for conversational memory, what's worked for you?",
       "is_original_content": false,
       "link_flair_text": "Showcase",
-      "permalink": "https://reddit.com/r/Rag/comments/1tsvly3/finetuned_rag_teaching_your_retriever_which/",
+      "permalink": "https://reddit.com/r/Rag/comments/1tsec5s/opensource_a_sixsignal_hybrid_retrieval_pipeline/",
       "domain": "self.Rag",
       "is_self": true,
       "comments": [
         {
-          "id": "ooyu326",
-          "author": "RushElectronic8541",
-          "text": "Why not use LLMs to come up with search terms on ingestion? This leads to higher quality search texts and in turn embeddings. Anything else still leads to the problem of guessing which terms have the shortest vector distance to the desired text, which is prone to null searches when the actual qualitative data exists in the main doc.\n\nI’m not bashing, this is an approach I’ve been using lately.",
-          "score": 2,
-          "created_utc": "2026-05-31 16:25:49",
+          "id": "oox909y",
+          "author": "DorkyMcDorky",
+          "text": "So this is great.. thanks for sharing!\n\ntl;dr - now create AB tests against multiple pipeline setups and see how they work against each other.  Once you create one that does well in your automated testing, it needs people.  Without this, you are not going to ever know.  Focus on creating a baseline\n\nThe next big step is to test against real data.  You'll find that different models/data provisioning/embedding strategies all differ - there's no \"global\" one that is good.  it tends to be temporal, based on user and most affected by the quality of data given.  \n\nWhat I've found is to create a flexible system that lets you reindex fast and often and to experiement with live AB testing.  The problem is entirely due to data and context:\n\nSearch results are often dependent on too many factors you cannot control.  News events, day of week, region the users run their searches, language spoken, etc.. there's a lot so there is no one good \"recipie\".. \n\nYou'll need a baseline.  Measure your results.  Then you compare them with others.\n\nAs far as what's worked?  it was always vastly different.  I have had search engines work best on BM25 alone.  I've had datasets that need to run 3-4 searches before getting a good answer.  Sometimes the search agent needs to be more intereactive with the user and pause to give the research update.  It all depends.  ",
+          "score": 3,
+          "created_utc": "2026-05-31 11:09:16",
           "is_submitter": false,
           "replies": [
             {
-              "id": "oozfiq3",
-              "author": "3941_",
-              "text": "So, each chunk being embedded during ingestion gets also an LLM pass to formulate search terms for that chunk? And what's next? How search terms are used?",
-              "score": 2,
-              "created_utc": "2026-05-31 18:05:32",
-              "is_submitter": false,
-              "replies": [
-                {
-                  "id": "op01q78",
-                  "author": "RushElectronic8541",
-                  "text": "Unfortunately the approach leads to higher latency as you need two trips on user prompt, one to determine which search terms are relevant based on the prompt, fetch data using the relevant search terms, feed data into LLM along with user prompt.\n\nThe approach works for research tasks because the higher latency is tolerable to the user if the output quality is high. You can show agent/processing steps for users to see what’s going on.",
-                  "score": 1,
-                  "created_utc": "2026-05-31 19:51:45",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            },
-            {
-              "id": "oozh6u4",
-              "author": "Much_Pie_274",
-              "text": "I implemented a version of this here: [https://github.com/BartAmin/Clustered-Dynamic-RAG](https://github.com/BartAmin/Clustered-Dynamic-RAG)\n\nBut it's just a different approach I think",
+              "id": "oozfnnw",
+              "author": "Emdubs117",
+              "text": "Honestly this is the comment I was hoping for. You're right that LongMemEval is a frozen, single-user corpus, so a lot of what I did is really just fitting a static target. The per-question-type tuning wouldn't survive real traffic and I know it. It's a borrowed baseline, not one on my own data with people in the loop. And the BM25-alone thing tracks even here. Lexical carried the single-session questions, the graph and temporal signals only really paid off on multi-session. How do you keep the human eval loop cheap enough to run it often? That's a part I haven't figured out.",
               "score": 1,
-              "created_utc": "2026-05-31 18:13:12",
+              "created_utc": "2026-05-31 18:06:09",
               "is_submitter": true,
               "replies": [
                 {
-                  "id": "oozigoy",
-                  "author": "3941_",
-                  "text": "What about prepending doc metadata (e.g. doc  title, chapter) to the chunk before actually embedding it. Doesn't naturally lead to some sort of clusters?",
-                  "score": 1,
-                  "created_utc": "2026-05-31 18:19:08",
+                  "id": "op00nsy",
+                  "author": "DorkyMcDorky",
+                  "text": "So that's the kicker - \n\nYou can use a GPU machine and have a service specialize on pushing embeddings.  I use DJL - but you can roll your own and there's a lot of APIs (CUDA directly, OpenVINO, Pytorch - anything really)..  I don't use bedrock directly - that costs too much.\n\nIf you're summarizing chunks, just use gemma or something like that..",
+                  "score": 2,
+                  "created_utc": "2026-05-31 19:46:35",
                   "is_submitter": false,
                   "replies": []
                 }
@@ -1351,13 +1265,23 @@
           ]
         },
         {
-          "id": "ooxw6g4",
-          "author": "Much_Pie_274",
-          "text": "https://preview.redd.it/2lluwwfn7h4h1.png?width=3162&format=png&auto=webp&s=8e505f926819117acd8425bdf466423316d8941e\n\nArchitecture overview, see: [https://github.com/BartAmin/Fine-tuned-RAG](https://github.com/BartAmin/Fine-tuned-RAG)",
-          "score": 1,
-          "created_utc": "2026-05-31 13:37:59",
-          "is_submitter": true,
-          "replies": []
+          "id": "ooxdonh",
+          "author": "-Cubie-",
+          "text": "Very cool!\nHave you also tried using newer embedding and reranker models? E.g. the new Ettin rerankers and/or embeddinggemma or something.",
+          "score": 2,
+          "created_utc": "2026-05-31 11:43:59",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "oozg0wp",
+              "author": "Emdubs117",
+              "text": "No, not yet. I stuck with all-mpnet and a MiniLM cross-encoder, mostly so it'd run locally without heavy deps, and I put my time into the fusion side instead of chasing the newest encoders. So there's definitely headroom there. Both are on my list though. My hunch is a better reranker like Ettin helps more than a better embedder here, since my weak spot was multi-session dedup/recency and that's more graph/temporal than raw embedding quality. Could be wrong. If you've put Ettin up against a MiniLM cross-encoder anywhere I'd be curious what you got. Otherwise I'll just swap them in and post the before/after.",
+              "score": 2,
+              "created_utc": "2026-05-31 18:07:51",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
         }
       ]
     },
@@ -1368,9 +1292,9 @@
       "url": "https://www.reddit.com/r/Rag/comments/1tsl62f/i_built_an_mcp_server_that_gives_ai_assistants/",
       "author": "flowing_abyss",
       "created_utc": "2026-05-31 04:29:29",
-      "score": 16,
+      "score": 17,
       "num_comments": 3,
-      "upvote_ratio": 0.91,
+      "upvote_ratio": 0.95,
       "text": "I got tired of Claude Code glob-grepping my vault and missing semantically related notes that used different vocabulary. So I built [Obsidian Hybrid Search](https://github.com/flowing-abyss/obsidian-hybrid-search).\n\n**TL;DR:** BM25 + trigram fuzzy matching + vector embeddings, merged with Reciprocal Rank Fusion, stored in a single SQLite file. Works offline. MCP server + CLI.\n\n**Why not just use Omnisearch?**\n\nOmnisearch is great for finding what you already know exists. But if you ask \"what did I write about managing attention?\" and your notes say \"focus\", \"concentration\", or \"deep work\" — BM25 misses them unless you iterate through synonyms manually.\n\n**Why not Smart Connections / vector-only?**\n\nSemantic search smears results when you want something exact. If you documented debugging a specific Docker container three months ago, you want BM25, not cosine similarity.\n\nHybrid covers both cases simultaneously.\n\n**What's Obsidian-specific here:**\n\n* Aliases indexed and boosted (title 10×, alias 5× in BM25)\n* Tag and folder filtering with exclusions\n* Graph traversal: `--path` [`note.md`](http://note.md) `--related` with backlinks and outgoing links at configurable depth\n* `--open` opens results directly in Obsidian\n* Real-time incremental indexing via chokidar (MCP mode)\n\n**Zero-dependency quick start (no API key):**\n\n    npm install -g obsidian-hybrid-search\n    cd /path/to/your/vault\n    obsidian-hybrid-search reindex\n    obsidian-hybrid-search \"building a consistent review habit\"\n\nFor MCP (Claude Desktop, Claude Code, etc.):\n\n    {\n      \"mcpServers\": {\n        \"obsidian-hybrid-search\": {\n          \"command\": \"npx\",\n          \"args\": [\"-y\", \"-p\", \"obsidian-hybrid-search@latest\", \"obsidian-hybrid-search-mcp\"],\n          \"env\": {\n            \"OBSIDIAN_VAULT_PATH\": \"/path/to/your/vault\"\n          }\n        }\n      }\n    }\n\nUses a bundled multilingual model offline. Swap in OpenRouter / Ollama / LM Studio for better quality embeddings.",
       "is_original_content": false,
       "link_flair_text": "Tools & Resources",
@@ -1415,9 +1339,9 @@
       "url": "https://www.reddit.com/r/Rag/comments/1tthyh8/i_built_a_physics_rag_chatbot/",
       "author": "valley_code",
       "created_utc": "2026-06-01 04:53:56",
-      "score": 16,
-      "num_comments": 12,
-      "upvote_ratio": 0.94,
+      "score": 17,
+      "num_comments": 15,
+      "upvote_ratio": 0.91,
       "text": "I'm a high school student, and after about 8 months of learning Python, OpenCV, and Pygame, I just finished building and deploying my first Retrieval-Augmented Generation (RAG) application.\n\nThe app lets users ask questions about physics textbooks and get answers grounded in the actual textbook content rather than relying solely on the LLM's internal knowledge.\n\nTech stack:\n\n* LangChain\n* HuggingFace all-MiniLM-L6-v2 embeddings\n* FAISS vector database\n* Groq LLaMA 3.1 8B\n* Streamlit\n* PyMuPDF\n\nWhat I implemented:\n\n* PDF ingestion and chunking\n* Embedding generation\n* Vector search with FAISS\n* Retrieval pipeline\n* Answer generation using retrieved context\n* Streamlit deployment\n\nThe textbook source is OpenStax University Physics, which is openly licensed.\n\nLive demo:  \n[https://physicsragchatbot.streamlit.app/](https://physicsragchatbot.streamlit.app/)\n\nGitHub:  \n[https://github.com/sakshamjha-dev/physics\\_ragchatbot](https://github.com/sakshamjha-dev/physics_ragchatbot)\n\nSome things I learned while building it:\n\n* How RAG works end-to-end\n* Trade-offs in chunking and retrieval\n* Managing embeddings efficiently\n* Deploying ML apps with dependency issues\n* Handling API keys securely\n\nI'd love feedback from people who have built RAG systems before. What would you improve first if this were your project?",
       "is_original_content": false,
       "link_flair_text": "Showcase",
@@ -1447,6 +1371,35 @@
                   "text": "Good luck and good job so far! 😊",
                   "score": 1,
                   "created_utc": "2026-06-01 17:46:27",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "ophj3do",
+          "author": "AvailablePeak8360",
+          "text": "I loved the project. Wish there was some other way than Groq API key because of the token constraints. But overall great work!",
+          "score": 2,
+          "created_utc": "2026-06-03 10:15:10",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "ophk5rh",
+              "author": "valley_code",
+              "text": "Thanks so much for the kind words and for checking it out! \n\nTotally hear you on the Groq token limits — it's not ideal, especially for longer physics chats. The reason I went with Groq is that it’s free for users to get their own key, so I don’t end up footing a huge bill.",
+              "score": 2,
+              "created_utc": "2026-06-03 10:23:17",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "ophkmk6",
+                  "author": "AvailablePeak8360",
+                  "text": "Fair enough! Nonetheless I'm gonna continue using it and great work.",
+                  "score": 1,
+                  "created_utc": "2026-06-03 10:26:51",
                   "is_submitter": false,
                   "replies": []
                 }
@@ -1532,157 +1485,63 @@
       ]
     },
     {
-      "id": "1trw2ph",
-      "title": "Been reading everything i can find on rag and still cant get it right",
+      "id": "1tsvly3",
+      "title": "Fine-tuned RAG: teaching your retriever which embedding dimensions matter (+11% hit rate, +12% completeness, +9% faithfulness)",
       "subreddit": "Rag",
-      "url": "https://www.reddit.com/r/Rag/comments/1trw2ph/been_reading_everything_i_can_find_on_rag_and/",
-      "author": "sophie-turnerr",
-      "created_utc": "2026-05-30 10:18:38",
-      "score": 15,
-      "num_comments": 20,
-      "upvote_ratio": 0.89,
-      "text": "I have been trying to build a rag pipeline for internal documentation for a few weeks now and genuinely struggling. not a total beginner in python but rag specifically is breaking my brain. started with the basics then found google clouds blog post on llamaparse rag implementation, \"an advanced llamaindex rag implementation on google cloud\" and followed it pretty carefully tho. It covers the full stack, ingestion, chunking ,vector storage with vertex ai, gemini for generation and RAGAS for evaluation. well written felt like i understood it while reading.\n\nThen i built it and the answers were still inconsistent. went down a rabbit hole after that and found a few things that helped fill gaps. Anthropics contextual retrieval writeup changed how I thought about chunking, prepending chunk level context before embedding reduced my retrieval\n\nfailures noticeably. also went back through the llamaindex ingestion pipeline docs more carefully. the google blog had recommended document ingestion step before anything hits the index, which i hadnt been doing, i was just using pypdf and wondering why tables came out garbled.\n\nSwitched that out and it helped, at least on the pages with tables and mixed layouts. not a magic fix but that part of the pipeline feels less broken now. Still stuck on a few things though and not sure if its my setup or just gaps in my understanding: retrieval keeps returning the right document but wrong section. like it lands adjacent to the answer not actually on\n\nit. overlap helped a little but didnt fix it.. RAGaS gives me decent faithfulness scores but low answer relevancy and honestly i dont fully understand what that distinction is pointing to in terms of what to actually change anything that needs two documents combined to answer is basically always wrong read probably 15 blog posts at this point. feel like i understand each piece individually but when the whole pipeline fails end to end i have no idea where to even start debugging.\n\nHas anyone gone through this learning curve and can point to what actually moved the needle for them? feels like im missing something about how all the pieces are supposed to fit together. Feedbacks from anyone experienced are much appreciated, thanks",
+      "url": "https://www.reddit.com/r/Rag/comments/1tsvly3/finetuned_rag_teaching_your_retriever_which/",
+      "author": "Much_Pie_274",
+      "created_utc": "2026-05-31 13:37:28",
+      "score": 16,
+      "num_comments": 7,
+      "upvote_ratio": 0.91,
+      "text": "Hi all,\n\nI developed a fine-tuned retrieval head (neural net) for RAG that transforms query embeddings before retrieval, so the system learns which embedding dimensions actually matter for your corpus — rather than weighting them all equally as standard cosine similarity does.\n\n# The problem\n\nIn any domain-specific corpus, some embedding dimensions are highly predictive for matching queries to the right passages, while others are effectively noise. Standard cosine similarity can't distinguish between the two, so retrieval gets pulled toward superficially similar but substantively irrelevant passages. The fine-tuned RAG is designed to prevent exactly that.\n\n# How it works\n\n1. **Synthetic question generation** — An LLM generates multiple questions per chunk in the corpus, for which the answers can be inferred from that chunk. This creates a dataset of question-chunk pairs (QA-pairs). These are embedded using an embedding model and divided into a training and validation set.\n2. **Neural net training** — A lightweight neural network using MNR loss is trained on the training QA-pairs. After each epoch, the model is evaluated on the validation set by measuring retrieval hit rate: the proportion of validation questions for which the correct chunk appears in the top-5 retrieved results. Retrieval works by embedding the question, passing it through the neural network to transform the embedding, and ranking all corpus chunks by cosine similarity to the transformed embedding.\n\nThrough this mechanism, the projection head learns for these '**type of questions**' which dimensions in the embeddings are informative for finding the best chunks — and which are irrelevant.\n\n# Results\n\nTo validate the architecture, I used the Legal RAG Bench dataset as a proof of concept — evaluating on 100 held-out test questions.\n\n**Retrieval Hit Rate:**\n\n* The fine-tuned retriever achieves **82% Hit Rate (k = 20)**, compared to **71% for the standard cosine retriever** — an 11 percentage point improvement, meaning the correct chunk appears in the top 20 results significantly more often when the query embedding is first transformed through the fine-tuned retriever.\n\n**Answer quality (LLM-as-judge, 1–5 scale across 6 metrics):**\n\n* Outperforms traditional RAG (top-k cosine sim) on all 6 metrics\n* Largest gains in completeness (+12%) and faithfulness (+9%)\n* Consistent improvement across every metric — not just isolated gains — suggesting that retrieving more relevant context has a broad positive effect on answer quality\n\nCode and full write-up available on GitHub: [https://github.com/BartAmin/Fine-tuned-RAG](https://github.com/BartAmin/Fine-tuned-RAG)",
       "is_original_content": false,
-      "link_flair_text": "Discussion",
-      "permalink": "https://reddit.com/r/Rag/comments/1trw2ph/been_reading_everything_i_can_find_on_rag_and/",
+      "link_flair_text": "Showcase",
+      "permalink": "https://reddit.com/r/Rag/comments/1tsvly3/finetuned_rag_teaching_your_retriever_which/",
       "domain": "self.Rag",
       "is_self": true,
       "comments": [
         {
-          "id": "ooqmqeo",
-          "author": "TenshiS",
-          "text": "Most issues you have will need more context than just individual chunks. At the very least return the 2 chunks before and after the one you identified as relevant. For small documents even consider returning the entire document.\n\nAlso, semantic search is okay but everyone doing it properly does hybrid search now",
-          "score": 8,
-          "created_utc": "2026-05-30 10:46:59",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "op4hukh",
-              "author": "sophie-turnerr",
-              "text": "hybrid seach is already in the list to implement and the sorrounding chunk retrieval makes sense as a quick fir for the adjecent section problem. the full document return for small docs is an interesting middle ground that hadnt been considered like at what document size do you find the tradeoff between context noise and completeness starts going wrong way",
-              "score": 1,
-              "created_utc": "2026-06-01 13:28:31",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "ooqqzhq",
-          "author": "fabkosta",
-          "text": "Hi Sophie, cool that you are building RAG systems. Now, what you are describing is not unusual. Most beginners underestimate the complexity to build those systems. Cause, how hard can it be?\n\nThe underlying symptoms that you describe is that you lack a plan. And requirements. First, you need to understand which problem you're solving, cause without that you don't know what to optimize for. I see this same point being totally ignored all the time. That's why I'm stressing it. If you say e.g. retrieval is bad - well, bad according to what? According to which standard? According to whose expectations? It is your business context or users' requirements that need to tell you that. And without that, you are trying to optimize something without having a standard for what is considered good.\n\nYou also must clarify what should happen with tables, figures, charts, etc. That's a business requirement, shouldn't be your decision alone. You have to know what users intend to do with those tables. Are they even interested in them? If yes, how do they intend to search for table content, like: what do they actually enter into the search field that identifies a specific cell value? Is this even supposed to be possible? And so on.\n\nThe next stage after clarifying requirements is - no, not building the thing - but drawing UI mockups. Why? Because that will clarify how the users engage with your search engine. For example, if the users can use filters in the UI that can have a drastic reduction of your search space as a consequence. Yeah, filters! It's a real thing! Nobody thinks of filters for any reason that I cannot fathom. You make both your own and your users' lives so much easier if you can reduce the number of documents that are of interest even in principle.\n\nWhat's next? Now only you should think about the things you think about, i.e. document pre-processing, index design, type of search applied (for most real-world problems hybrid search beats vector search alone).\n\nYou see, there is a lot more that should come first before you even think about the things you think about.",
+          "id": "ooyu326",
+          "author": "RushElectronic8541",
+          "text": "Why not use LLMs to come up with search terms on ingestion? This leads to higher quality search texts and in turn embeddings. Anything else still leads to the problem of guessing which terms have the shortest vector distance to the desired text, which is prone to null searches when the actual qualitative data exists in the main doc.\n\nI’m not bashing, this is an approach I’ve been using lately.",
           "score": 2,
-          "created_utc": "2026-05-30 11:19:01",
+          "created_utc": "2026-05-31 16:25:49",
           "is_submitter": false,
           "replies": [
             {
-              "id": "op4jaev",
-              "author": "sophie-turnerr",
-              "text": "the requirement first point lands, debugging retrieval without a clear definition of what good looks like is basically guessing.... the filter angle is something that hadnt been considered at all and it makes sense tho like reducing the search space before semantic matching even runs would probably fix more than any chunking tweak. im curious on the UI mockup setup like for an internal docs usecase where users are mostly asking natural language questions, do you find explicit filters still get adopted or do users just default to the searchbox regardless??",
-              "score": 1,
-              "created_utc": "2026-06-01 13:35:55",
-              "is_submitter": true,
-              "replies": [
-                {
-                  "id": "op4qvln",
-                  "author": "fabkosta",
-                  "text": "I cannot tell - your users have to tell you that! 😄",
-                  "score": 1,
-                  "created_utc": "2026-06-01 14:13:42",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "oor3ipr",
-          "author": "[deleted]",
-          "text": "[removed]",
-          "score": 1,
-          "created_utc": "2026-05-30 12:40:42",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "op4lqxw",
-              "author": "sophie-turnerr",
-              "text": "parent retrival framing for the chunk size problem and the RAGAS distinction exolaation both clarify exactly where the pipeline is actually breaking... implementing smaller chunks with parent retrieval is the next move and the query decomposition for multi document questions explains why that catgory was failing while it looked fine",
-              "score": 1,
-              "created_utc": "2026-06-01 13:48:29",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "ooraesp",
-          "author": "not_my_real_name_2",
-          "text": "Following this, as a person who's interested in RAG and hasn't begun the intensive research phase yet. ",
-          "score": 1,
-          "created_utc": "2026-05-30 13:20:18",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "op4p0tz",
-              "author": "sophie-turnerr",
-              "text": "welcome to the rabbit hole....lol the learning curve exists and real but the post and comments here are probably the mst honest and raw walkthru of what actually breaks and why",
-              "score": 1,
-              "created_utc": "2026-06-01 14:04:43",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "oorgux7",
-          "author": "eliaweiss",
-          "text": "This is because RAG is a heuristic and often won’t work in many cases.  \nYour only option is to heavily optimize the hyperparameters, but that still won’t work well if your dataset varies a lot from one document to another.",
-          "score": 1,
-          "created_utc": "2026-05-30 13:55:19",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oorldf1",
-          "author": "Dry_Inspection_4583",
-          "text": "I don't believe rag endpoint, ie. Vector DBs to be the right trajectory for information writ. Vector databases are the LLM's interpretation of the information, NOT the information.\n\nI would suggest harnessing a different endpoint that tangibly holds the information, rather than the LLM's interpretation of the thing.",
-          "score": 1,
-          "created_utc": "2026-05-30 14:19:01",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oorlxni",
-          "author": "Dry_Inspection_4583",
-          "text": "And fwiw, I went kinda hard down this path as it relates to memory and developed faultline to address exactly this, but not for documents, my project is for memory. However it's Foss, you might be able to branch or hinge off it for ideas, I'd love to see this exact pipeline handled properly. It would solve a lot of peoples problems!!",
-          "score": 1,
-          "created_utc": "2026-05-30 14:21:53",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oorzcd1",
-          "author": "DrinksAtTheSpaceBar",
-          "text": "Went down a similar path in the Google ecosystem. My biggest breakthrough came after discovering that Vertex AI was not the correct pipeline for creating a robust RAG engine. The moment I switched to Google AI APIs and learned how to properly build a RAG engine with minimal constraints, the difference was night and day. ",
-          "score": 1,
-          "created_utc": "2026-05-30 15:29:07",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "oos19bc",
-              "author": "DrinksAtTheSpaceBar",
-              "text": "Oh! And I did find a cheat code that was an absolute game changer for my use case. NotebookLM is (in my opinion) one of the most impressive RAG platforms in existence. You can throw massive datasets at it in conjunction with unstructured and sloppy PDFs, and it will extract the cleanest and most precise answers for you almost 100% of the time. You can look at its OCR/PDF ingestion results, and they're as noisy any other technique, so how does NotebookLM still manage to extract relevant information? Well, make THAT your project in NotebookLM. It will openly share its architecture, going as far as to draft your tech stack blueprint based on your specific use case. Hope this helps.",
-              "score": 1,
-              "created_utc": "2026-05-30 15:38:40",
+              "id": "oozfiq3",
+              "author": "3941_",
+              "text": "So, each chunk being embedded during ingestion gets also an LLM pass to formulate search terms for that chunk? And what's next? How search terms are used?",
+              "score": 2,
+              "created_utc": "2026-05-31 18:05:32",
               "is_submitter": false,
               "replies": [
                 {
-                  "id": "oot81g6",
-                  "author": "tewkberry",
-                  "text": "It would be awesome if you could try my repo and let me know how it compares to NotebookLM: https://github.com/sparkplug604/praxis\n\nDownsides:\n- I am not Google. I am only me.\n\nUpsides:\n- You don’t have to use Google. \n- You can own your own memory locally and work with any model or agent. \n- Like NotebookLM, has indexed searches with evidence attached and full audit log. \n- Like NotebookLM, has hybrid search including semantic, keyword, and full-text. \n- Additionally has the ability to dynamically update your memory and keep it fresh \n- Also can turn any piece of knowledge into an agent skill \n- Also has a dedupe and conflict management system with manual overrides to depreciate or supersede data\n- Also has a retrieval relevancy score that measures freshness, trust, SkillGraph association, and more before output \n- Easy to install. Controlled through CLI commands. \n\nPlease check it out and let me know what you think as a NotebookLM user!! \n",
+                  "id": "op01q78",
+                  "author": "RushElectronic8541",
+                  "text": "Unfortunately the approach leads to higher latency as you need two trips on user prompt, one to determine which search terms are relevant based on the prompt, fetch data using the relevant search terms, feed data into LLM along with user prompt.\n\nThe approach works for research tasks because the higher latency is tolerable to the user if the output quality is high. You can show agent/processing steps for users to see what’s going on.",
                   "score": 1,
-                  "created_utc": "2026-05-30 19:03:54",
+                  "created_utc": "2026-05-31 19:51:45",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            },
+            {
+              "id": "oozh6u4",
+              "author": "Much_Pie_274",
+              "text": "I implemented a version of this here: [https://github.com/BartAmin/Clustered-Dynamic-RAG](https://github.com/BartAmin/Clustered-Dynamic-RAG)\n\nBut it's just a different approach I think",
+              "score": 1,
+              "created_utc": "2026-05-31 18:13:12",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "oozigoy",
+                  "author": "3941_",
+                  "text": "What about prepending doc metadata (e.g. doc  title, chapter) to the chunk before actually embedding it. Doesn't naturally lead to some sort of clusters?",
+                  "score": 1,
+                  "created_utc": "2026-05-31 18:19:08",
                   "is_submitter": false,
                   "replies": []
                 }
@@ -1691,30 +1550,12 @@
           ]
         },
         {
-          "id": "oospeni",
-          "author": "UnderstandLingAI",
-          "text": "Done countless RAG implementations, most in production. DM me if you have more tsilored questions",
+          "id": "ooxw6g4",
+          "author": "Much_Pie_274",
+          "text": "https://preview.redd.it/2lluwwfn7h4h1.png?width=3162&format=png&auto=webp&s=8e505f926819117acd8425bdf466423316d8941e\n\nArchitecture overview, see: [https://github.com/BartAmin/Fine-tuned-RAG](https://github.com/BartAmin/Fine-tuned-RAG)",
           "score": 1,
-          "created_utc": "2026-05-30 17:34:25",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ooss9dp",
-          "author": "tewkberry",
-          "text": "Hey! You might find my RAG system much more user friendly!! https://github.com/sparkplug604/praxis\n\nIt’ll install easily on any Windows or Mac instance, and works with whatever model and setup you have. Easy to use with commands. Ingest anything from documents to web searches, and you can retrieve it back with an audit log and explanation of where it came from. I built a bespoke chunking system that maintains context, as well as a a hybrid search system that includes semantic, vector, audit log, keyword and full-text searches for ideal retrieval. I also have a conflict manager system to manage dedupes and conflicts. Any piece of information can be easily rolled back, archived, or placed with even higher importance. Any piece of information can also be turned into a skill.md file for future actionability from your agent. Your memory will also dynamically update and automatically index the updated files based on scheduled searches. \n\nI’m releasing a few more modules in the next day or so that will include the ability to read live organizational data through read only connectors, as well as the ability to create capsules of data to prevent poisoning from one dataset to another (eg: different clients; different industries, etc) while still using the same agent skills and knowledge across different datasets. \n\nIf you use it, please let me know what you think, and consider giving my repo a star! ",
-          "score": 1,
-          "created_utc": "2026-05-30 17:47:57",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "op2m0br",
-          "author": "oliver_extracts",
-          "text": "retrieval scores being ok but answers being bad usually means youre retrieving the right chunks but they dont have enoguh context to actually answer the question. chunking is a data quality problem more than an ML problem. i'd start by logging exactly what chunks get passed to the prompt and reading them manually, if they wouldnt help a human answer the question they wont help the model either.",
-          "score": 1,
-          "created_utc": "2026-06-01 04:58:34",
-          "is_submitter": false,
+          "created_utc": "2026-05-31 13:37:59",
+          "is_submitter": true,
           "replies": []
         }
       ]
@@ -1854,136 +1695,63 @@
       ]
     },
     {
-      "id": "1towspj",
-      "title": "What's the best way to parse complex multi-format document for RAG",
+      "id": "1trw2ph",
+      "title": "Been reading everything i can find on rag and still cant get it right",
       "subreddit": "Rag",
-      "url": "https://www.reddit.com/r/Rag/comments/1towspj/whats_the_best_way_to_parse_complex_multiformat/",
-      "author": "Silver_Cule_2070",
-      "created_utc": "2026-05-27 06:07:12",
-      "score": 9,
-      "num_comments": 18,
-      "upvote_ratio": 0.92,
-      "text": "Hi guys  \nI have been recently working on a RAG system. Most of the documents are from government sources (regulations, letters, etc). And it's very clumsy, unstructured and sometimes differently structured for same documents (like different structures sometimes for same format of daily report). For things like daily reports, variants keep updating throughout the day due to mistakes at different ends.   \nDocuments are not only complex, but sometimes are simple scanned letters (not digital but scanned pdfs), random images anywhere - but do have department logos. Also sometimes there are images, tables, etc in between the documents. Sometimes the updated doc has very little changes (like change in pricing from INR 1.5 to INR 2 in the entire document).  \nAnd we have thousands of such documents from past few years. \n\n  \nNow, I wanted to know what's the best way to parse such documents (in large numbers and updations) for data to be ingested into RAG systems. I am currently using docling for this but it's very slow and takes too much time. I wanted to know from people who have shipped this difficult projects - how would you optimize this. \n\n\\- how to do data parsing in such cases and make it faster (for lots of documents)?\n\n\\- what will you use to parse images, texts, and tables. A document can have all of it altogether. And how will you parse scanned digital copy - using a VLM/OCR or what?\n\n\\- what format of data will you prefer for RAG (usually markdown is considered good for tables, but I think toon will also be good as it will keep tokens size in control)\n\n\\- how will you handle constant data updates (like versioning, metadata, etc) - is it good idea to wrap my parsed data into a json/toon format for this?\n\n\\- for live ingestion and qna on a long document (containing data in mixed format) - how will you ensure fast experience to user? Clause suggested me to first parse texts and provide updates to user. Then move to tables and ultimately to images/OCRs - this will work better - like message queues (just an example). But how will we do that?\n\n\\- If you need to use models locally, how will you set up that (models, configurations, etc) - this is the most interesting part I think with lots of learning. Literally building local pipeline with optimization. \n\n  \nI would love to discuss more on this. If someone has any of these answers, please feel free to answer and connect. Attaching a few document examples for reference (sorry it's not allowed here I think on this subreddit). ",
+      "url": "https://www.reddit.com/r/Rag/comments/1trw2ph/been_reading_everything_i_can_find_on_rag_and/",
+      "author": "sophie-turnerr",
+      "created_utc": "2026-05-30 10:18:38",
+      "score": 12,
+      "num_comments": 23,
+      "upvote_ratio": 0.81,
+      "text": "I have been trying to build a rag pipeline for internal documentation for a few weeks now and genuinely struggling. not a total beginner in python but rag specifically is breaking my brain. started with the basics then found google clouds blog post on llamaparse rag implementation, \"an advanced llamaindex rag implementation on google cloud\" and followed it pretty carefully tho. It covers the full stack, ingestion, chunking ,vector storage with vertex ai, gemini for generation and RAGAS for evaluation. well written felt like i understood it while reading.\n\nThen i built it and the answers were still inconsistent. went down a rabbit hole after that and found a few things that helped fill gaps. Anthropics contextual retrieval writeup changed how I thought about chunking, prepending chunk level context before embedding reduced my retrieval\n\nfailures noticeably. also went back through the llamaindex ingestion pipeline docs more carefully. the google blog had recommended document ingestion step before anything hits the index, which i hadnt been doing, i was just using pypdf and wondering why tables came out garbled.\n\nSwitched that out and it helped, at least on the pages with tables and mixed layouts. not a magic fix but that part of the pipeline feels less broken now. Still stuck on a few things though and not sure if its my setup or just gaps in my understanding: retrieval keeps returning the right document but wrong section. like it lands adjacent to the answer not actually on\n\nit. overlap helped a little but didnt fix it.. RAGaS gives me decent faithfulness scores but low answer relevancy and honestly i dont fully understand what that distinction is pointing to in terms of what to actually change anything that needs two documents combined to answer is basically always wrong read probably 15 blog posts at this point. feel like i understand each piece individually but when the whole pipeline fails end to end i have no idea where to even start debugging.\n\nHas anyone gone through this learning curve and can point to what actually moved the needle for them? feels like im missing something about how all the pieces are supposed to fit together. Feedbacks from anyone experienced are much appreciated, thanks",
       "is_original_content": false,
       "link_flair_text": "Discussion",
-      "permalink": "https://reddit.com/r/Rag/comments/1towspj/whats_the_best_way_to_parse_complex_multiformat/",
+      "permalink": "https://reddit.com/r/Rag/comments/1trw2ph/been_reading_everything_i_can_find_on_rag_and/",
       "domain": "self.Rag",
       "is_self": true,
       "comments": [
         {
-          "id": "oo4fz5c",
-          "author": "sreekanth850",
-          "text": "There is no magic solution for getting PDF parsing right, especially with government documents. We tried a lot of libraries and eventually settled on a multi-pipeline approach, For simple digital PDFs, geometric parsing works best because it is faster and more deterministic. For complex PDFs, scanned documents, mixed layouts, diagrams, tables, stamps, logos, and images, you usually need an OCR or vision models based pipeline. You can categorise document for deciding when to use which pipeline, because running everything through OCR/VLM will be slow and expensive.  \nDocling will be slow because it runs a heavier multi stage pipeline, including layout detection/model-based processing, before producing structured output. Also, since you mentioned government documents, the formats may not stop at PDFs. You may eventually run into MS Office files, scanned images, CAD drawings, GIS files, emails, etc.\n\nWe are building a [platform](https://trueparser.com) around this kind of multi-format parsing problem, covering PDF, MS Office, CAD, GIS, mail, and other formats and have one premise option also. It will be open for beta (Free) next week. Happy to connect if you want to compare approaches.",
-          "score": 5,
-          "created_utc": "2026-05-27 06:32:24",
+          "id": "ooqmqeo",
+          "author": "TenshiS",
+          "text": "Most issues you have will need more context than just individual chunks. At the very least return the 2 chunks before and after the one you identified as relevant. For small documents even consider returning the entire document.\n\nAlso, semantic search is okay but everyone doing it properly does hybrid search now",
+          "score": 8,
+          "created_utc": "2026-05-30 10:46:59",
           "is_submitter": false,
           "replies": [
             {
-              "id": "oo51ml7",
-              "author": "BlackShadowv",
-              "text": "Yeah you need good dedicated hardware to run Docling efficiently. Or just use a hosted API like [Parsebridge Docling API](https://parsebridge.com/docling-api/).",
+              "id": "op4hukh",
+              "author": "sophie-turnerr",
+              "text": "hybrid seach is already in the list to implement and the sorrounding chunk retrieval makes sense as a quick fir for the adjecent section problem. the full document return for small docs is an interesting middle ground that hadnt been considered like at what document size do you find the tradeoff between context noise and completeness starts going wrong way",
               "score": 1,
-              "created_utc": "2026-05-27 09:35:38",
-              "is_submitter": false,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "oo4dh6f",
-          "author": "anoop_shrma",
-          "text": "Hey, have you tried LlamaParse from LlamaIndex team?\nIf not I would highly suggest you give it a try: [Llamaparse ](https://www.llamaindex.ai/llamaparse)",
-          "score": 1,
-          "created_utc": "2026-05-27 06:12:27",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "oo4enno",
-              "author": "Silver_Cule_2070",
-              "text": "yes, I've heard about it. Let me give it a try ",
-              "score": 1,
-              "created_utc": "2026-05-27 06:21:45",
+              "created_utc": "2026-06-01 13:28:31",
               "is_submitter": true,
               "replies": []
             }
           ]
         },
         {
-          "id": "oo4g3ub",
-          "author": "Bewis_123",
-          "text": "hey dm me, lets talk over this",
-          "score": 1,
-          "created_utc": "2026-05-27 06:33:27",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oo4x0uu",
-          "author": "CountlessFlies",
-          "text": "Docling works at acceptable speeds with a GPU available. Otherwise it's painfully slow as you've already seen. So I'd suggest using docling with a GPU, works quite well especially if your docs have lots of tables.\n\nMarkdown is best for quality, LLMs are very good at understanding markdown.\n\nFor handling updates, I'd just start with re-processing the entire doc because it's infrequent and simplest to implement. Then, if you run into any issues like too much re-processing overhead, you can diff the incoming content against what you have indexed, and only re-compute what changed. E.g., you can chunk the incoming doc, compare against saved chunks (store sha256 hash of each chunk), then determine which chunks have changed. Then only re-process the changed chunks. \n\nI agree with the text-only approach to start with. If most of your docs are images, I would start with OCR as well. Use docling for tables. Image extraction (as in non-text-containing images) can come much later.\n\nLocal setup is very much feasible if you have a GPU available. Running docling locally is quite straightforward.\n\n",
-          "score": 1,
-          "created_utc": "2026-05-27 08:56:22",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oo5g8kf",
-          "author": "Decent_Cap9020",
-          "text": "I would not run one heavy parser on every document. The faster approach is usually a staged pipeline.\n\nFirst classify pages as digital text, scanned text, table-heavy, image-heavy, or mixed. Use cheap text extraction where possible, OCR only for scanned pages, and VLMs only for pages where OCR/layout fails. For tables, keep both markdown and structured JSON with page, bbox, source file, version, and timestamp metadata.\n\nFor constant updates, hash the document and page/chunk content so you only reprocess changed parts. That matters a lot when one price or clause changes in a 100-page PDF.\n\nFor live ingestion, use queues: return searchable text first, then add tables, OCR, and image understanding as later enrichment jobs. The RAG layer should know which chunks are “ready,” “partial,” or “needs review.”",
-          "score": 1,
-          "created_utc": "2026-05-27 11:20:56",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oo5vov1",
-          "author": "AvenueJay",
-          "text": "There are a bunch of threads with similar questions regarding parsing:\n\n* [https://www.reddit.com/r/Rag/comments/1tcsumq/rag\\_genai\\_development/](https://www.reddit.com/r/Rag/comments/1tcsumq/rag_genai_development/)\n* [https://www.reddit.com/r/Rag/comments/1t23dec/doubt\\_how\\_to\\_setup\\_rag\\_for\\_summarising\\_large\\_pdfs/](https://www.reddit.com/r/Rag/comments/1t23dec/doubt_how_to_setup_rag_for_summarising_large_pdfs/)\n* [https://www.reddit.com/r/Rag/comments/1shdula/rag\\_for\\_complex\\_pdfs\\_struggling\\_with\\_parsing\\_vs/](https://www.reddit.com/r/Rag/comments/1shdula/rag_for_complex_pdfs_struggling_with_parsing_vs/)\n* [https://www.reddit.com/r/Rag/comments/1sbpz8k/best\\_approach\\_for\\_faithfully\\_extracting\\_text/](https://www.reddit.com/r/Rag/comments/1sbpz8k/best_approach_for_faithfully_extracting_text/)",
-          "score": 1,
-          "created_utc": "2026-05-27 12:48:17",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oo7yr2h",
-          "author": "Mental-War-2282",
-          "text": "have you tried Haystack ? they have different components to handle a good variety of document types and route each document to the specific component , if there are some special formated document you can create a custom component that suits your needs , this should cover a good variety of documents , as for the messy ones you try different OCR models ",
-          "score": 1,
-          "created_utc": "2026-05-27 18:21:18",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oo83pek",
-          "author": "Opening_Highlight241",
-          "text": "i think Unstract might be of help > [https://github.com/Zipstack/unstract](https://github.com/Zipstack/unstract)",
-          "score": 1,
-          "created_utc": "2026-05-27 18:42:51",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oo87ezh",
-          "author": "sandstone-oli",
-          "text": "I work in government technology and deal with exactly this kind of document chaos so a few thoughts from production experience.\n\nfor parsing at scale, docling is solid but slow because it's doing a lot of structural analysis per page. if speed is the bottleneck and you have thousands of docs, consider a two pass pipeline. first pass is fast OCR plus layout detection (something like surya or marker for PDFs) to get raw text and bounding boxes. second pass is a VLM like Claude or GPT-4o on the pages that actually need visual understanding, tables, diagrams, scanned letters with handwriting, logos you need to classify. don't send every page through a VLM, only the ones the first pass flags as complex. that alone will cut your processing time significantly.\n\nfor tables specifically, markdown is fine for simple tables but for government docs with merged cells and nested headers you're better off extracting to structured JSON and then flattening at retrieval time based on the query. trying to force a messy government table into markdown usually loses the relationships between cells.\n\nthe update handling is where most RAG systems fall apart on government data and honestly this is the hardest part of what you're describing. when a daily report gets corrected three times in one day you need to know which version is current, what changed, and whether the old version should still be retrievable for audit purposes. a few things that help: content hashing to detect actual changes vs reformatting, timestamp plus source metadata on every chunk, and a supersession layer that marks old versions as deprecated but doesn't delete them. wrapping parsed output in a JSON envelope with version metadata is the right instinct.\n\nfor the live ingestion question, the progressive parsing approach is correct. text first, tables second, images last. use a task queue (Celery, Bull, even SQS) and push partial results to the user as each stage completes. the key is making sure your chunking strategy doesn't break when a later parsing stage adds table or image context to a chunk that was already indexed as text only. either re-index the full chunk after all stages complete or design your chunks to be stage-aware from the start.\n\nfor local models, if you need to stay on prem look at surya for OCR, a quantized Qwen2-VL for visual understanding, and bge or nomic for embeddings. the main optimization is batching, don't process one page at a time, batch by document type so you can reuse the same pipeline config across similar formats.\n\nhappy to discuss more if you want to get into specifics on the versioning side. that's the piece I've spent the most time on.",
-          "score": 1,
-          "created_utc": "2026-05-27 18:58:57",
+          "id": "ooqqzhq",
+          "author": "fabkosta",
+          "text": "Hi Sophie, cool that you are building RAG systems. Now, what you are describing is not unusual. Most beginners underestimate the complexity to build those systems. Cause, how hard can it be?\n\nThe underlying symptoms that you describe is that you lack a plan. And requirements. First, you need to understand which problem you're solving, cause without that you don't know what to optimize for. I see this same point being totally ignored all the time. That's why I'm stressing it. If you say e.g. retrieval is bad - well, bad according to what? According to which standard? According to whose expectations? It is your business context or users' requirements that need to tell you that. And without that, you are trying to optimize something without having a standard for what is considered good.\n\nYou also must clarify what should happen with tables, figures, charts, etc. That's a business requirement, shouldn't be your decision alone. You have to know what users intend to do with those tables. Are they even interested in them? If yes, how do they intend to search for table content, like: what do they actually enter into the search field that identifies a specific cell value? Is this even supposed to be possible? And so on.\n\nThe next stage after clarifying requirements is - no, not building the thing - but drawing UI mockups. Why? Because that will clarify how the users engage with your search engine. For example, if the users can use filters in the UI that can have a drastic reduction of your search space as a consequence. Yeah, filters! It's a real thing! Nobody thinks of filters for any reason that I cannot fathom. You make both your own and your users' lives so much easier if you can reduce the number of documents that are of interest even in principle.\n\nWhat's next? Now only you should think about the things you think about, i.e. document pre-processing, index design, type of search applied (for most real-world problems hybrid search beats vector search alone).\n\nYou see, there is a lot more that should come first before you even think about the things you think about.",
+          "score": 2,
+          "created_utc": "2026-05-30 11:19:01",
           "is_submitter": false,
           "replies": [
             {
-              "id": "ooa6f14",
-              "author": "jamas93",
-              "text": "Nice, I've done something very similar, but without the versioning. How did you work on that? Do you filter at query time or post processing?",
+              "id": "op4jaev",
+              "author": "sophie-turnerr",
+              "text": "the requirement first point lands, debugging retrieval without a clear definition of what good looks like is basically guessing.... the filter angle is something that hadnt been considered at all and it makes sense tho like reducing the search space before semantic matching even runs would probably fix more than any chunking tweak. im curious on the UI mockup setup like for an internal docs usecase where users are mostly asking natural language questions, do you find explicit filters still get adopted or do users just default to the searchbox regardless??",
               "score": 1,
-              "created_utc": "2026-05-28 00:48:24",
-              "is_submitter": false,
+              "created_utc": "2026-06-01 13:35:55",
+              "is_submitter": true,
               "replies": [
                 {
-                  "id": "ooacskx",
-                  "author": "sandstone-oli",
-                  "text": "both, but with different jobs.\n\nat ingest time, when a new document version comes in, we content-hash it against the previous version to detect what actually changed vs what was just reformatted. if the delta is below a threshold it's a formatting-only update and the old chunks keep their existing scores. if it's a real content change, the new chunks get indexed and the old version's chunks get a staleness penalty applied immediately rather than waiting for someone to query them.\n\nat query time, we filter by version metadata first so the retriever is only searching current-version chunks by default. but we don't delete old versions. they stay indexed with a superseded flag. if someone explicitly queries historically, like \"what was the pricing in the March report,\" the retriever can reach back into deprecated chunks.\n\npost-processing is the safety net. if the retriever returns chunks from multiple versions of the same document, the reranker detects the version conflict and promotes the newest version. that shouldn't happen often if the ingest-time penalties are working but it catches edge cases where a query is ambiguous enough to pull from both.\n\nthe key insight was that versioning isn't one decision. it's three layers: ingest-time penalty, query-time filtering, and post-retrieval conflict resolution. skipping any one of them leaves a hole that surfaces as stale results.\n\nwhat's your current setup? curious what you're using for the similar-but-no-versioning approach.",
+                  "id": "op4qvln",
+                  "author": "fabkosta",
+                  "text": "I cannot tell - your users have to tell you that! 😄",
                   "score": 1,
-                  "created_utc": "2026-05-28 01:23:24",
+                  "created_utc": "2026-06-01 14:13:42",
                   "is_submitter": false,
                   "replies": []
                 }
@@ -1992,109 +1760,65 @@
           ]
         },
         {
-          "id": "ooipbdn",
-          "author": "Specialist_Golf8133",
-          "text": "pymupdf is fine for clean native PDFs but yeah, it hits a wall fast on anything scanned or table-heavy. the extraction layer before chunking is honestly where most RAG pipelines quietly fall apart and nobody talks about it enough.\n\nwe went through a few options when we were rebuilding ours. llamaparse is decent on native PDFs but we saw it degrade pretty badly on scan quality variance, which is probably your biggest problem with the invoice and bank statement mix. when we benchmarked docsumo, nanonets, and rossum against our own 200-doc worst-case sample, docsumo had the best STP rate on multi-page bank statements specifically, rossum held up better on invoice types out of the box. nanonets was closest to a raw OCR baseline on clean docs but fell furthest on low-quality scans. none of them are magic, but the diffrence between 78% and 91% STP rate is real when you're trying to feed structured fields into a RAG index. layout-aware models are doing most of the heavy lifting there vs. pure text extraction.\n\nfor chunking after, table extraction quality matters more than chunk size. if your extractor is flattening tables to garbage text, no chunking strategy fixes that downstream.",
+          "id": "oor3ipr",
+          "author": "[deleted]",
+          "text": "[removed]",
           "score": 1,
-          "created_utc": "2026-05-29 06:06:11",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
-      "id": "1trq724",
-      "title": "spent way too long debugging RAG before realizing the chunking was the problem the whole time",
-      "subreddit": "Rag",
-      "url": "https://www.reddit.com/r/Rag/comments/1trq724/spent_way_too_long_debugging_rag_before_realizing/",
-      "author": "SilverConsistent9222",
-      "created_utc": "2026-05-30 04:53:54",
-      "score": 9,
-      "num_comments": 14,
-      "upvote_ratio": 0.84,
-      "text": "every tutorial i followed spent maybe one paragraph on chunking and moved on. figured it was straightforward. it wasn't.\n\nfixed size chunking splits on token count, not on where a thought actually ends. so you retrieve a chunk that's about the right thing but the sentence with the actual answer got cut into the next chunk that didn't make the retrieval cutoff. model gets half the context and wings the rest. spent weeks thinking it was an embedding problem.\n\nthe thing that finally helped wasn't changing anything, just actually reading what was coming back for the queries that were failing. the answer was almost always in there somewhere, just split in the wrong place.\n\nvector search also just doesn't work for exact identifiers and i found this out the hard way. someone queries a specific version number or product code, semantic search returns stuff that's \"close\" and close is wrong. BM25 alongside vectors fixed it, but i'd never seen it mentioned in any of the intro material i'd gone through.\n\nstale index is the other one. updated a document, forgot to re-index, confidently wrong answers for two days before i figured out what happened. not a hard problem but nobody warns you about it.",
-      "is_original_content": false,
-      "link_flair_text": "Tutorial",
-      "permalink": "https://reddit.com/r/Rag/comments/1trq724/spent_way_too_long_debugging_rag_before_realizing/",
-      "domain": "self.Rag",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "oopxd5r",
-          "author": "devtechmonster",
-          "text": "i thought thats why people use late chunking strategy? but of course need embedding model with high context windows",
-          "score": 2,
-          "created_utc": "2026-05-30 07:07:04",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ooq5qth",
-          "author": "Otherwise_Economy576",
-          "text": "Classic RAG trap — retrieval looks fine in the notebook then fails in prod because chunk boundaries and metadata are wrong. What fixed it for you when you found the real issue?",
-          "score": 2,
-          "created_utc": "2026-05-30 08:19:11",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oou46sl",
-          "author": "KarenBoof",
-          "text": "You post this here like every other day ",
-          "score": 2,
-          "created_utc": "2026-05-30 21:48:49",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ooq3uqt",
-          "author": "Hour-Entertainer-478",
-          "text": "How are you finding the natural break amongst the chunks ?\nAre you using any specific tools / libraries ",
-          "score": 1,
-          "created_utc": "2026-05-30 08:02:35",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ooqhn4f",
-          "author": "sophie-turnerr",
-          "text": "every intro tutorial treats it like a footnote and then ur weeks deep into debugging embeddings and retrieval logic before u circle back and realise the chunks were just cutting thoughts in half..semantic chunking or even just chunking on paragraph breaks insted of token count fixes so much of this without touching anything else",
-          "score": 1,
-          "created_utc": "2026-05-30 10:04:52",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oox9sqn",
-          "author": "DorkyMcDorky",
-          "text": "As a search professional, I can't tell you how often I am telling our org to only focus on data input quality so it's easier for me to chunk.  That hiring 100 interns to edit text as a mechanical turk is far more effective than the spend on AI we're jerking off on.",
-          "score": 1,
-          "created_utc": "2026-05-31 11:15:14",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ooqmw6f",
-          "author": "cointegration",
-          "text": "hence semantic chunking, use an LLM to decide when an idea ends and another begins",
-          "score": 1,
-          "created_utc": "2026-05-30 10:48:15",
+          "created_utc": "2026-05-30 12:40:42",
           "is_submitter": false,
           "replies": [
             {
-              "id": "oowyjue",
-              "author": "Mental-War-2282",
-              "text": "each type of document has a chunking strategy that best suits its format , LLMS are NOT used during chunking ( way too expensive and way too inefficient ) , you realise that a modest production application deals with at least 5k document with thousands of tokens in each line ?",
+              "id": "op4lqxw",
+              "author": "sophie-turnerr",
+              "text": "parent retrival framing for the chunk size problem and the RAGAS distinction exolaation both clarify exactly where the pipeline is actually breaking... implementing smaller chunks with parent retrieval is the next move and the query decomposition for multi document questions explains why that catgory was failing while it looked fine",
               "score": 1,
-              "created_utc": "2026-05-31 09:42:48",
-              "is_submitter": false,
+              "created_utc": "2026-06-01 13:48:29",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "ooraesp",
+          "author": "not_my_real_name_2",
+          "text": "Following this, as a person who's interested in RAG and hasn't begun the intensive research phase yet. ",
+          "score": 1,
+          "created_utc": "2026-05-30 13:20:18",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "op4p0tz",
+              "author": "sophie-turnerr",
+              "text": "welcome to the rabbit hole....lol the learning curve exists and real but the post and comments here are probably the mst honest and raw walkthru of what actually breaks and why",
+              "score": 1,
+              "created_utc": "2026-06-01 14:04:43",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "oorgux7",
+          "author": "eliaweiss",
+          "text": "This is because RAG is a heuristic and often won’t work in many cases.  \nYour only option is to heavily optimize the hyperparameters, but that still won’t work well if your dataset varies a lot from one document to another.",
+          "score": 1,
+          "created_utc": "2026-05-30 13:55:19",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "opgxmxb",
+              "author": "sophie-turnerr",
+              "text": "hyperparameter tuning ceilin is real specially across heterogeneous document ypes like what works for dense technical docs breaks on conversational notes and theres no single config that serves both well. Have you found routint to document type specific indexes helpful or if the variance problem runs deeper than that",
+              "score": 1,
+              "created_utc": "2026-06-03 07:11:26",
+              "is_submitter": true,
               "replies": [
                 {
-                  "id": "ooxjun3",
-                  "author": "cointegration",
-                  "text": "Yes i do realise that. What YOU do not realise is that most people are doing it with local LLMs, cheap and cheerful and does the job.",
+                  "id": "ophsh7y",
+                  "author": "eliaweiss",
+                  "text": "Did you heard about \"the bitter lesson\"? Rag is a classic.\nIt can only work \n- norrow use case \n- forgiving users\n- highly adapt code to handle different use case ",
                   "score": 1,
-                  "created_utc": "2026-05-31 12:25:20",
+                  "created_utc": "2026-06-03 11:21:09",
                   "is_submitter": false,
                   "replies": []
                 }
@@ -2103,12 +1827,87 @@
           ]
         },
         {
-          "id": "oopgty9",
-          "author": "SilverConsistent9222",
-          "text": "made a video going through all of this if it's useful- [https://youtu.be/MBDiJAWx8xk?si=7v4j-DNrJo5kNIaX](https://youtu.be/MBDiJAWx8xk?si=7v4j-DNrJo5kNIaX)",
-          "score": 0,
-          "created_utc": "2026-05-30 04:54:17",
-          "is_submitter": true,
+          "id": "oorldf1",
+          "author": "Dry_Inspection_4583",
+          "text": "I don't believe rag endpoint, ie. Vector DBs to be the right trajectory for information writ. Vector databases are the LLM's interpretation of the information, NOT the information.\n\nI would suggest harnessing a different endpoint that tangibly holds the information, rather than the LLM's interpretation of the thing.",
+          "score": 1,
+          "created_utc": "2026-05-30 14:19:01",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "opgz68a",
+              "author": "sophie-turnerr",
+              "text": "interesting angle. what kind of endpoint would you suggest instead? like a knowledge graph or something more structured??",
+              "score": 1,
+              "created_utc": "2026-06-03 07:24:22",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "oorlxni",
+          "author": "Dry_Inspection_4583",
+          "text": "And fwiw, I went kinda hard down this path as it relates to memory and developed faultline to address exactly this, but not for documents, my project is for memory. However it's Foss, you might be able to branch or hinge off it for ideas, I'd love to see this exact pipeline handled properly. It would solve a lot of peoples problems!!",
+          "score": 1,
+          "created_utc": "2026-05-30 14:21:53",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oorzcd1",
+          "author": "DrinksAtTheSpaceBar",
+          "text": "Went down a similar path in the Google ecosystem. My biggest breakthrough came after discovering that Vertex AI was not the correct pipeline for creating a robust RAG engine. The moment I switched to Google AI APIs and learned how to properly build a RAG engine with minimal constraints, the difference was night and day. ",
+          "score": 1,
+          "created_utc": "2026-05-30 15:29:07",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "oos19bc",
+              "author": "DrinksAtTheSpaceBar",
+              "text": "Oh! And I did find a cheat code that was an absolute game changer for my use case. NotebookLM is (in my opinion) one of the most impressive RAG platforms in existence. You can throw massive datasets at it in conjunction with unstructured and sloppy PDFs, and it will extract the cleanest and most precise answers for you almost 100% of the time. You can look at its OCR/PDF ingestion results, and they're as noisy any other technique, so how does NotebookLM still manage to extract relevant information? Well, make THAT your project in NotebookLM. It will openly share its architecture, going as far as to draft your tech stack blueprint based on your specific use case. Hope this helps.",
+              "score": 1,
+              "created_utc": "2026-05-30 15:38:40",
+              "is_submitter": false,
+              "replies": [
+                {
+                  "id": "oot81g6",
+                  "author": "tewkberry",
+                  "text": "It would be awesome if you could try my repo and let me know how it compares to NotebookLM: https://github.com/sparkplug604/praxis\n\nDownsides:\n- I am not Google. I am only me.\n\nUpsides:\n- You don’t have to use Google. \n- You can own your own memory locally and work with any model or agent. \n- Like NotebookLM, has indexed searches with evidence attached and full audit log. \n- Like NotebookLM, has hybrid search including semantic, keyword, and full-text. \n- Additionally has the ability to dynamically update your memory and keep it fresh \n- Also can turn any piece of knowledge into an agent skill \n- Also has a dedupe and conflict management system with manual overrides to depreciate or supersede data\n- Also has a retrieval relevancy score that measures freshness, trust, SkillGraph association, and more before output \n- Easy to install. Controlled through CLI commands. \n\nPlease check it out and let me know what you think as a NotebookLM user!! \n",
+                  "score": 1,
+                  "created_utc": "2026-05-30 19:03:54",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "oospeni",
+          "author": "UnderstandLingAI",
+          "text": "Done countless RAG implementations, most in production. DM me if you have more tsilored questions",
+          "score": 1,
+          "created_utc": "2026-05-30 17:34:25",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "ooss9dp",
+          "author": "tewkberry",
+          "text": "Hey! You might find my RAG system much more user friendly!! https://github.com/sparkplug604/praxis\n\nIt’ll install easily on any Windows or Mac instance, and works with whatever model and setup you have. Easy to use with commands. Ingest anything from documents to web searches, and you can retrieve it back with an audit log and explanation of where it came from. I built a bespoke chunking system that maintains context, as well as a a hybrid search system that includes semantic, vector, audit log, keyword and full-text searches for ideal retrieval. I also have a conflict manager system to manage dedupes and conflicts. Any piece of information can be easily rolled back, archived, or placed with even higher importance. Any piece of information can also be turned into a skill.md file for future actionability from your agent. Your memory will also dynamically update and automatically index the updated files based on scheduled searches. \n\nI’m releasing a few more modules in the next day or so that will include the ability to read live organizational data through read only connectors, as well as the ability to create capsules of data to prevent poisoning from one dataset to another (eg: different clients; different industries, etc) while still using the same agent skills and knowledge across different datasets. \n\nIf you use it, please let me know what you think, and consider giving my repo a star! ",
+          "score": 1,
+          "created_utc": "2026-05-30 17:47:57",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "op2m0br",
+          "author": "oliver_extracts",
+          "text": "retrieval scores being ok but answers being bad usually means youre retrieving the right chunks but they dont have enoguh context to actually answer the question. chunking is a data quality problem more than an ML problem. i'd start by logging exactly what chunks get passed to the prompt and reading them manually, if they wouldnt help a human answer the question they wont help the model either.",
+          "score": 1,
+          "created_utc": "2026-06-01 04:58:34",
+          "is_submitter": false,
           "replies": []
         }
       ]
@@ -2120,9 +1919,9 @@
       "url": "https://www.reddit.com/r/Rag/comments/1trjl6p/the_model_was_never_the_bottleneck_got_local_rag/",
       "author": "CAVOKDesigns",
       "created_utc": "2026-05-29 23:43:16",
-      "score": 8,
+      "score": 9,
       "num_comments": 21,
-      "upvote_ratio": 0.59,
+      "upvote_ratio": 0.6,
       "text": "Been building a local RAG stack for technical documents , started with aviation manuals (the kind you legally can't upload to ChatGPT), now getting requests from nursing students who need their assigned textbooks to answer questions with citations, not the internet's best guess. The wall I hit: my demo rig has 32GB RAM. A nursing student's laptop doesn't. Same retrieval quality was non-negotiable — these are students who need to cite their actual assigned textbook, not a hallucinated approximation of it.\n\nHere's what actually mattered when designing for constrained hardware: Swapped down to gemma4:e2b, 2 billion parameters, and citation accuracy didn't move. Ran a crosswind limitation query against a 400-page aviation AFM. Four page citations came back. Page 57, 357, 376, 459. All correct. The retrieval is doing the work, not the inference.\n\nChunk boundaries matter more than chunk size. At 1800 characters with section-aware splits, a small model reads a clean retrieved chunk and formats a precise answer. Give it a badly split chunk and even a large model struggles. Spent more time on boundary logic than on anything else in the stack.\n\nProtected blocks can't be split. For safety-critical content; WARNING, CAUTION, DANGER blocks in aviation manuals, critical drug interaction notes in nursing textbooks,  a chunk that splits mid-warning is worse than no answer. Made these atomic. Non-negotiable. Cloud toggle for students who need it. For machines that truly can't run local inference, routing to Claude Sonnet via API key gives the same retrieval quality with zero local compute. The vectors stay local. Only the question travels.\n\nStack: pdfplumber + ChromaDB + Ollama on the local side, Anthropic API for cloud toggle. Runs clean on an M2 MacBook 8GB.\n\nHappy to go deeper on the boundary-aware chunking logic or the cloud/local toggle architecture if anyone's building something similar.",
       "is_original_content": false,
       "link_flair_text": "Showcase",
@@ -2163,7 +1962,7 @@
           "id": "ooob6d9",
           "author": "electrosaurus",
           "text": "This reads like a slop post.",
-          "score": 11,
+          "score": 10,
           "created_utc": "2026-05-30 00:30:14",
           "is_submitter": false,
           "replies": []
@@ -2284,6 +2083,238 @@
       ]
     },
     {
+      "id": "1tu71gr",
+      "title": "rag-handbook",
+      "subreddit": "Rag",
+      "url": "https://www.reddit.com/r/Rag/comments/1tu71gr/raghandbook/",
+      "author": "Technical_Pepper_401",
+      "created_utc": "2026-06-01 21:50:56",
+      "score": 9,
+      "num_comments": 2,
+      "upvote_ratio": 1.0,
+      "text": "I developed this rag-handbook compiling all the important resources at one platform, to help people who want to learn about RAG.  \nCheck it out - [rag-handbook](https://raghandbook-dz9ek6sg.manus.space)\n\nReview and let me know if things can be improved.",
+      "is_original_content": false,
+      "link_flair_text": "Discussion",
+      "permalink": "https://reddit.com/r/Rag/comments/1tu71gr/raghandbook/",
+      "domain": "self.Rag",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "op85q0u",
+          "author": "PapyrStreetSoaps",
+          "text": "Great job. I know very little about RAG basics, but this helped",
+          "score": 2,
+          "created_utc": "2026-06-02 00:12:22",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "op9qi20",
+          "author": "Illustrious_Movie740",
+          "text": "thanks for sharing ",
+          "score": 2,
+          "created_utc": "2026-06-02 06:32:12",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1tunoxq",
+      "title": "What's your current RAG + workflow automation stack?",
+      "subreddit": "Rag",
+      "url": "https://www.reddit.com/r/Rag/comments/1tunoxq/whats_your_current_rag_workflow_automation_stack/",
+      "author": "JarvisModeOn",
+      "created_utc": "2026-06-02 11:09:21",
+      "score": 9,
+      "num_comments": 8,
+      "upvote_ratio": 1.0,
+      "text": "Curious what people are actually using for RAG and workflow automation together.\n\nThere are so many possible setups now, Open WebUI, Dify, n8n, Ollama, AnythingLLM, vector database, Langflow, Flowise, custom APIs, etc.\n\nWhat stack are you actually running right now?\n\nNot looking for the best tool. More interested in what works for your use case.",
+      "is_original_content": false,
+      "link_flair_text": "Discussion",
+      "permalink": "https://reddit.com/r/Rag/comments/1tunoxq/whats_your_current_rag_workflow_automation_stack/",
+      "domain": "self.Rag",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "opavw1z",
+          "author": "Mysterious-Note3615",
+          "text": "Hi,  \nFor my use case (french social housing): I deleted a lot of glue code. 10+ dependencies. A chunking strategy. A vector database. French stemmers. An embedding model. A reranker. A costly and lengthy build pipeline. A €200/month Hetzner GPU. A €15/month Hugging Face inference endpoint. A few euros per month for LLM-as-reranker calls on Groq or Cerebras.  \n  \n=> SQLite File and One Harness Is Enough for French Social Housing: [https://github.com/charnould/pierre/blob/master/docs/documentation/2026-05-from-rag-to-sqlite-and-harness.md#one-sqlite-file-and-one-harness-is-enough-for-french-social-housing](https://github.com/charnould/pierre/blob/master/docs/documentation/2026-05-from-rag-to-sqlite-and-harness.md#one-sqlite-file-and-one-harness-is-enough-for-french-social-housing)",
+          "score": 3,
+          "created_utc": "2026-06-02 11:57:41",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "opaxrb3",
+              "author": "JarvisModeOn",
+              "text": "This is interesting. I like the idea of removing complexity instead of adding more RAG layers. A single SQLite file and harness is a much cleaner direction if the use case allows it.",
+              "score": 1,
+              "created_utc": "2026-06-02 12:08:42",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "opawc5p",
+          "author": "Specialist_Golf8133",
+          "text": "on the automation side n8n has been way more flexible than langchain for orchestrating retrieval-triggered workflows, less fighting the abstractions. most teams also underestimate how much the ingest step poisons retrieval quality later. for our pipeline we swapped textract for docsumo (i'm on the docsumo team) becuase confidence scores per field let us flag bad parses before they hit the index. pinecone is fine but if filtered retrieval becomes heavy, pgvector with proper indexing is worth benchmarking at your scale.",
+          "score": 1,
+          "created_utc": "2026-06-02 12:00:20",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "opaxh68",
+              "author": "JarvisModeOn",
+              "text": "That makes sense. Ingest quality seems like the part people underestimate until retrieval starts giving weird results. The confidence-score idea before indexing is a good guardrail",
+              "score": 2,
+              "created_utc": "2026-06-02 12:07:03",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "opcakan",
+          "author": "khampol",
+          "text": "1st home rag home  ever : llamaindex/qdrant/nomic-embedded > fastAPI > openwebui, voilà :>",
+          "score": 1,
+          "created_utc": "2026-06-02 16:03:43",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "opde0bu",
+          "author": "tewkberry",
+          "text": "I ended up building my own custom stack because I kept running into the gap between RAG, memory, and workflow automation.\n\nIt’s open source here: https://github.com/sparkplug604/praxis\n\nPraxis is a local-first RAG + SkillGraph + workflow layer. It’s not an agent runtime, and not trying to replace LangGraph/n8n/etc. It sits around agent work and manages source capture, chunking, retrieval, graph memory, conflict tracking, rollback, and skill/workflow export.\n\nPraxis treats memory as evidence, not truth, to prevent issues with memory bloat over time. Ingested material becomes provisional SkillGraph memory first. Every graph mutation is written as an audited change set with before/after records. I can promote, deprecate, dedupe, or rollback memory changes instead of letting the knowledge base become a junk drawer.\n\nI also got feedback that a lot of teams need agents to use live operational business data, and to run the same workflow across many clients with different tech stacks. So, I built experimental modules that connect read-only access to business systems (like Hubspot, Google Analytics, etc), with the ability to preserve independent memory across different clients. \n\nThe current Python stack is roughly:\n\n• praxis.cli: main CLI router.\n\n• commands.research_source: captures web/local sources and preserves raw evidence.\n\n• commands.ingest_source: captures a source, proposes graph memory, and auto-applies it as provisional.\n\n• commands.vector_common: chunking, semantic document/chunk schema, embeddings helpers.\n• commands.chunk_sources: turns captured material into searchable chunks.\n\n• commands.index_vectors: creates local-hash or OpenAI embeddings.\n\n• commands.hybrid_search: combines vector search, keyword search, graph hints, priority scoring, and *--explain* command (which attaches explanations to retrieved info)\n\n• context_priority: scores retrieval results using relevance, trust, freshness, status, graph signal, and conflict penalty.\n\n• commands.graph_audit: change sets, before/after records, rollback, promote/deprecate mechanics.\n\n• commands.conflict_ledger: duplicate detection, claim-ish records, contradiction/conflict tracking.\n• commands.dedupe: reversible merge/split-style dedupe support.\n\n• reach.manifests: read-only query contracts for operational data.\n\n• reach.evidence: evidence cards with source links, freshness, confidence, warnings, conflicts, and query hashes.\n\n• reach.context: turns evidence into agent-ready context packs.\n\n• agency.clients: per-client capsules, systems, field maps, metrics, permissions.\n\n• agency.lifecycle: archive/export/delete-plan/delete/quarantine/purge for client artifacts.\n\n\nThe stack is still early, but the core idea is that RAG alone is not enough. I wanted a layer where sources become searchable memory, memory stays traceable, conflicts are visible, old knowledge can be rolled back, and useful knowledge can become reusable agent instructions/workflows.",
+          "score": 1,
+          "created_utc": "2026-06-02 18:55:30",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "opgpmb8",
+          "author": "Spdload",
+          "text": "Built a RAG knowledge copilot that brings scattered internal knowledge into a single role-aware source of truth for teams. Stack: Python, LangChain, Pydantic, Neo4j, ChromaDB, n8n.\n\nWe've learned that ChromaDB alone wasn't enough. Adding Neo4j for the relationship layer between teams, roles, and documents helped us make retrieval useful rather than just fast.",
+          "score": 1,
+          "created_utc": "2026-06-03 06:06:41",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1trq724",
+      "title": "spent way too long debugging RAG before realizing the chunking was the problem the whole time",
+      "subreddit": "Rag",
+      "url": "https://www.reddit.com/r/Rag/comments/1trq724/spent_way_too_long_debugging_rag_before_realizing/",
+      "author": "SilverConsistent9222",
+      "created_utc": "2026-05-30 04:53:54",
+      "score": 7,
+      "num_comments": 14,
+      "upvote_ratio": 0.74,
+      "text": "every tutorial i followed spent maybe one paragraph on chunking and moved on. figured it was straightforward. it wasn't.\n\nfixed size chunking splits on token count, not on where a thought actually ends. so you retrieve a chunk that's about the right thing but the sentence with the actual answer got cut into the next chunk that didn't make the retrieval cutoff. model gets half the context and wings the rest. spent weeks thinking it was an embedding problem.\n\nthe thing that finally helped wasn't changing anything, just actually reading what was coming back for the queries that were failing. the answer was almost always in there somewhere, just split in the wrong place.\n\nvector search also just doesn't work for exact identifiers and i found this out the hard way. someone queries a specific version number or product code, semantic search returns stuff that's \"close\" and close is wrong. BM25 alongside vectors fixed it, but i'd never seen it mentioned in any of the intro material i'd gone through.\n\nstale index is the other one. updated a document, forgot to re-index, confidently wrong answers for two days before i figured out what happened. not a hard problem but nobody warns you about it.",
+      "is_original_content": false,
+      "link_flair_text": "Tutorial",
+      "permalink": "https://reddit.com/r/Rag/comments/1trq724/spent_way_too_long_debugging_rag_before_realizing/",
+      "domain": "self.Rag",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "oopxd5r",
+          "author": "devtechmonster",
+          "text": "i thought thats why people use late chunking strategy? but of course need embedding model with high context windows",
+          "score": 2,
+          "created_utc": "2026-05-30 07:07:04",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "ooq5qth",
+          "author": "Otherwise_Economy576",
+          "text": "Classic RAG trap — retrieval looks fine in the notebook then fails in prod because chunk boundaries and metadata are wrong. What fixed it for you when you found the real issue?",
+          "score": 2,
+          "created_utc": "2026-05-30 08:19:11",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oou46sl",
+          "author": "KarenBoof",
+          "text": "You post this here like every other day ",
+          "score": 2,
+          "created_utc": "2026-05-30 21:48:49",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "ooq3uqt",
+          "author": "Hour-Entertainer-478",
+          "text": "How are you finding the natural break amongst the chunks ?\nAre you using any specific tools / libraries ",
+          "score": 1,
+          "created_utc": "2026-05-30 08:02:35",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "ooqhn4f",
+          "author": "sophie-turnerr",
+          "text": "every intro tutorial treats it like a footnote and then ur weeks deep into debugging embeddings and retrieval logic before u circle back and realise the chunks were just cutting thoughts in half..semantic chunking or even just chunking on paragraph breaks insted of token count fixes so much of this without touching anything else",
+          "score": 1,
+          "created_utc": "2026-05-30 10:04:52",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oox9sqn",
+          "author": "DorkyMcDorky",
+          "text": "As a search professional, I can't tell you how often I am telling our org to only focus on data input quality so it's easier for me to chunk.  That hiring 100 interns to edit text as a mechanical turk is far more effective than the spend on AI we're jerking off on.",
+          "score": 1,
+          "created_utc": "2026-05-31 11:15:14",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "ooqmw6f",
+          "author": "cointegration",
+          "text": "hence semantic chunking, use an LLM to decide when an idea ends and another begins",
+          "score": 1,
+          "created_utc": "2026-05-30 10:48:15",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "oowyjue",
+              "author": "Mental-War-2282",
+              "text": "each type of document has a chunking strategy that best suits its format , LLMS are NOT used during chunking ( way too expensive and way too inefficient ) , you realise that a modest production application deals with at least 5k document with thousands of tokens in each line ?",
+              "score": 1,
+              "created_utc": "2026-05-31 09:42:48",
+              "is_submitter": false,
+              "replies": [
+                {
+                  "id": "ooxjun3",
+                  "author": "cointegration",
+                  "text": "Yes i do realise that. What YOU do not realise is that most people are doing it with local LLMs, cheap and cheerful and does the job.",
+                  "score": 1,
+                  "created_utc": "2026-05-31 12:25:20",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "oopgty9",
+          "author": "SilverConsistent9222",
+          "text": "made a video going through all of this if it's useful- [https://youtu.be/MBDiJAWx8xk?si=7v4j-DNrJo5kNIaX](https://youtu.be/MBDiJAWx8xk?si=7v4j-DNrJo5kNIaX)",
+          "score": 0,
+          "created_utc": "2026-05-30 04:54:17",
+          "is_submitter": true,
+          "replies": []
+        }
+      ]
+    },
+    {
       "id": "1tpv043",
       "title": "Is there a turnkey easy install RAG system for non technical people that can be installed on Windows?",
       "subreddit": "Rag",
@@ -2304,7 +2335,7 @@
           "id": "oobun99",
           "author": "DrinksAtTheSpaceBar",
           "text": "I am not a developer and I learned my way around a Python venv in about a month. There's a reason local AI solutions are grounded in Python. If you're not willing to invest the time to learn those fundamentals, then you should just stick to paid solutions. Now excuse me while I continue rolling my eyes clear to the back of my head at the thought of a \"developer\" who is also a \"non technical\" person.",
-          "score": 6,
+          "score": 5,
           "created_utc": "2026-05-28 07:31:07",
           "is_submitter": false,
           "replies": [
@@ -2664,37 +2695,28 @@
       ]
     },
     {
-      "id": "1tu71gr",
-      "title": "rag-handbook",
+      "id": "1tuk8yc",
+      "title": "10 top platforms to hire remote RAG engineers for micro-SaaS teams",
       "subreddit": "Rag",
-      "url": "https://www.reddit.com/r/Rag/comments/1tu71gr/raghandbook/",
-      "author": "Technical_Pepper_401",
-      "created_utc": "2026-06-01 21:50:56",
-      "score": 6,
-      "num_comments": 2,
-      "upvote_ratio": 0.81,
-      "text": "I developed this rag-handbook compiling all the important resources at one platform, to help people who want to learn about RAG.  \nCheck it out - [rag-handbook](https://raghandbook-dz9ek6sg.manus.space)\n\nReview and let me know if things can be improved.",
+      "url": "https://www.reddit.com/r/Rag/comments/1tuk8yc/10_top_platforms_to_hire_remote_rag_engineers_for/",
+      "author": "MembershipHorror404",
+      "created_utc": "2026-06-02 08:03:02",
+      "score": 7,
+      "num_comments": 1,
+      "upvote_ratio": 0.82,
+      "text": "I’ve built and scaled products for years, crossed $6M in ARR across businesses, and worked with teams ranging from lean startup setups to large-scale global engagements. One thing I can say for sure is this: hiring engineers for RAG work is not the same as hiring a general backend dev or a generic AI engineer.\n\nMost micro-SaaS founders think they need a “RAG engineer,” but what they usually need is someone who can actually build and ship production-grade retrieval workflows inside a real product. That means Python, APIs, vector databases, embeddings, chunking logic, evals, backend judgment, and enough product sense to avoid turning the app into an expensive experiment.\n\nOver the years, I’ve hired through different routes. I’ve personally worked with Toptal, Arc, and Uplers. I’ve researched the rest pretty deeply because hiring quality engineers is one of those things where one bad decision burns way more time and money than people expect. So here’s my honest verdict on the platforms I’d actually look at if I were hiring a remote RAG engineer for a micro-SaaS team today.\n\n**1. Toptal**  \nI’ve used Toptal before, and it’s best for teams that care more about quality and speed than keeping costs low. You are usually paying for access to senior independent talent without needing to sort through a pile of weak applicants. I’d look here if I already knew what strong engineering looks like and wanted to move fast with fewer mismatches.\n\n**2. Arc**  \nI’ve also used Arc, and I’d put it in the flexible remote hiring bucket. It works well if you want access to freelance as well as full-time remote talent and do not want to be boxed into one rigid hiring format. I see it as a good fit for startups that want global reach and still want some freedom in how they structure the role.\n\n**3. Uplers**  \nI’ve worked with Uplers too, and I’d place it here because it fits best when you want a more managed route, especially if you are already open to hiring from India. What I liked was that it reduced a lot of the random noise you normally get in hiring. It felt less like resume hunting and more like getting profiles that were at least closer to what we were actually looking for. That matters a lot when the founding team does not want to spend half its week screening bad fits.\n\n**4. Turing**  \nTuring makes more sense when you are thinking beyond one hire and may need to build out a broader engineering function over time. It leans more platform-heavy and scale-oriented. If I were planning multiple technical hires and wanted a larger structured system around matching, I’d keep Turing in the mix.\n\n**5. Lemon**  \nLemon feels closer to the pace of startups. If I were a founder who wanted quick access to engineers without going too deep into enterprise-style hiring process, I’d give this a serious look. It seems especially relevant for smaller teams that do not have a dedicated recruiter or talent function.\n\n**6.** **Gun.io**  \nGun.io sits somewhere between a freelancer marketplace and a more curated hiring network. That middle ground can actually be useful. It’s worth looking at if you want better quality control than open marketplaces but still want a more direct relationship with the person you hire.\n\n**7. Braintrust**  \nBraintrust feels more process-oriented and broader in scope. I would look at it if the hiring motion is becoming more structured and repeatable inside the company. Maybe not the first place I’d send a tiny bootstrap team, but definitely one to consider if hiring is becoming a recurring need rather than a one-off search.\n\n**8. Wellfound**  \nWellfound is still relevant if you want startup-native hiring. The biggest upside here is that many candidates understand startup environments better than people coming in through generic corporate channels. If I wanted someone who is genuinely comfortable with startup pace and ambiguity, I would not ignore it.\n\n**9. Upwork**  \n Upwork has range, but it also has noise. A lot of noise. If budget is very tight and you know exactly how to test for RAG-related capability, you can find talent there. But I would only use it seriously if someone technical on the team is able to filter hard. Otherwise, you can lose days just talking to people who know the language but not the work.\n\n**10. Riseup Labs**  \nRiseup Labs is a little different from the rest. It feels less like a pure talent marketplace and more like something between hiring support and execution support. I would check it out if I were open to a more service-led or build-partner route and not just a straight candidate search.\n\nIf I had to simplify this for a micro-SaaS founder, this is how I’d think about it. If budget is less of an issue and you want strong independent talent, Toptal makes sense. If you want flexibility and global remote reach, Arc is worth checking. If you want a more managed path and are open to India, Uplers is one of the better options to review. If you want startup speed, Lemon is probably one of the more relevant choices. If you want the cheapest route possible, Upwork is there, but you need to go in knowing the tradeoff is time and filtering effort.\n\nThe bigger point, though, is this: do not hire for the label. Hire for the actual work. A lot of people can call themselves AI engineers now. That tells you almost nothing. For most micro-SaaS teams building RAG features, the real questions are whether the person can build clean backend systems, work with retrieval workflows, debug output quality, manage latency and cost tradeoffs, and communicate clearly when things are not perfectly scoped.\n\nThat part matters much more than whether their LinkedIn headline says LLM, GenAI, or RAG expert.\n\nIf I were hiring today, I would screen for strong backend fundamentals first, then actual hands-on RAG or LLM integration work, then product judgment. That order matters. Because if they only understand the AI layer but cannot think through systems, ownership, and shipping, the team ends up doing a lot more babysitting than building.\n\nIf anyone here has hired for RAG recently, I’d be interested in what actually worked for you. Which route gave you the best engineer, not just the fastest hire?",
       "is_original_content": false,
       "link_flair_text": "Discussion",
-      "permalink": "https://reddit.com/r/Rag/comments/1tu71gr/raghandbook/",
+      "permalink": "https://reddit.com/r/Rag/comments/1tuk8yc/10_top_platforms_to_hire_remote_rag_engineers_for/",
       "domain": "self.Rag",
       "is_self": true,
       "comments": [
         {
-          "id": "op85q0u",
-          "author": "PapyrStreetSoaps",
-          "text": "Great job. I know very little about RAG basics, but this helped",
-          "score": 2,
-          "created_utc": "2026-06-02 00:12:22",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "op9qi20",
-          "author": "Illustrious_Movie740",
-          "text": "thanks for sharing ",
-          "score": 2,
-          "created_utc": "2026-06-02 06:32:12",
+          "id": "opb2ubf",
+          "author": "Secret_Realtor",
+          "text": "Thanks for the resource! Really valuable list",
+          "score": 1,
+          "created_utc": "2026-06-02 12:37:31",
           "is_submitter": false,
           "replies": []
         }
@@ -2752,44 +2774,6 @@
           "created_utc": "2026-05-28 15:40:07",
           "is_submitter": false,
           "replies": []
-        }
-      ]
-    },
-    {
-      "id": "1trxesp",
-      "title": "[Project] Exploring multi-retriever quorum logic for improved RAG grounding",
-      "subreddit": "Rag",
-      "url": "https://www.reddit.com/r/Rag/comments/1trxesp/project_exploring_multiretriever_quorum_logic_for/",
-      "author": "r14dd",
-      "created_utc": "2026-05-30 11:29:25",
-      "score": 5,
-      "num_comments": 2,
-      "upvote_ratio": 1.0,
-      "text": "I’ve been iterating on a RAG pipeline designed to mitigate the \"confident, wrong chunk\" failure mode typical of single-retriever setups.\n\nThe approach centers on a \"quorum\" requirement: instead of trusting the top-k results from a single source, I’m running 4 retrievers in parallel (3 dense semantic searches at varying chunk granularities + 1 BM25 index via Tantivy).\n\n**The Pipeline:**\n\n1. **Concurrent Retrieval:** Queries are fired across all 4 indices using `tokio`.\n2. **Fusion:** Candidates are fused using Reciprocal Rank Fusion (RRF).\n3. **Clustering & Filtering:** I’m using cosine similarity clustering to group the evidence. The \"quorum filter\" drops any clusters that don’t have a support score of at least 2.\n4. **Rank & Generate:** Only consensus evidence is passed to the LLM.\n\n**Implementation:** The entire stack is in Rust (no Python runtime). I’m using `Tantivy` for the sparse index and standard `Ollama` for the generation step. It currently runs as a single binary.\n\n**Early results:** I’ve only run this against a limited set of 20 Wikipedia Q&A pairs, yielding 19/20 recall compared to 14/20 with a single-retriever baseline.\n\n**Seeking critique:** I’m specifically looking for feedback on the clustering and quorum logic. My biggest concern is the trade-off: **does requiring consensus inherently hurt recall on \"long-tail\" or rare facts that only one retriever might catch?**\n\nIf you’re interested in the implementation or want to look at the Rust architecture, here is the repo:\n\n* **GitHub:**[https://github.com/r14dd/quorumRAG.rs](https://github.com/r14dd/quorumRAG.rs)\n* **Crate:**[https://crates.io/crates/quorumrag](https://crates.io/crates/quorumrag)\n* **Docs:**[https://docs.rs/quorumrag](https://www.google.com/search?q=https://docs.rs/quorumrag)",
-      "is_original_content": false,
-      "link_flair_text": "Showcase",
-      "permalink": "https://reddit.com/r/Rag/comments/1trxesp/project_exploring_multiretriever_quorum_logic_for/",
-      "domain": "self.Rag",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "oot28ig",
-          "author": "Specialist_Golf8133",
-          "text": "quorum logic is interesting but the thing that bit us in production was that it only helps when your retrievers are actually returning different candidate sets. if you're running bm25 + dense on the same chunking strategy, they'll agree on a lot of the same chunks anyway, so you're not getting as much diversity as you think. the real win came when we separated chunking granularity, parent-child style, and ran dense on the fine-grained chunks while bm25 operated on the coarser ones. that actually gave the voting logic something to work with. also worth tracking per-retriever recall separately before you combine them, otherwise it's hard to tell wether quorum is helping or just masking a weak retriever.",
-          "score": 1,
-          "created_utc": "2026-05-30 18:35:37",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "oot5a1i",
-              "author": "r14dd",
-              "text": "Spot on. The \"echo chamber\" risk where retrievers just validate each other's identical misses is real.\n\nI'm currently varying granularity across the dense retrievers, but anchoring BM25 strictly to coarser chunks while keeping dense fine-grained is a great way to force true diversity into the vote.\n\nAlso love the callout on tracking per-retriever recall first. Definitely need to make sure one strong index isn't just carrying the team.\n\nAppreciate the insight, adding this to the roadmap!",
-              "score": 1,
-              "created_utc": "2026-05-30 18:50:34",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
         }
       ]
     }
