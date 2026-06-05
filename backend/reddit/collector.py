@@ -68,6 +68,8 @@ class RedditContentCollector:
         self.output_dir = Path(output_dir or "./src/data/reddit")
         self.output_dir.mkdir(parents=True, exist_ok=True)
         logger.info(f"📁 Output directory: {self.output_dir.absolute()}")
+        self._subscribed_subreddits: List[str] = []
+        self._cycle_completed: bool = False
         
         self.data: CollectorData = self._load_existing_data()
         logger.info("✅ RedditContentCollector đã được khởi tạo thành công")
@@ -310,6 +312,7 @@ class RedditContentCollector:
             # Get subscribed subreddits
             logger.info("🔍 Đang lấy danh sách subreddit đã đăng ký...")
             subscribed = list(self.reddit.user.subreddits(limit=None))
+            self._subscribed_subreddits = [str(s) for s in subscribed]
             logger.info(f"📋 Tìm thấy {len(subscribed)} subreddit đã đăng ký")
 
             state_file = Path(state_path) if state_path else (self.output_dir / "collector_state.json")
@@ -519,6 +522,7 @@ class RedditContentCollector:
                 state["paused"] = False
                 state["last_completed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 save_state(state_file, state)
+                self._cycle_completed = True
             
             # Sort all collected news items by score in descending order
             news_items.sort(key=lambda x: x["score"], reverse=True)
@@ -663,6 +667,25 @@ class RedditContentCollector:
                 "total_items": len(trimmed_items),
                 "last_updated": data["metadata"]["last_updated"]
             })
+
+        # Sync: remove JSON files for subreddits no longer followed (only after a full cycle)
+        if self._cycle_completed and self._subscribed_subreddits:
+            subscribed_lower = {s.lower() for s in self._subscribed_subreddits}
+            removed = []
+            for json_file in output_dir.glob("*.json"):
+                if json_file.name == "index.json":
+                    continue
+                try:
+                    with json_file.open("r", encoding="utf-8") as f:
+                        file_data = json.load(f)
+                    subreddit_name = file_data.get("metadata", {}).get("subreddit", "")
+                    if subreddit_name.lower() not in subscribed_lower:
+                        json_file.unlink()
+                        removed.append(json_file.name)
+                except Exception as e:
+                    logger.warning(f"⚠️ Không thể kiểm tra file {json_file.name}: {e}")
+            if removed:
+                logger.info(f"🗑️  Đã xóa {len(removed)} file subreddit không còn theo dõi: {removed}")
 
         # Build index from ALL existing JSON files in the directory (not just current run)
         all_index_entries = []
