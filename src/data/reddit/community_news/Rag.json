@@ -1,11 +1,11 @@
 {
   "metadata": {
-    "last_updated": "2026-06-14 11:07:57",
+    "last_updated": "2026-06-14 17:50:00",
     "time_filter": "week",
     "subreddit": "Rag",
     "total_items": 20,
-    "total_comments": 82,
-    "file_size_bytes": 128664
+    "total_comments": 84,
+    "file_size_bytes": 130100
   },
   "items": [
     {
@@ -191,9 +191,9 @@
       "url": "https://www.reddit.com/r/Rag/comments/1u057js/how_we_index_images_for_rag/",
       "author": "srnsnemil",
       "created_utc": "2026-06-08 11:30:51",
-      "score": 27,
+      "score": 24,
       "num_comments": 5,
-      "upvote_ratio": 0.97,
+      "upvote_ratio": 0.92,
       "text": "We just hit frontpage of Hackernews last week with this post, so figured we'd reshare here since we've benefitted a lot from reading r/RAG while building Kapa (YC backed startup).\n\nFor context: Kapa builds AI assistants that answer questions from technical documentation. The knowledge bases we process hold millions of images: screenshots, architecture diagrams, circuit schematics, annotated UI walkthroughs. We spent several months working out how to make them useful in our RAG pipeline.\n\nThe short version: we don't send images to the model at query time. We describe each image once, at indexing time, with a cheap vision model, store the descriptions as text, and retrieve them alongside ordinary text chunks. Indexing is a one-time cost; after that, per-query overhead is 1% to 6% over text-only, and answers are measurably, statistically significantly better. This post explains how we got there.\n\n*Both answers are correct. The one that shows the screenshot is the one a user can act on without hunting for the setting.*\n\n# What images actually do in technical documentation\n\nWe went through thousands of real customer questions across hardware, semiconductor, and developer-tooling accounts to see how images earn their place in an answer. They split into two kinds.\n\nMost are illustrative. They show what the text already says, only more clearly: a guide says \"click the settings icon,\" and the screenshot beside it shows which icon, where, and what it looks like. The words carry the fact; the picture makes it easy to act on.\n\nSome are load-bearing. A wiring diagram, a spec table, a certification or color-availability matrix can hold a value that lives in the figure and essentially nowhere else. There the picture is not a convenience, it is the source of the answer.\n\nWe confirmed the lift either way: with image context available, an LLM judge preferred the answers across three customer projects and two models, by a statistically significant margin (McNemar's test, p < 0.05).\n\nThe improvement is the kind a user feels. Instead of \"look for the configuration section that controls the setting,\" you get the specific path plus a screenshot showing exactly where to click. Same facts, far easier to act on. For a support assistant, that is the difference between a user who self-serves and one who opens a ticket.\n\nEither way, images make answers materially better. The engineering question is the one the rest of this post is about: how to use them without paying a vision bill on every query.\n\n# Why query-time multimodal does not work at scale\n\nThe approach most people reach for first: retrieve the relevant chunks, collect the images they reference, and pass everything to a vision-capable model.\n\nWe tested it with GPT 5.1 and Claude 4.6 Sonnet across hundreds of production questions. The problems are structural, not engineering details to tune away.\n\n**The economics do not work.** Raw images added 27% to per-query cost on GPT and 51% on Claude (Claude tokenizes an image at roughly 975 tokens to GPT's 716). We serve millions of queries; paying that much more on all of them, when most answers do not need a fresh look at the pixels, is not a trade we can make.\n\n**The images do not physically fit.** A typical question retrieves 10-30 chunks referencing 20-30 images on average, with a long tail past 130. Claude's payload limit is 30 MB and OpenAI's 50 MB; around 25 images already approaches Claude's ceiling. You would have to cap images aggressively, which defeats the point.\n\n**Multimodal retrieval does not suit this domain.** CLIP-style embeddings wash out exactly the fine detail that matters in charts, tables, and annotated screenshots, and short technical queries (\"how do I configure X\") give too little signal to match against image vectors.\n\nThese are properties of today's ecosystem, not bugs to fix. They pointed us away from query-time vision entirely.\n\n# Describe once at indexing time, retrieve as text\n\nThe approach that works inverts the economics. Instead of paying to process images on every query, you pay once, at indexing time, to turn each image into a text description. After that, retrieval and generation run entirely in text.\n\nAt indexing time, a vision language model writes a caption for each image. The captions are stored and retrieved alongside ordinary text chunks. At query time, if a caption is relevant, the retriever pulls it in; the model sees the caption, never the raw image, and cites the image by its original URL.\n\nThis works because the heavy lifting, actually looking at the image, happens once, at ingestion, instead of on every query. For an illustrative screenshot the caption is a description; for a load-bearing figure it is a transcription of what the figure holds, the values in the table, the labels on the diagram. Either way the content becomes text, and the rest of the pipeline never has to see a pixel. [Microsoft's research team](https://devblogs.microsoft.com/ise/multimodal-rag-with-vision/) also reached the same conclusion: describe at ingestion, store as separate chunks.\n\nThis is what makes the load-bearing case work, and it is where a lot of assistants quietly fail. A color-availability matrix is a wall of check marks; a fire-resistance table is a grid of ratings. Flatten one into plain text with a generic extractor and the structure dissolves, which is how an assistant ends up confidently telling a customer a panel comes in a color it does not. Transcribed at ingestion, the same matrix becomes retrievable text, and the answer stays grounded in what the figure actually shows.\n\n*For datasheet-heavy products, the figure can sometimes be the answer. Though, this is rarely found based on real user questions in production.*\n\n# What you have to get right in production\n\n**Filtering: most images are junk, and some cannot be classified**\n\nYou cannot caption millions of images indiscriminately. Most are noise: logos, avatars, social preview cards, decorative banners. Heuristics handle the first pass (drop unsupported formats, tiny images, extreme aspect ratios). For the rest, we built a zero-shot classifier on multimodal embeddings. It is cheap enough to run across the whole corpus.\n\nOn clear-cut images it hits 96.8% accuracy (F1 0.974). On ambiguous ones, accuracy collapses to 59.8%, and the reason is fundamental. A screenshot of a countdown timer could be a decorative banner or step 3 of a tutorial about timers. The pixels are identical; without the surrounding text there is not enough information to decide, and no embedding model can fix that. So we accept it: the classifier removes the clear junk (about 13% of what survives heuristics) and we tolerate the ambiguous edge. Context-aware classification is the obvious next step.\n\n**Captioning: context matters more than model size**\n\nTwo things drive caption quality. First, surrounding text: feed the model the paragraphs before and after the image and quality jumps. Without context, a file-upload dialog is \"a web page with a file upload form\"; with it, the caption is grounded in the specific product, workflow, and step, which is what makes it useful for retrieval.\n\nSecond, expensive models buy little. We compared five, from Claude 4.6 Sonnet down to GPT 5.4 nano. A small model (GPT 5.4 mini) produced captions almost indistinguishable from models four times its price; only nano dropped off. At our scale, a small model is the obvious choice.\n\n**Storage: separate caption chunks beat inline**\n\nTwo ways to integrate a caption. Inline: replace the image's alt text in the document, so some chunks carry both text and description. Separate: store each caption as its own chunk, leaving the document untouched.\n\nWe expected inline to win, since the caption sits next to its text. Separate won, on both cost and image usage. Inline captions inflate every chunk they live in, and those chunks ship on every query whether the images are relevant or not. Separate chunks only enter the context when the retriever judges them relevant, so you pay for an image only when it matters. On one image-heavy project, inline raised per-query cost 19% with GPT; separate, 6%. With Claude, separate captions slightly lowered cost versus text-only. And they earn their place: the re-ranker promoted them into the top 15 on 51% of queries, while overall ranking held steady (Spearman ρ = 0.905).\n\n# Results\n\nEnd to end across three customer projects with GPT 5.1 and Claude 4.6 Sonnet:\n\n|Text-only baseline|With image captions|\n|:-|:-|\n|Images cited in answers|0%|10% to 64%|\n|Answer quality (LLM judge)|baseline|significantly better (p < 0.05)|\n|Per-query cost|baseline|\\+1% to 6%|\n|Latency (time to first token)|baseline|sub-second increase|\n|Model uncertainty|baseline|unchanged or slightly lower|\n|Indexing cost|n/a|one-time, then no recurring image cost|\n\nAcross every experiment, images were placed correctly 94% to 99% of the time.\n\nThis is a less flashy answer than \"use a multimodal model,\" and that is the point. It works because it puts the vision where it belongs: once, at ingestion, turning whatever an image holds into text, instead of paying to re-examine pixels on every query. Whether an image clarifies the words or carries the answer outright, reading it once is cheaper and a better fit for how the rest of the pipeline works. The constraints we hit were not obstacles to engineer around; they were pointing at the architecture.\n\nShoutout to Matteo Bortoletto from team for the write up!\n\n  \nEDIT: Here's the link to the full post [https://www.kapa.ai/blog/how-we-index-images-for-rag](https://www.kapa.ai/blog/how-we-index-images-for-rag)",
       "is_original_content": false,
       "link_flair_text": "Tutorial",
@@ -256,9 +256,9 @@
       "url": "https://www.reddit.com/r/Rag/comments/1u3c58c/whats_the_biggest_reason_enterprise_rag_projects/",
       "author": "sibraan_",
       "created_utc": "2026-06-11 21:31:57",
-      "score": 21,
+      "score": 22,
       "num_comments": 12,
-      "upvote_ratio": 0.9,
+      "upvote_ratio": 0.91,
       "text": "I feel like we need a collective support group for anyone trying to scale an internal RAG setup past the internal demo phase rn.\n\nYou take a couple hundred PDFs, run them through a basic recursive character splitter then use embeddings into a vector database, and build a neat little streamlit app. Then you push it to production workflows with live enterprise data and the entire system completely loses its mind.\n\nFrom what i’ve seen over year, when enterprise RAG fails the immediate reaction is always to blame the model or the prompt engineering. Teams spend weeks swapping out frontier APIs but the model can only reason over the context it's handed.\n\nThe real failure points are almost always upstream in the information architecture:\n\n\\- Context Fragmentation: standard RAG indexes every data source as an isolated silo where a thread in slack, clause in sharepoint, and the updated status in salesforce exist as disconnected chunks in a vector store.\n\n\\- The Versioning Nightmare: in a live enterprise env, the same client guide exists in multiple different formats across drives, half of them outdated from years ago and without massive filter the freshness at retrieval time, the vector search will blindly pull a 2022 chunk right alongside a current guideline causing total context collision.\n\nWe’ve been following how architecture trends are trying to solve this by moving away from raw semantic retrieval entirely and shifting toward a managed enterprise context layer and some teams are outsourcing the memory stack to setups like 60x. Their approach maps an underlying relationship graph across connected systems meaning the data ingestion layer resolves the temporal traces before the model even touches it.\n\nSo i'm curious to know more from those who have actually deployed RAG to a large user base, thanks!",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -270,7 +270,7 @@
           "id": "or6dfe4",
           "author": "fabkosta",
           "text": "Unclear business needs.",
-          "score": 3,
+          "score": 5,
           "created_utc": "2026-06-12 05:44:15",
           "is_submitter": false,
           "replies": []
@@ -374,9 +374,9 @@
       "url": "https://www.reddit.com/r/Rag/comments/1u2uxdj/ibm_research_released_flashgmm_gmmbased_ivf/",
       "author": "Abject_Lake_9811",
       "created_utc": "2026-06-11 10:10:43",
-      "score": 17,
+      "score": 18,
       "num_comments": 2,
-      "upvote_ratio": 0.96,
+      "upvote_ratio": 1.0,
       "text": "I came across an interesting paper from IBM Research that might be relevant to people working on large-scale retrieval systems and RAG.\n\n📄 Paper: [https://arxiv.org/abs/2606.10896](https://arxiv.org/abs/2606.10896)\n\n💻 Code: [https://github.com/IBM/Flash-GMM](https://github.com/IBM/Flash-GMM)\n\nThe work introduces Flash-GMM, a GPU kernel that makes Gaussian Mixture Models practical at scales that were previously out of reach (up to 1B points on a single GPU).\n\nWhat caught my attention is the retrieval application:\n\nThe authors use Flash-GMM to build **GMM-based IVF indexes for billion-vector search**. Unlike standard IVF based on k-means, GMMs provide probabilistic cluster memberships, which naturally support soft routing and multi-assignment during search.\n\nAccording to the paper, these soft-cluster probabilities can be leveraged to improve FAISS search efficiency while remaining practical at very large scales.\n\nThe systems results are also pretty impressive:\n\n* Up to 30× faster than existing GPU GMM implementations\n* Up to 1,700× faster than SciPy/scikit-learn CPU baselines\n* GMM training on up to 1B data points on a single GPU\n\nCurious what the community thinks.\n\nMost production RAG systems I encounter still rely on k-means-based IVF, HNSW, or graph-based approaches. If training GMMs is no longer the bottleneck, do you see probabilistic routing / soft multi-assignment becoming attractive for large-scale retrieval?",
       "is_original_content": false,
       "link_flair_text": "Showcase",
@@ -402,9 +402,9 @@
       "url": "https://www.reddit.com/r/Rag/comments/1u3oo46/notes_from_vector_space_day_in_sf_hubspot_runs/",
       "author": "Ok_Row9465",
       "created_utc": "2026-06-12 07:42:34",
-      "score": 17,
+      "score": 16,
       "num_comments": 8,
-      "upvote_ratio": 0.87,
+      "upvote_ratio": 0.84,
       "text": "I was at Vector Space Day on Thursday in SF organized by Qdrant. Sharing some notes.\n\n**No one wants to be Vector DB.** Qdrant team mentioned on stage that they want to get rid of the database positioning and be known as a search engine. Turbopuffer already describes itself as a search engine built on object storage. I believe storing vectors is a commodity now and the differentiation is in query-time behavior (hybrid retrieval, scoring control, execution configurability, etc.).\n\n**HubSpot stores 20B+ vectors on self-hosted Qdrant.** They built an internal \"Vectors as a Service\" platform with Kafka indexers in front of the clusters. They even wrote their own Kubernetes operator because Helm is purely a templating tool: it cannot make API calls, react to metrics or rebalance shards based on cluster state. Their operator runs a reconcile loop every 60 seconds. If you are weighing managed vs self-hosted, this is the real cost of self-hosting at scale.\n\n**Quantization numbers were shown per embedding model.** float32 vs scalar vs more aggressive schemes and the recall degradation is not uniform across embedding families. Some degrade gracefully, some do not. Benchmark on your own data before committing. (couldn't grab snaps of the slides).\n\n**An oncology research company (Oncotelic) presented \"manifold folding\".** They re-shape the embedding space with metric learning so strong and weak biomedical evidence separate into different regions before indexing because nearest-neighbor on the raw space was mixing evidence quality for them.\n\n**Salesforce search still runs on Solr.** Met someone at the event and learnt this. Apparently  Solr's indexing is really powerful and a migration at their scale is not realistic or at least not high-ROI right now. \n\nMy takeaway, with a disclosure that I work on agent memory so I am biased: vector retrieval gives you similarity and nothing else. No provenance, no document creation time, no organization, no protection against poisoned context. For agents, that gap is where most of the unsolved work sits.\n\nCurious what others running large vector deployments think, especially anyone who has hit the Helm wall or has real quantization recall numbers to compare.",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -505,63 +505,6 @@
       "domain": "self.Rag",
       "is_self": true,
       "comments": []
-    },
-    {
-      "id": "1tzhoin",
-      "title": "Free job-postings API (1.8M listings) to point your RAG pipeline at",
-      "subreddit": "Rag",
-      "url": "https://www.reddit.com/r/Rag/comments/1tzhoin/free_jobpostings_api_18m_listings_to_point_your/",
-      "author": "imattractedtodcfs",
-      "created_utc": "2026-06-07 17:05:21",
-      "score": 15,
-      "num_comments": 5,
-      "upvote_ratio": 1.0,
-      "text": "Hey all. I built a free, hosted API that scans 60k+ job boards daily for about 1.8M job postings. I needed daily syncing and event alerts for a project, and figured I'd scale it out and make it free for others to use.\n\nIf you need higher rate limits, or are interested in bulk downloading the data, let me know!\n\n[https://bluedoor.sh/apis/job-postings](https://bluedoor.sh/apis/job-postings)",
-      "is_original_content": false,
-      "link_flair_text": "Showcase",
-      "permalink": "https://reddit.com/r/Rag/comments/1tzhoin/free_jobpostings_api_18m_listings_to_point_your/",
-      "domain": "self.Rag",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "oqarw5p",
-          "author": "Bewis_123",
-          "text": "cool but what is an Indian state doin there in a list of american cities ",
-          "score": 1,
-          "created_utc": "2026-06-07 17:09:38",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "oqasa0k",
-              "author": "imattractedtodcfs",
-              "text": "oops thats a normalization error. thank you for calling out, that should be removed",
-              "score": 1,
-              "created_utc": "2026-06-07 17:11:28",
-              "is_submitter": true,
-              "replies": [
-                {
-                  "id": "oqat6lh",
-                  "author": "Bewis_123",
-                  "text": "and i think this is very useful, but kind of misleading, I thought it was only for cities listed but nope seems like worldwide. I will give it a try",
-                  "score": 1,
-                  "created_utc": "2026-06-07 17:15:44",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "oqefod5",
-          "author": "AvailablePeak8360",
-          "text": "Dope, I thought it's be an ordinary job board. Loved it, I run a RAG community. Gonna share it with the devs there.",
-          "score": 1,
-          "created_utc": "2026-06-08 05:59:49",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
     },
     {
       "id": "1u3ttzg",
@@ -674,9 +617,9 @@
       "url": "https://www.reddit.com/r/Rag/comments/1u09c0t/selfoptimizing_rag_pipeline_using_gepa_prompt/",
       "author": "sauvast",
       "created_utc": "2026-06-08 14:20:22",
-      "score": 11,
+      "score": 13,
       "num_comments": 1,
-      "upvote_ratio": 0.93,
+      "upvote_ratio": 1.0,
       "text": "I put together an open-source boilerplate that implements closed-loop LLM optimization for RAG applications.\n\nThe core idea: instead of hand-tuning prompts, you set up a Build → Measure → Optimize loop where the optimization step uses GEPA (Genetic-Pareto) to read execution traces and evolve prompts via natural language reflection.\n\n**Architecture:**\n\n* LangChain for RAG orchestration (retriever + LLM + prompt template)\n* MLflow for automatic tracing and experiment tracking\n* GEPA for prompt optimization (reflective mutation + Pareto selection)\n* MEGA for workflow optimization (routing, retrieval depth, block ordering)\n\n**What GEPA does differently:** Instead of RL/gradient methods that need thousands of rollouts, GEPA has the LLM read its own failure traces, diagnose what went wrong in natural language, and propose targeted prompt fixes. Published at ICLR 2026, it outperforms GRPO by up to 19pp with 35x fewer evaluations.\n\n**Demo results:** 63% baseline → 69% after GEPA optimization on a support knowledge base.\n\nThe boilerplate is intentionally minimal (6 source files + demo module) so you can fork it and plug in your own documents, eval set, and LLM provider.\n\nRepo: [https://github.com/saurabh-oss/gepa-langchain-lab](https://github.com/saurabh-oss/gepa-langchain-lab)\n\nHappy to answer questions about the architecture or the GEPA integration pattern.",
       "is_original_content": false,
       "link_flair_text": "Tutorial",
@@ -691,6 +634,43 @@
           "score": 1,
           "created_utc": "2026-06-09 17:16:01",
           "is_submitter": true,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1u5biop",
+      "title": "Wrote up the failure modes that kept breaking my RAG system: chunking, stale index, hybrid search, the works",
+      "subreddit": "Rag",
+      "url": "https://www.reddit.com/r/Rag/comments/1u5biop/wrote_up_the_failure_modes_that_kept_breaking_my/",
+      "author": "SilverConsistent9222",
+      "created_utc": "2026-06-14 04:35:01",
+      "score": 13,
+      "num_comments": 2,
+      "upvote_ratio": 0.81,
+      "text": "So, after spending way too long debugging a RAG system that kept giving confidently wrong answers, I finally sat down and actually mapped out every place it was breaking.\n\nTurns out most of my problems came down to chunking, which I had genuinely underestimated. I was doing fixed-size splitting and not thinking about it much.\n\nThe issues:\n\nChunks too small, no context survives. retrieved \"refunds processed in 5 days\" with zero surrounding information. The LLM answered but missed all the nuance that was in the sentences around it.\n\nChunks too large, right section retrieved but the actual answer was buried under so much irrelevant text that quality tanked and costs went up.\n\nSwitched to sliding window with overlap and things got noticeably better. semantic chunking gave the best results but the cost per indexing run went up so I only use it for the most important documents.\n\nOther things that got me:\n\nStale index is sneaky, docs were getting updated but I hadn't set up automatic re-indexing. old information kept getting retrieved and I couldn't figure out why answers were drifting.\n\nSemantic search completely fails on exact strings. product codes, model numbers, specific IDs. had to add keyword search alongside semantic and merge the results. obvious in hindsight but I didn't think about it until users started complaining.\n\nLLM hallucinates from the closest chunk even when the answer isn't in your docs. had to be very explicit in the system prompt, if the answer isn't in the retrieved context, say you don't know. without that instruction it just riffs off whatever it found.\n\nThe thing that helped most beyond chunking was contextual retrieval, passing each chunk alongside the full document when generating its context prefix rather than just summarizing the chunk alone. makes a meaningful difference on longer documents because the chunk carries its location and purpose with it.\n\nAnyway, curious if others have hit these same things or found different fixes, especially on the stale index problem. My current solution feels a bit janky.",
+      "is_original_content": false,
+      "link_flair_text": "Tutorial",
+      "permalink": "https://reddit.com/r/Rag/comments/1u5biop/wrote_up_the_failure_modes_that_kept_breaking_my/",
+      "domain": "self.Rag",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "orjig1y",
+          "author": "SilverConsistent9222",
+          "text": "made a full walkthrough of this with the pipeline drawn out step by step if anyone wants the visual version, also covers reranking, HyDE, Graph RAG, and agentic RAG for anyone going deeper- [https://youtu.be/MBDiJAWx8xk?si=U92YVVgAjXe3utXZ](https://youtu.be/MBDiJAWx8xk?si=U92YVVgAjXe3utXZ)",
+          "score": 5,
+          "created_utc": "2026-06-14 04:35:12",
+          "is_submitter": true,
+          "replies": []
+        },
+        {
+          "id": "ormk9z9",
+          "author": "marintkael",
+          "text": "The stale-index thing clicked for me once I stopped treating it as a freshness problem and started treating it as an identity problem. Your retriever only knows similarity, it has no notion of which version of a fact is the current one, so it happily pulls the old chunk because semantically it still matches. Same root cause as your exact-string failure: embeddings are great at \"about the same thing\" and blind to \"is the same thing.\" What helped me more than chasing re-index cadence was attaching a hard identity key plus a recency field to each chunk and letting retrieval prefer the newest record for a given key, so the stale copy can still match but loses the tie. Didn't fix everything, but it turned \"why is this drifting\" into something I could actually see.",
+          "score": 1,
+          "created_utc": "2026-06-14 16:40:03",
+          "is_submitter": false,
           "replies": []
         }
       ]
@@ -805,7 +785,7 @@
       "url": "https://www.reddit.com/r/Rag/comments/1u031wy/what_are_teams_building_beyond_traditional_rag_in/",
       "author": "sibraan_",
       "created_utc": "2026-06-08 09:36:02",
-      "score": 9,
+      "score": 10,
       "num_comments": 3,
       "upvote_ratio": 1.0,
       "text": "it feels like basic vector search has completely hit a performance ceiling for anyone trying to build production-grade internal tools.\n\na year or two ago, throwing your unstructured PDFs into a vector database, running a quick cosine similarity search, and dumping the top chunks into a prompt was the standard playbook. it worked fine for simple, single-document QA or surface-level search bar tools.\n\nbut now that everyone has a basic semantic search engine running, the real operational limits of traditional enterprise RAG are starting to hurt.\n\nthe massive pain point we are hitting is fragmented context. if a user asks a multi-step question like tracing a multi-year decision trail across drives, slack and CRM systems flat vector chunking completely falls apart. the system might pull a text chunk that says \"the contract variation was approved,\" but it has absolutely no concept of time or relation to the original master service agreement stored in a completely separate folder.\n\nto fix this, we are seeing a massive shift toward contextual retrieval and stateful knowledge architectures.\n\nsome teams are trying to hardcode their own pipeline fixes like implementing anthropic’s chunk-level context injection trick or trying to duct-tape a standard hybrid search (BM25 + dense vectors) to a cross-encoder reranker. but even with a reranker, you are still ultimately querying flat, isolated islands of text.\n\nit’s making us realize that the next logical step for AI knowledge systems isn't a better embedding model, but an underlying relational framework.\n\nwe’ve been looking into how platforms are moving toward unified knowledge layers to bypass this. for instance, the way 60x sets up automated context graphs on top of enterprise silos. instead of forcing an LLM to run expensive, brute-force reasoning loops over thousands of flat text chunks, the ingestion layer automatically maps the causal edges and temporal traces between different data points out-of-the-box. it gives the agents actual institutional memory because the relationships are embedded into the data structure itself before the query even happens.\n\nhow are your teams handling the transition out of naive, single-pass RAG? are you trying to manually build your own graph-informed retrieval loops on top of existing vector stores, or are you outsourcing the underlying context infrastructure entirely to avoid the engineering debt?",
@@ -819,7 +799,7 @@
           "id": "oqf6not",
           "author": "eaz135",
           "text": "This is why teams are typically building agents with tighter purpose - rather than one big encompassing agent that tried to know everything. Product strategies around very specific purpose agents avoid a lot of the mess that comes with RAG at massive scale (but not all).",
-          "score": 3,
+          "score": 5,
           "created_utc": "2026-06-08 09:57:22",
           "is_submitter": false,
           "replies": []
@@ -845,29 +825,65 @@
       ]
     },
     {
-      "id": "1u5biop",
-      "title": "Wrote up the failure modes that kept breaking my RAG system: chunking, stale index, hybrid search, the works",
+      "id": "1u0vc07",
+      "title": "Silent wrong answers in RAG are harder to deal with than outright failures",
       "subreddit": "Rag",
-      "url": "https://www.reddit.com/r/Rag/comments/1u5biop/wrote_up_the_failure_modes_that_kept_breaking_my/",
+      "url": "https://www.reddit.com/r/Rag/comments/1u0vc07/silent_wrong_answers_in_rag_are_harder_to_deal/",
       "author": "SilverConsistent9222",
-      "created_utc": "2026-06-14 04:35:01",
-      "score": 9,
-      "num_comments": 1,
-      "upvote_ratio": 0.85,
-      "text": "So, after spending way too long debugging a RAG system that kept giving confidently wrong answers, I finally sat down and actually mapped out every place it was breaking.\n\nTurns out most of my problems came down to chunking, which I had genuinely underestimated. I was doing fixed-size splitting and not thinking about it much.\n\nThe issues:\n\nChunks too small, no context survives. retrieved \"refunds processed in 5 days\" with zero surrounding information. The LLM answered but missed all the nuance that was in the sentences around it.\n\nChunks too large, right section retrieved but the actual answer was buried under so much irrelevant text that quality tanked and costs went up.\n\nSwitched to sliding window with overlap and things got noticeably better. semantic chunking gave the best results but the cost per indexing run went up so I only use it for the most important documents.\n\nOther things that got me:\n\nStale index is sneaky, docs were getting updated but I hadn't set up automatic re-indexing. old information kept getting retrieved and I couldn't figure out why answers were drifting.\n\nSemantic search completely fails on exact strings. product codes, model numbers, specific IDs. had to add keyword search alongside semantic and merge the results. obvious in hindsight but I didn't think about it until users started complaining.\n\nLLM hallucinates from the closest chunk even when the answer isn't in your docs. had to be very explicit in the system prompt, if the answer isn't in the retrieved context, say you don't know. without that instruction it just riffs off whatever it found.\n\nThe thing that helped most beyond chunking was contextual retrieval, passing each chunk alongside the full document when generating its context prefix rather than just summarizing the chunk alone. makes a meaningful difference on longer documents because the chunk carries its location and purpose with it.\n\nAnyway, curious if others have hit these same things or found different fixes, especially on the stale index problem. My current solution feels a bit janky.",
+      "created_utc": "2026-06-09 04:54:20",
+      "score": 10,
+      "num_comments": 7,
+      "upvote_ratio": 0.92,
+      "text": "At least when the system fails obviously you know where to look.\n\nWhat's been getting me lately is the other kind, where everything looks fine on the surface. No error, no low confidence flag, no \"I don't know.\" Just a wrong answer delivered in the exact same tone as a correct one.\n\nHad this come up with a policy doc. User asked about the enterprise refund window. Answer was in the document. System came back with the wrong number, pulled from a different part of the policy that applied to standard customers. Nothing in the output suggested anything went wrong.\n\nThe only reason I caught it was because I already knew the correct answer. Which raises the obvious question of how many I didn't catch.\n\nThis is what makes retrieval bugs genuinely annoying to track down. A broken query throws an exception. A misconfigured embedding model produces garbage you can see is garbage. But a chunking boundary that strips just enough context from a sentence that it stops matching the right query, that just looks like a normal answer.\n\nNo idea how people are handling this systematically. Eyeballing logs doesn't scale and I haven't found a retrieval eval setup that catches this kind of thing reliably before it hits users.",
       "is_original_content": false,
       "link_flair_text": "Tutorial",
-      "permalink": "https://reddit.com/r/Rag/comments/1u5biop/wrote_up_the_failure_modes_that_kept_breaking_my/",
+      "permalink": "https://reddit.com/r/Rag/comments/1u0vc07/silent_wrong_answers_in_rag_are_harder_to_deal/",
       "domain": "self.Rag",
       "is_self": true,
       "comments": [
         {
-          "id": "orjig1y",
+          "id": "oql1gor",
           "author": "SilverConsistent9222",
-          "text": "made a full walkthrough of this with the pipeline drawn out step by step if anyone wants the visual version, also covers reranking, HyDE, Graph RAG, and agentic RAG for anyone going deeper- [https://youtu.be/MBDiJAWx8xk?si=U92YVVgAjXe3utXZ](https://youtu.be/MBDiJAWx8xk?si=U92YVVgAjXe3utXZ)",
-          "score": 2,
-          "created_utc": "2026-06-14 04:35:12",
+          "text": "dug into why this happens and what actually fixes it if useful: [https://youtu.be/BX\\_ruyImEaY?si=QPVIzmcFY3ddk-B7](https://youtu.be/BX_ruyImEaY?si=QPVIzmcFY3ddk-B7)",
+          "score": 1,
+          "created_utc": "2026-06-09 04:54:39",
           "is_submitter": true,
+          "replies": []
+        },
+        {
+          "id": "oqmvp6a",
+          "author": "Mindless_Clock_6299",
+          "text": "HyDE could be the answer. I create tools for AI engineers to help analyze at design stage. I am working in the backend (not public yet) on HyDE visualizer. https://contextiq.trango-compute.com",
+          "score": 1,
+          "created_utc": "2026-06-09 13:12:46",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oqnjs64",
+          "author": "automation_experto",
+          "text": "same problem shows up one layer before retrieval — extraction pipelines have a confidence score range, roughly 0.85 to 0.95, where the model isnt flagging for review but its also not right. it just outputs something plausible and moves on. so by the time that text hits your vector store the damage is already done and nothing in your RAG stack knows to distrust it. loud failures are actually easier to operationalize because you can write a rule. silent high-confidence wrong extractions dont give you anythign to hook into.",
+          "score": 1,
+          "created_utc": "2026-06-09 15:05:29",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oqo0cqz",
+          "author": "Specialist_Golf8133",
+          "text": "the chunking boundary problem is real and i dont think most retrieval evals are designed to catch it because they're built around query-answer pair matching, not context sufficiency. what actually helped us was adding a \"retrieved context contains the answer\" check as a seperate eval pass from the generation quality check, which fails in different ways and conflating them masks exactly this class of bug. the policy doc case you described is a segmentation problem upstream: if the standard vs enterprise distinction lives in a header or section label that got split off from the clause, your retriever never had a chance. synthetic adversarial queries targeting known doc structure boundaries is the closest thing i've found to a systematic catch.",
+          "score": 1,
+          "created_utc": "2026-06-09 16:15:45",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oqr19gq",
+          "author": "Dry_Inspection_4583",
+          "text": "My rag ends in postrgres and can be corrected;) \n\nBecause FaultLine ",
+          "score": 1,
+          "created_utc": "2026-06-10 00:59:30",
+          "is_submitter": false,
           "replies": []
         }
       ]
@@ -881,7 +897,7 @@
       "created_utc": "2026-06-11 19:33:25",
       "score": 9,
       "num_comments": 6,
-      "upvote_ratio": 0.92,
+      "upvote_ratio": 0.86,
       "text": "Spent the last couple weeks fixing flaky tool selection in an agent with about 35 tools. It is really just a retrieval problem, given the user turn, pull the right tool doc out of N. Started with dense embeddings (cosine over tool name + description). Top-1 was sitting around 65 percent, which meant a lot of wrong-tool calls i had to catch downstream.\n\nSwapped the retriever to plain BM25 over the same name + description fields and top-1 went to roughly 80 percent. Same tool docs, same eval queries, nothing else changed. Bit annoyed it was that simple.\n\nMy read on why: action verbs like check, get, run, list embed close to almost everything action-shaped, so the dense vectors lose the discriminative signal between tools. The identity of a tool lives in the noun and the param names, and lexical overlap catches that better than one smushed sentence vector. Folding the param field names into the BM25 doc bought another few points.\n\nCaveat, this is small-n and anecdotal: one agent, a few hundred eval queries, short keyword-ish tool descriptions. Not claiming dense retrieval is bad in general. But for short structured docs like tool schemas, sparse seems underrated.\n\nAnyone running a hybrid (BM25 then dense rerank, or the reverse) for tool/function routing and seeing it clearly beat either alone? Curious where the crossover is as the tool count grows into the hundreds.",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -1091,70 +1107,6 @@
       ]
     },
     {
-      "id": "1u0vc07",
-      "title": "Silent wrong answers in RAG are harder to deal with than outright failures",
-      "subreddit": "Rag",
-      "url": "https://www.reddit.com/r/Rag/comments/1u0vc07/silent_wrong_answers_in_rag_are_harder_to_deal/",
-      "author": "SilverConsistent9222",
-      "created_utc": "2026-06-09 04:54:20",
-      "score": 8,
-      "num_comments": 7,
-      "upvote_ratio": 0.85,
-      "text": "At least when the system fails obviously you know where to look.\n\nWhat's been getting me lately is the other kind, where everything looks fine on the surface. No error, no low confidence flag, no \"I don't know.\" Just a wrong answer delivered in the exact same tone as a correct one.\n\nHad this come up with a policy doc. User asked about the enterprise refund window. Answer was in the document. System came back with the wrong number, pulled from a different part of the policy that applied to standard customers. Nothing in the output suggested anything went wrong.\n\nThe only reason I caught it was because I already knew the correct answer. Which raises the obvious question of how many I didn't catch.\n\nThis is what makes retrieval bugs genuinely annoying to track down. A broken query throws an exception. A misconfigured embedding model produces garbage you can see is garbage. But a chunking boundary that strips just enough context from a sentence that it stops matching the right query, that just looks like a normal answer.\n\nNo idea how people are handling this systematically. Eyeballing logs doesn't scale and I haven't found a retrieval eval setup that catches this kind of thing reliably before it hits users.",
-      "is_original_content": false,
-      "link_flair_text": "Tutorial",
-      "permalink": "https://reddit.com/r/Rag/comments/1u0vc07/silent_wrong_answers_in_rag_are_harder_to_deal/",
-      "domain": "self.Rag",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "oql1gor",
-          "author": "SilverConsistent9222",
-          "text": "dug into why this happens and what actually fixes it if useful: [https://youtu.be/BX\\_ruyImEaY?si=QPVIzmcFY3ddk-B7](https://youtu.be/BX_ruyImEaY?si=QPVIzmcFY3ddk-B7)",
-          "score": 1,
-          "created_utc": "2026-06-09 04:54:39",
-          "is_submitter": true,
-          "replies": []
-        },
-        {
-          "id": "oqmvp6a",
-          "author": "Mindless_Clock_6299",
-          "text": "HyDE could be the answer. I create tools for AI engineers to help analyze at design stage. I am working in the backend (not public yet) on HyDE visualizer. https://contextiq.trango-compute.com",
-          "score": 1,
-          "created_utc": "2026-06-09 13:12:46",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oqnjs64",
-          "author": "automation_experto",
-          "text": "same problem shows up one layer before retrieval — extraction pipelines have a confidence score range, roughly 0.85 to 0.95, where the model isnt flagging for review but its also not right. it just outputs something plausible and moves on. so by the time that text hits your vector store the damage is already done and nothing in your RAG stack knows to distrust it. loud failures are actually easier to operationalize because you can write a rule. silent high-confidence wrong extractions dont give you anythign to hook into.",
-          "score": 1,
-          "created_utc": "2026-06-09 15:05:29",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oqo0cqz",
-          "author": "Specialist_Golf8133",
-          "text": "the chunking boundary problem is real and i dont think most retrieval evals are designed to catch it because they're built around query-answer pair matching, not context sufficiency. what actually helped us was adding a \"retrieved context contains the answer\" check as a seperate eval pass from the generation quality check, which fails in different ways and conflating them masks exactly this class of bug. the policy doc case you described is a segmentation problem upstream: if the standard vs enterprise distinction lives in a header or section label that got split off from the clause, your retriever never had a chance. synthetic adversarial queries targeting known doc structure boundaries is the closest thing i've found to a systematic catch.",
-          "score": 1,
-          "created_utc": "2026-06-09 16:15:45",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oqr19gq",
-          "author": "Dry_Inspection_4583",
-          "text": "My rag ends in postrgres and can be corrected;) \n\nBecause FaultLine ",
-          "score": 1,
-          "created_utc": "2026-06-10 00:59:30",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
       "id": "1u320c7",
       "title": "How do I improve my RAG project?",
       "subreddit": "Rag",
@@ -1339,43 +1291,15 @@
       ]
     },
     {
-      "id": "1tzqj4o",
-      "title": "RAG pipeline visualizer (open source)",
-      "subreddit": "Rag",
-      "url": "https://www.reddit.com/r/Rag/comments/1tzqj4o/rag_pipeline_visualizer_open_source/",
-      "author": "Expensive-Hope-4727",
-      "created_utc": "2026-06-07 22:49:00",
-      "score": 6,
-      "num_comments": 3,
-      "upvote_ratio": 0.81,
-      "text": "This is an open source tool for visualizing file extraction through RAG.\n\nI like funky data origami (I've been experimenting with all the graphRAG shapes and varieties). Today I decided I was going to make a knowledge base from many years of random notes on my phone, but it needed tons of enrichment and interpretation and sort of translation to take anything from scratch notes and even get it to \"meaningful\" bullet points. I got really lost at some point and couldn't dig back out of it. Claudio kept changing the extraction steps every batch I gave him, then he'd redo everything from the top. It was kind of a nightmare, so I decided to make a visualizer.\n\nYou can play around with it. Set up your process with chunking, embedding, entity, relationship, enrichment, deduplication (based on what you need). It can deliver a vector db, graph database, hypergraph, hippograph, TSRAG graph, all the fancy variants. You configure how the agent behaves with a query and stack all your traditional search engine scripts, basically meeting in the middle to create the end to end unstructured -> structured, RAG agent native.\n\nIt's a design helper, not a runtime. The output is a plan and a build prompt, not code. Free and open source, no signup.\n\nLive: [https://whatsorag.vercel.app](https://whatsorag.vercel.app)\n\nCode: [https://github.com/Mx3RnD/whatsorag](https://github.com/Mx3RnD/whatsorag)\n\nWould love to hear what variants or steps I'm missing. Sorry btw for the ai writing. ",
-      "is_original_content": false,
-      "link_flair_text": "Tools & Resources",
-      "permalink": "https://reddit.com/r/Rag/comments/1tzqj4o/rag_pipeline_visualizer_open_source/",
-      "domain": "self.Rag",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "oqrdy3z",
-          "author": "bn-batman_40",
-          "text": "I like this tool, and see the value in this.\n\nThe gap I see is validation. Visualization shows what I built and validation tells me whether I built the right thing.",
-          "score": 1,
-          "created_utc": "2026-06-10 02:10:28",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
       "id": "1u2gly8",
       "title": "50M+ company matching system — is Azure AI Search still a good choice at scale ?",
       "subreddit": "Rag",
       "url": "https://www.reddit.com/r/Rag/comments/1u2gly8/50m_company_matching_system_is_azure_ai_search/",
       "author": "AB3NZ",
       "created_utc": "2026-06-10 22:11:07",
-      "score": 5,
+      "score": 7,
       "num_comments": 4,
-      "upvote_ratio": 0.79,
+      "upvote_ratio": 0.9,
       "text": "Hi everyone\n\nI’m building a production company matching (entity resolution) system and I’d like feedback from people who have actually operated large-scale retrieval systems (50M+ documents) in production.\n\nCurrent setup:\n\n* Vector Database: Azure AI Search\n* Dataset: \\~50M companies (expected to grow)\n* Each company has:\n   * Arabic names (1)\n   * English names (1)\n   * trading names (3-8)\n* Each variant is currently indexed as a separate vector document\n* Embeddings: `text-embedding-3-large` (reduced to 256 dimensions)\n* Country-specific search (we filter by country before retrieval)\n\nMy main concern is scaling vector search efficiently and cost-effectively as the system grows beyond 50M companies with 5–10 variants per company, this leads to \\~250M to 500M total vector documents, Which raises questions around: index size and storage cost , latency stability at scale and whether Azure AI Search is still the best option.\n\nI’d really appreciate insights from people who’ve worked with 50M–500M+ document systems:\n\n1. Vector database choice : what did you end up using in production and why ?\n2. How do you handle alias / name variants: this is the core design question in my system, for company matching systems:\n\n* Do you index each alias as a separate vector ?\n* Or do you aggregate all aliases into a single embedding per entity ?\n* Or do you rely on lexical search for variants instead of vectors ?\n\n1. Scaling strategy: At 50M+ scale:\n\n* How do you shard or partition the index ?\n* Do you partition by country / region / something else ?\n* How do you keep latency stable ?\n\n1. Azure AI Search specifically: any major bottlenecks (cost, latency, indexing time) ?\n2. What I’m really trying to decide is whether my current design (multi-vector alias indexing) is a reasonable production approach at this scale or something that will become unnecessarily expensive/complex compared to alternative architectures\n\nAny real-world experience or architecture references would be highly appreciated.",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -1411,6 +1335,100 @@
               ]
             }
           ]
+        }
+      ]
+    },
+    {
+      "id": "1tzqj4o",
+      "title": "RAG pipeline visualizer (open source)",
+      "subreddit": "Rag",
+      "url": "https://www.reddit.com/r/Rag/comments/1tzqj4o/rag_pipeline_visualizer_open_source/",
+      "author": "Expensive-Hope-4727",
+      "created_utc": "2026-06-07 22:49:00",
+      "score": 6,
+      "num_comments": 3,
+      "upvote_ratio": 0.81,
+      "text": "This is an open source tool for visualizing file extraction through RAG.\n\nI like funky data origami (I've been experimenting with all the graphRAG shapes and varieties). Today I decided I was going to make a knowledge base from many years of random notes on my phone, but it needed tons of enrichment and interpretation and sort of translation to take anything from scratch notes and even get it to \"meaningful\" bullet points. I got really lost at some point and couldn't dig back out of it. Claudio kept changing the extraction steps every batch I gave him, then he'd redo everything from the top. It was kind of a nightmare, so I decided to make a visualizer.\n\nYou can play around with it. Set up your process with chunking, embedding, entity, relationship, enrichment, deduplication (based on what you need). It can deliver a vector db, graph database, hypergraph, hippograph, TSRAG graph, all the fancy variants. You configure how the agent behaves with a query and stack all your traditional search engine scripts, basically meeting in the middle to create the end to end unstructured -> structured, RAG agent native.\n\nIt's a design helper, not a runtime. The output is a plan and a build prompt, not code. Free and open source, no signup.\n\nLive: [https://whatsorag.vercel.app](https://whatsorag.vercel.app)\n\nCode: [https://github.com/Mx3RnD/whatsorag](https://github.com/Mx3RnD/whatsorag)\n\nWould love to hear what variants or steps I'm missing. Sorry btw for the ai writing. ",
+      "is_original_content": false,
+      "link_flair_text": "Tools & Resources",
+      "permalink": "https://reddit.com/r/Rag/comments/1tzqj4o/rag_pipeline_visualizer_open_source/",
+      "domain": "self.Rag",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "oqrdy3z",
+          "author": "bn-batman_40",
+          "text": "I like this tool, and see the value in this.\n\nThe gap I see is validation. Visualization shows what I built and validation tells me whether I built the right thing.",
+          "score": 1,
+          "created_utc": "2026-06-10 02:10:28",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1u3pamw",
+      "title": "Best lightweight open source embedding model for RAG query embedding?",
+      "subreddit": "Rag",
+      "url": "https://www.reddit.com/r/Rag/comments/1u3pamw/best_lightweight_open_source_embedding_model_for/",
+      "author": "SawOnGam",
+      "created_utc": "2026-06-12 08:20:04",
+      "score": 6,
+      "num_comments": 9,
+      "upvote_ratio": 1.0,
+      "text": "Building a RAG pipeline and need to embed a user message before hitting the vector DB. Looking for something fast and lightweight?\n\nAny help would be appreciated.",
+      "is_original_content": false,
+      "link_flair_text": "Tools & Resources",
+      "permalink": "https://reddit.com/r/Rag/comments/1u3pamw/best_lightweight_open_source_embedding_model_for/",
+      "domain": "self.Rag",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "or6z6az",
+          "author": "InvestmentSlow4983",
+          "text": "So does this user message only contain text if so then use fast embed cause its faster on cpu also with a small model like BAAI/bge-small-en-v1.5  cause its extremly good and fast the only thing you need to check is matching dimension size of model and vector db this model's embeddings have 384 dimensions",
+          "score": 1,
+          "created_utc": "2026-06-12 08:50:14",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "or7oio3",
+              "author": "SawOnGam",
+              "text": "I will look into it, the vector stored in my database are of 3072 dimension, so i would need to same dimension embedding which is multi lingual",
+              "score": 1,
+              "created_utc": "2026-06-12 11:59:57",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "or7p4pm",
+                  "author": "InvestmentSlow4983",
+                  "text": "multi lingual ?? like different langues english , french\n\n",
+                  "score": 1,
+                  "created_utc": "2026-06-12 12:03:39",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "orfbp9j",
+          "author": "CapitalShake3085",
+          "text": "Qwen3 0.6b is the current SOTA. There is also the 4b and 8b.",
+          "score": 1,
+          "created_utc": "2026-06-13 14:52:35",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "ork85ss",
+          "author": "_VisionaryVibes",
+          "text": "This is a not so popular take.. the embedding model choice matters less than your memory layer. I tried hydra db for query context on a similar setup and the per session recall reduced redundant embeds noticeably. all MiniLM L6 v2 is still the fast default though",
+          "score": 1,
+          "created_utc": "2026-06-14 07:49:04",
+          "is_submitter": false,
+          "replies": []
         }
       ]
     }
