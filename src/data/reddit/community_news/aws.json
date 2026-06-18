@@ -1,11 +1,11 @@
 {
   "metadata": {
-    "last_updated": "2026-06-17 18:46:16",
+    "last_updated": "2026-06-18 04:59:57",
     "time_filter": "week",
     "subreddit": "aws",
     "total_items": 20,
     "total_comments": 140,
-    "file_size_bytes": 168629
+    "file_size_bytes": 178463
   },
   "items": [
     {
@@ -15,7 +15,7 @@
       "url": "https://www.reddit.com/r/aws/comments/1u6cuis/performance_evaluation_of_the_new_m9g_instance/",
       "author": "daroczig",
       "created_utc": "2026-06-15 10:35:56",
-      "score": 131,
+      "score": 132,
       "num_comments": 10,
       "upvote_ratio": 0.97,
       "text": "[AWS announced the general availability](https://www.aboutamazon.com/news/aws/aws-graviton-5-cpu-amazon-ec2) of the new Graviton5-powered (ARM) `m9g` and `m9gd` instance families, promising \"up to 25% better compute performance\", \"2.6x more L3 cache\", \"faster memory speeds\", \"15% higher network bandwidth\", and \"30% higher IOPS\" than the previous generation.\n\nThis sounded very exciting already back in December when the new Graviton generation was announced at *AWS re:Invent 2025*, but we only had marketing claims at that time without the ability to actually measure performance -- so I was super happy to dig into the [Spare Cores](https://sparecores.com) data we automatically collected overnight by actually starting all new instance types and running 500+ benchmark workloads on each along with detailed hardware discovery tools.\n\nI'll post direct links to the raw data in the comments, but since I already spent some time reviewing all this rich data, I'm highlighting the most important aspects below to get you up-to-speed. For demo purposes, I'll refer to the large `2xlarge` instance sizes in the charts below.\n\n**The Specs**\n\nThe newer generation of CPU indeed brings in clearly visible advantages over the previous generations -- even just looking at the hardware inspection results (although the hypervisor is sometimes just too shy to reveal all the details):\n\n[CPU specs of the large instances of the m6g\\/m7g\\/m8g\\/m9g instance families](https://preview.redd.it/cwwe1dc4df7h1.png?width=843&format=png&auto=webp&s=314deed50f0543f278a22f64aa3d16459471be74)\n\nBesides the higher frequency, this increase in CPU cache capacity can be beneficial for many workloads: AWS stated that the \"chip includes a 5x larger L3 cache\" and that \"each Graviton5 core has access to 2.6x more L3 cache than Graviton4\", while we saw a \\~50% increase in the L3 cache amount at this server size.\n\nNote that when looking at the recent `metal` versions, there's indeed a 73728 KiB -> 196608 KiB jump in that metric, all 192 no-HT CPU cores divided into two symmetric NUMA nodes, each with 96-96 vCPUs sharing over 96 MiB L3 cache ([m9g.metal-49xl](https://sparecores.com/server/aws/m9g.metal-48xl)):\n\n[CPU and System Topology of m9g.metal-48xl](https://preview.redd.it/9meyd4u5df7h1.png?width=891&format=png&auto=webp&s=93f6fc619b53e5a8e03c6fc3bdb8919b88419179)\n\nFun fact: the 2MiB private L2 cache per core adds up to a massive 384 MiB .. actually over the aggregate L3 cache amount (192 MiB).\n\nThe other highly visible change in the specs is related to the network card's speed:\n\n[Memory and Network specs](https://preview.redd.it/y85lqxi7df7h1.png?width=833&format=png&auto=webp&s=0b2780312baf948ceaa10d101bcb436e7d11ce5f)\n\nThis is all in sync with the AWS announcement: \"with up to 15% higher network bandwidth and 20% higher EBS bandwidth on average across instance sizes, and up to twice the network bandwidth for the largest instances\".\n\n**Pricing & Cost Efficiency**\n\nOne of the most important bits! By default, we show the best on-demand and spot prices for all selected instance types across the globe, so sometimes preferring some of the less mainstream regions with lower prices:\n\n[Pricing and CPU score of the m\\(6|7|8|9\\)g.2xlarge instances](https://preview.redd.it/ziemm489df7h1.png?width=841&format=png&auto=webp&s=2a610dbde16b84b7fa8ff0a1dc0753815e802a0e)\n\nThe new generation instance is a massive winner when looking at both the single-core and multi-core \"SCore\" (basically a CPU-only stressing metric of `div16` ops): 16.5% improvement in the single-core, and 17.5% boost over the multi-core score at the same number of vCPUs.\n\nBut the price increase is also steep in the above table: while you can get the previous-gen instance sizes at 20-25 US cents per hour (on-demand), the most recent generation costs close to 40 US cents per hour at this instance size .. but note the difference in the related AWS regions: the newest generation is only available in 3 US and 1 EU regions. A fairer comparison is looking at the prices in the same (N. Virginia) region:\n\n[Pricing and cost-efficiency in the same example region](https://preview.redd.it/j5763wvadf7h1.png?width=841&format=png&auto=webp&s=2d0a434d7d1f4623a52057a7d94f56084b1f4892)\n\nNow this is much more promising: the \\~39 US cents of the newest gen compares to the 31-36 US cents of the previous gens at much better performance, overall resulting in higher \"$Core\" (SCore divided by the price showing the amount of SCore you can buy with $1/hr), so higher performance at the unit price. The low spot prices for previous-gen instances at various regions are still tempting, though -- when there's actually related capacity.\n\n**Benchmarks**\n\nWe have run \\~500 benchmark workloads across all these instance families and sizes, including memory bandwidth measurements, OpenSSL speed of hash functions and block ciphers, static web serving, key/value database operations, LLM inference speed, and general benchmarking suites -- such as GeekBench or PassMark. You can find all the related data and charts in the above URLs, but highlighting a few:\n\n[Memory bandwidth measurements](https://preview.redd.it/bzraxijcdf7h1.png?width=889&format=png&auto=webp&s=e6c3ba8bfbb772cb147dfeb6778503ee1c21b381)\n\nThe newest gen is the clear winner for all read, write, and mixed operations in terms of memory bandwidth at lower block sizes, but surprisingly underperforms previous generations when the block size reaches the L3 cache size, so the CPU is forced to interact with RAM. This might be valid due to the dual-NUMA design, or a methodology detail, so to confirm this, we not only run `bw_mem` from LMbench, but also our tailored tool ([sc-membench](https://www.reddit.com/r/linux/comments/1qog3qc/modern_memory_bandwidth_and_latency_benchmarks/)) that scales better with many CPU cores and complex NUMA architectures. Unfortunately, we don't yet have the related measurements for the previous gen instances due to funding (we would need to spin up already benchmarked servers again) -- I will follow up on this later. PS If you are from AWS, I appreciate any help with cloud credits for future measurements, as benchmarking thousands of instance types at scale is an expensive pleasure 😊\n\nBenchmarking suites, such as PassMark, show the newest gen instance winning across the board with 16-50% performance improvement, even when comparing to the recent `m8g.2xlarge`:\n\n|Category|m6g.2xlarge|m7g.2xlarge|m8g.2xlarge|m9g.2xlarge|\n|:-|:-|:-|:-|:-|\n|String Sorting|22.87K|31.62K|37.11K|43.05K|\n|Single Threaded|1.11K|1.57K|1.94K|2.46K|\n|Prime Numbers|60.27|92.45|138.82|162.59|\n|Physics|1.08K|2.02K|2.53K|3.12K|\n|Integer Maths|31.57K|38.16K|41.72K|49.01K|\n|Floating Point Maths|23.96K|37.94K|48.48K|61.26K|\n|Extended Instructions|4.98K|6.64K|7.37K|10.80K|\n|Encryption|1.08K|1.12K|1.50K|2.36K|\n|Compression|37.73K|42.25K|53.12K|74.64K|\n|**CPU Mark**|**5.22K**|**6.07K**|**7.68K**|**10.87K**|\n\nThe overall PassMark score shows that the performance has doubled since the `m6g` generation, and increased by 40% since the previous (`m8g`) gen.\n\nThe memory-related PassMark scores are similarly promising:\n\n|Category|m6g.2xlarge|m7g.2xlarge|m8g.2xlarge|m9g.2xlarge|\n|:-|:-|:-|:-|:-|\n|Memory Write|12.53K|19.66K|21.24K|24.93K|\n|Memory Read Uncached|9.17K|18.70K|19.51K|23.80K|\n|Memory Read Cached|9.48K|19.66K|21.17K|24.95K|\n|Memory Latency|71.56|52.49|48.88|30.71|\n|Database Operations|5.17K|8.04K|12.12K|14.92K|\n|**Memory Mark**|**1.73K**|**2.87K**|**3.08K**|**4.06K**|\n\nNote the massive reduction in the memory latency metric, which is well aligned with the AWS announcement. Overall, we measured 30+ percent improvement over the `m8g`.\n\nLet's not forget about the elephant in the room of all tech articles/conference talks/restroom small talk conversations nowadays: LLM inference. Although CPU-only instances are usually not the best fit for serving LLMs, smaller models can perform at very reasonable speed for low-concurrency scenarios. That's what we measured by using `llama.cpp`:\n\n[LLM inference \\(text processing and text generation\\) speed of the m\\(6|7|8|9\\)g.2xlarge instances using gemma \\(2B\\).](https://preview.redd.it/ve7buyiedf7h1.png?width=827&format=png&auto=webp&s=cdd469d3481cfd0639c2e1d3ceaceff41e968189)\n\nThe `m9g` outperformed previous generations by far, and even managed to perform tasks that older-generation machines timed out on. Although the above screenshot is on Gemma (a 2B parameter LLM), these instances managed to also load and serve the 7B Llama model as well, with 20+ tokens/sec for prompt processing, and 15+ tokens/sec for text generation -- well over 30% improvement compared to `m8g`, and oftentimes 2-3x speed boost compared to `m6g`.\n\nDue to the limit on the number of images one can include in a post, I will not share all the other benchmark results here (e.g. compression and OpenSSL algos, web serving or key/value database ops), but please check the URLs posted below in the first comment -- I'm sure you will find some additional interesting data points there.\n\n**Summary**\n\nI know this has been a long post, so TL;DR:\n\n>The new gen servers seem to deliver what it claimed in the announcement 😊\n\nI hope you enjoyed this write-up and found the standardized data on 4 generations of Graviton useful -- please let me know in the comments below!\n\n\\--\n\nEDIT: This article was originally posted on June 12, 2026 (Friday), but got flagged as NSFW and removed by Reddit's filter (I still have no idea which benchmark score triggered that bot decision -- probably still running on a `m6g`), so reposting on June 15 (Monday) without links to raw data in the post body.",
@@ -29,7 +29,7 @@
           "id": "orshyw4",
           "author": "PeteTinNY",
           "text": "Wow! This is really useful data, and hopefully something that more architects take note of.   There are significant cost and resource savings from moving utility workloads away from Intel instances and into Gravitron.  And while it does take some testing moving into the new processor family, it's been pretty painless for a lot of my work and saved bundles.  I'd say that the  Annapurna Labs acquisition was one of the most exciting that Amazon ever did.  \n  \nHave you done any review on the Trainium or Inferentia chips? ",
-          "score": 12,
+          "score": 13,
           "created_utc": "2026-06-15 14:10:43",
           "is_submitter": false,
           "replies": [
@@ -37,7 +37,7 @@
               "id": "ort1wbf",
               "author": "daroczig",
               "text": "Thanks for your kind words! 🙇 And good points on the performance and cost-efficiency of Graviton.\n\nAnd yes, we have benchmarked well over 1,000 instance types at AWS (except for a few recent releases due to budget constraints -- but working on reaching 100% coverage of 1,338 instance types), including all Inferentia and most Trainium instance types. Here's a direct link searching for these at Spare Cores:\n\n* [`inf1` and `inf2` server families](https://sparecores.com/servers?partial_name_or_id=inf)\n* [`trn1` server families](https://sparecores.com/servers?partial_name_or_id=trn) (`trn2` was not benchmarked yet)\n\nNote that the data collected covers general workloads (like in the above post, mostly memory bandwidth, compression, OpenSSL, web serving etc plus the general benchmark suites), and not that many AI-focused tasks yet (except for `llama.cpp`), but I'd be happy to expand to other workloads as well, e.g. currently working on `vLLM`. ",
-              "score": 7,
+              "score": 8,
               "created_utc": "2026-06-15 15:41:48",
               "is_submitter": true,
               "replies": []
@@ -105,7 +105,7 @@
           "id": "orfklq5",
           "author": "wfh-without-pants",
           "text": "The phrase \"bit barns\" is so stupid. They're datacenters.",
-          "score": 126,
+          "score": 128,
           "created_utc": "2026-06-13 15:37:09",
           "is_submitter": false,
           "replies": [
@@ -121,7 +121,7 @@
                   "id": "orjxabf",
                   "author": "sur_surly",
                   "text": "Did you know everyone who ingests dihydrogen monoxide dies?\n\nMe, in the 8th grade",
-                  "score": 6,
+                  "score": 4,
                   "created_utc": "2026-06-14 06:22:41",
                   "is_submitter": false,
                   "replies": []
@@ -130,7 +130,7 @@
                   "id": "org0xb9",
                   "author": "ryosen",
                   "text": "It's like a paid shill trying to shift the public's concern away from established terminology by diluting the vocabulary pool.",
-                  "score": 11,
+                  "score": 12,
                   "created_utc": "2026-06-13 16:58:13",
                   "is_submitter": false,
                   "replies": []
@@ -141,7 +141,7 @@
               "id": "orfu42o",
               "author": "ByronScottJones",
               "text": "The Register is NOTORIOUS for using stupid nicknames for things. They are single handedly responsible for keeping the phrase \"boffins\" in use. ",
-              "score": 21,
+              "score": 23,
               "created_utc": "2026-06-13 16:24:25",
               "is_submitter": false,
               "replies": [
@@ -180,7 +180,7 @@
           "id": "orfrzht",
           "author": "typo180",
           "text": "Wow, that's nearly 0.2% of the water we used to grow almonds in the same year. Really makes you think.",
-          "score": 142,
+          "score": 141,
           "created_utc": "2026-06-13 16:13:52",
           "is_submitter": false,
           "replies": [
@@ -188,7 +188,7 @@
               "id": "org9ksd",
               "author": "Rplix1",
               "text": "That really activates my almonds",
-              "score": 27,
+              "score": 28,
               "created_utc": "2026-06-13 17:40:49",
               "is_submitter": false,
               "replies": [
@@ -207,7 +207,7 @@
               "id": "orhmz4f",
               "author": "JPJackPott",
               "text": "I dont even like almonds ",
-              "score": 5,
+              "score": 4,
               "created_utc": "2026-06-13 21:55:14",
               "is_submitter": false,
               "replies": [
@@ -244,7 +244,7 @@
               "id": "orfw8bz",
               "author": "RoseSec_",
               "text": "Glad I can eat DynamoDB",
-              "score": 13,
+              "score": 14,
               "created_utc": "2026-06-13 16:35:00",
               "is_submitter": false,
               "replies": [
@@ -263,7 +263,7 @@
               "id": "orgid3t",
               "author": "im-a-smith",
               "text": "Do almonds introduce heavy metals and PFAS to the water they use too?",
-              "score": -17,
+              "score": -18,
               "created_utc": "2026-06-13 18:24:19",
               "is_submitter": false,
               "replies": [
@@ -271,7 +271,7 @@
                   "id": "orgm5lt",
                   "author": "phil_thrasher",
                   "text": "Funnily enough, yeah. Ag runoff is one of the biggest documented sources of heavy metals in CA surface and groundwater - the State Water Board lists metals right alongside pesticides, nitrates, and selenium. PFAS too: it gets into farmland through biosolids (sewage sludge sold as fertilizer) and through pesticides, \\~14% of which are PFAS compounds. So the orchard itself isn’t leaching forever chemicals, but the inputs absolutely do. ",
-                  "score": 29,
+                  "score": 30,
                   "created_utc": "2026-06-13 18:43:37",
                   "is_submitter": false,
                   "replies": []
@@ -302,7 +302,7 @@
           "id": "orhiw5d",
           "author": "Amazing-Mirror-3076",
           "text": "So about the same as 25 golf courses.",
-          "score": 19,
+          "score": 18,
           "created_utc": "2026-06-13 21:33:12",
           "is_submitter": false,
           "replies": [
@@ -321,7 +321,7 @@
           "id": "orfna5i",
           "author": "cothomps",
           "text": "The way that article is written it sounds like it’s all “Amazon” (the shopping site) but as AWS is probably the largest data center footprint on the globe that number is going to be eye popping.\n\nIn all of this I’m mostly concerned that this AI race has drowned out the very real problem of burning more carbon for power generation and water treatment.",
-          "score": 33,
+          "score": 30,
           "created_utc": "2026-06-13 15:50:30",
           "is_submitter": false,
           "replies": [
@@ -329,7 +329,7 @@
               "id": "orfpb79",
               "author": "OkStatement77",
               "text": "it wasn't AI that caused us to forget climate change i assure you that",
-              "score": 15,
+              "score": 14,
               "created_utc": "2026-06-13 16:00:36",
               "is_submitter": false,
               "replies": [
@@ -337,7 +337,7 @@
                   "id": "org2pxn",
                   "author": "cothomps",
                   "text": "Totally agree - it's only that now \"AI\" has drowned out nearly every other economic priority.\n\nTo be fair, in 2026 the only economic sectors that aren't falling to shit are AI companies and the fossil fuel industries.",
-                  "score": 3,
+                  "score": 4,
                   "created_utc": "2026-06-13 17:07:01",
                   "is_submitter": false,
                   "replies": []
@@ -350,7 +350,7 @@
           "id": "ori7l5h",
           "author": "ururururu",
           "text": "The sentiment is right - you want to have water conservation.  However the scale is wrong -- 2.5bn is peanuts compared to how much the US used to produce peanuts last year -- 307bn-451bn, or 122.8-180.4 times as much for peanuts.",
-          "score": 7,
+          "score": 8,
           "created_utc": "2026-06-13 23:52:18",
           "is_submitter": false,
           "replies": []
@@ -359,7 +359,7 @@
           "id": "orgootw",
           "author": "banallthemusic",
           "text": "I find it ironic that people post about not wanting data centers on website(s) that uses said data centers. ",
-          "score": 15,
+          "score": 16,
           "created_utc": "2026-06-13 18:56:30",
           "is_submitter": false,
           "replies": []
@@ -442,7 +442,7 @@
           "id": "orgoyk1",
           "author": "kingslayerer",
           "text": "I love \"bit barns\". I am using it",
-          "score": -7,
+          "score": -9,
           "created_utc": "2026-06-13 18:57:53",
           "is_submitter": false,
           "replies": []
@@ -456,8 +456,8 @@
       "url": "https://www.reddit.com/r/aws/comments/1u54k4v/confused_about_aws_longterm_bedrock_strategy/",
       "author": "EvolvingDior",
       "created_utc": "2026-06-13 22:52:22",
-      "score": 95,
-      "num_comments": 59,
+      "score": 98,
+      "num_comments": 60,
       "upvote_ratio": 0.93,
       "text": "I've been using Bedrock for a number of months now. My primary use case is with less expensive models: Kimi, GLM, Deepseek, MiniMax, and for smaller multi-modal models Gemma4 and Qwen3.6. But Bedrock has not updated models from these providers in many months -- some for over a year. There have been recent advances that have moved the state of the art on the models offered by a generation or two. Most other third-party providers make these newer models available within days of their release. Not so for Bedrock.\n\nThe only new LLMs in the past few months are from Anthropic, OpenAI and NVidia.\n\nThe models offered from MiniMax, Kimi, GLM, and Deepseek are so old that they are no longer offered by the model providers themselves. Gemma3 is over a year old -- ancient by AI timescales. I get the sense that Amazon intends to just let these die a slow death on their platform.\n\nDoes AWS intend to continue providing models from top-tier non-US (China, Taiwan, EU) model providers? Will Bedrock ever have timely releases of these models? Or is this the end of the road for these model families on Bedrock?",
       "is_original_content": false,
@@ -523,7 +523,7 @@
                   "id": "oriuu4b",
                   "author": "Seref15",
                   "text": "AWS is going to focus their efforts on the customers that spend the most money, those customers are likely using frontier models.\n\nA customer that seeks the budget models probably has a low monthly spend overall and would naturally be deprioritized.",
-                  "score": 15,
+                  "score": 14,
                   "created_utc": "2026-06-14 02:12:57",
                   "is_submitter": false,
                   "replies": []
@@ -532,7 +532,7 @@
                   "id": "orkfni6",
                   "author": "GuyWithLag",
                   "text": "AWS Enterprise customers is where the moneys' at - and these folks are deathly allergic to rapid change, and AWS has a long deprecation cycle for that reason. The counterpoint is that if they publish something, they will need to support it for a long time; so AWS is conservative when there's no clear demand. ",
-                  "score": 5,
+                  "score": 6,
                   "created_utc": "2026-06-14 08:51:44",
                   "is_submitter": false,
                   "replies": []
@@ -570,7 +570,7 @@
               "id": "ork64c9",
               "author": "anentropic",
               "text": "That's not how it works, models don't get installed on a particular GPU and just stuck there hogging it forever",
-              "score": -2,
+              "score": -1,
               "created_utc": "2026-06-14 07:32:26",
               "is_submitter": false,
               "replies": []
@@ -581,7 +581,7 @@
           "id": "ori0utb",
           "author": "Howlla_",
           "text": "Enterprises customers don't update their models without proper testing and evaluations. Also changing model also triggers several compliances and procurement cycles so it's a slow tedious process.\n\nBy keeping these old models alive bedrock is ensuring customers have a positive experience.\n\nImagine you are McDonald's and all your ai needs are being fulfilled by a 1 year old LLM. If bedrock suddenly drops that LLM support for a new one, it would be a terrible experience since now you have to update your codebase, prompts and re-run all the evals. \n\nJust my opinion",
-          "score": 65,
+          "score": 67,
           "created_utc": "2026-06-13 23:12:19",
           "is_submitter": false,
           "replies": [
@@ -589,7 +589,7 @@
               "id": "oriuhog",
               "author": "Seref15",
               "text": "Introducing a new version doesn't automatically mean getting rid of the old one.\n\nAnthropic models launch on bedrock same day as via Anthropic's own service, and the old models are still available. Haiku 3.5 is only just now in the process of being removed from Bedrock.",
-              "score": 18,
+              "score": 20,
               "created_utc": "2026-06-14 02:10:52",
               "is_submitter": false,
               "replies": []
@@ -635,7 +635,7 @@
                   "id": "ori31sq",
                   "author": "btdeviant",
                   "text": "The expectation is backwards. Providers for foundation models are responsible for making their models to work with the Bedrock spec and ecosystem via MDA, not the other way around. ",
-                  "score": 12,
+                  "score": 13,
                   "created_utc": "2026-06-13 23:25:19",
                   "is_submitter": false,
                   "replies": []
@@ -644,7 +644,7 @@
                   "id": "ori04f1",
                   "author": "clintkev251",
                   "text": "Realistically they’re going to be prioritizing the models that their very largest customers demand, and while I’m sure there is some demand for cheaper and less mainstream models, most big customers are likely looking at the big names primarily ",
-                  "score": 14,
+                  "score": 13,
                   "created_utc": "2026-06-13 23:08:10",
                   "is_submitter": false,
                   "replies": []
@@ -675,7 +675,7 @@
           "id": "orka3vv",
           "author": "coinclink",
           "text": "I think AWS is just finding that promising to deliver all the open-weight models is not making them a lot of money and is not worth prioritizing, unfortunately. Only niche customers are using them and most are not doing nearly anything unique that frontier models are not. So it's just... why would we dedicate precious GPUs to something that like a handful of randos are asking for, rather than dedicating all of them to the models that every major enterprise is prepared to spend multi-millions on?\n\nYou also seem stuck on \"why are they still offering the old ones and not just replacing them with the new ones\" when it's like... well, they already promised to offer those old ones for a specific lifecycle so that is a commitment they've already made, so they have to keep it. They can't just go back and say \"oops, we didn't really want to have this model available forever, sorry to all those who built something around that promise.\" It just doesn't work that way.",
-          "score": 3,
+          "score": 4,
           "created_utc": "2026-06-14 08:05:03",
           "is_submitter": false,
           "replies": []
@@ -713,7 +713,7 @@
           "id": "orjer1i",
           "author": "llima1987",
           "text": "It wouldn't surprise me if the people in charge of keeping those up to date got laid off or reassigned to cover work positions left by the laid off people.",
-          "score": 5,
+          "score": 4,
           "created_utc": "2026-06-14 04:11:02",
           "is_submitter": false,
           "replies": [
@@ -724,7 +724,17 @@
               "score": 1,
               "created_utc": "2026-06-17 15:21:06",
               "is_submitter": false,
-              "replies": []
+              "replies": [
+                {
+                  "id": "osa5duz",
+                  "author": "llima1987",
+                  "text": "My perception is that large corporations are a big self evolving software that only lives on ram. Every time someone shares knowledge about what they actually do, you backup that piece of the software and allow someone else to pick it up if that part is corrupted (person gone for whatever reason). And every time you layoff a ton of people at once, you drop entire routines and data structures from memory, and get dangling pointers everywhere. Stuff stop being done and no one knows about it and the knowledge of how / why / when to do that just vanishes.",
+                  "score": 1,
+                  "created_utc": "2026-06-17 23:23:11",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
             }
           ]
         },
@@ -769,7 +779,7 @@
           "id": "orisaf4",
           "author": "Cocoa_Pug",
           "text": "They released the bedrock mantle a few days ago. It’s kind of confusing but from what I understand it’s a new api endpoint that is supposed to standardize and allow AWS to use their GPUs more efficiently vs the old bedrock runtime endpoint. It’s also the only way to use GPT\n\nAs expected, the documentation and console is confusing haha.",
-          "score": 3,
+          "score": 2,
           "created_utc": "2026-06-14 01:57:58",
           "is_submitter": false,
           "replies": [
@@ -906,9 +916,9 @@
       "url": "https://www.reddit.com/r/aws/comments/1u7vh75/are_you_finding_aws_quality_of_docs_going_down/",
       "author": "c-digs",
       "created_utc": "2026-06-17 00:45:44",
-      "score": 69,
-      "num_comments": 50,
-      "upvote_ratio": 0.96,
+      "score": 86,
+      "num_comments": 56,
+      "upvote_ratio": 0.97,
       "text": "Context: I'm trying to pick up ECS Express Mode because AWS retired the amazing (and unfortunately named) [Copilot CLI](https://aws.github.io/copilot-cli/) (honestly the best thing AWS ever made since it made using ECS bearable).\n\nI start from here:\n\nhttps://aws.amazon.com/blogs/aws/build-production-ready-applications-without-infrastructure-complexity-using-amazon-ecs-express-mode/\n\nThis doc is from 2025NOV and the example is completely wrong:\n\n```\naws ecs create-express-gateway-service \\\n--image [ACCOUNT_ID].ecr.us-west-2.amazonaws.com/myapp:latest \\\n--execution-role-arn arn:aws:iam::[ACCOUNT_ID]:role/[IAM_ROLE] \\\n--infrastructure-role-arn arn:aws:iam::[ACCOUNT_ID]:role/[IAM_ROLE]\n```\n\nBecause the parameter is `--primary-container image=...`.  Not only that, the example doesn't show the setup of the roles...\n\nThis doc: https://docs.aws.amazon.com/AmazonECS/latest/developerguide/express-service-getting-started.html\n\nShows the setup of the roles, _but the roles do not work for Express Mode_.  Before that the first JSON snippet is invalid because of the trailing `,`!  The second snippet is invalid because of extra whitespace!  Then the setup fails because it doesn't create a VPC or subnets (which is mentioned nowhere in the pre-requisites https://docs.aws.amazon.com/AmazonECS/latest/developerguide/express-service-create-full.html)!\n\nNot only is this not usable for humans, it's also not usable for agents.\n\nWhat is going with AWS?  Why would they replace the awesome Copilot CLI with this Express Mode option and then completely fail to document how to use it?\n",
       "is_original_content": false,
       "link_flair_text": "discussion",
@@ -920,7 +930,7 @@
           "id": "os3gvl2",
           "author": "can_somebody_explain",
           "text": "AWS decided to fire all document writers apparently ",
-          "score": 80,
+          "score": 100,
           "created_utc": "2026-06-17 00:57:41",
           "is_submitter": false,
           "replies": [
@@ -928,7 +938,7 @@
               "id": "os3hims",
               "author": "davewritescode",
               "text": "I actually know a couple of technical writers at AWS who were recently let go",
-              "score": 41,
+              "score": 43,
               "created_utc": "2026-06-17 01:01:14",
               "is_submitter": false,
               "replies": []
@@ -937,8 +947,35 @@
               "id": "os6aasw",
               "author": "Remarkable_Ad7161",
               "text": "Yeah with AI it's now a job for teams and product management. Some are good at it, others not so much. ",
-              "score": 3,
+              "score": 6,
               "created_utc": "2026-06-17 12:48:20",
+              "is_submitter": false,
+              "replies": []
+            },
+            {
+              "id": "os8i85j",
+              "author": "pacmain",
+              "text": "This is the cause... ",
+              "score": 3,
+              "created_utc": "2026-06-17 18:47:13",
+              "is_submitter": false,
+              "replies": []
+            },
+            {
+              "id": "osac8cr",
+              "author": "Repulsive-Bison-6821",
+              "text": "That’s true actually. My team used to have dedicated tech doc writer but now it’s all on engineers :(",
+              "score": 4,
+              "created_utc": "2026-06-18 00:01:25",
+              "is_submitter": false,
+              "replies": []
+            },
+            {
+              "id": "os9juq6",
+              "author": "E1337Recon",
+              "text": "Yes a lot of the technical writers and devrel/developer advocates in the AWS Containers space were let go a few years ago. The one who I know is still there (we worked on the EKS Developers Workshop) is wonderful but she’s only one person.",
+              "score": 2,
+              "created_utc": "2026-06-17 21:33:09",
               "is_submitter": false,
               "replies": []
             }
@@ -948,7 +985,7 @@
           "id": "os3ft2j",
           "author": "Mandelvolt",
           "text": "I spent like two weeks chasing my tail back in 2023 due to incorrect AWS documentation. It's always been hit and miss, which is frustrating for loke a trillion dollar company.",
-          "score": 41,
+          "score": 47,
           "created_utc": "2026-06-17 00:51:41",
           "is_submitter": false,
           "replies": [
@@ -964,7 +1001,7 @@
                   "id": "os3mcbi",
                   "author": "pausethelogic",
                   "text": "The funny part is in general, AWS docs are much better than Microsoft and  Google’s ",
-                  "score": 22,
+                  "score": 26,
                   "created_utc": "2026-06-17 01:28:09",
                   "is_submitter": false,
                   "replies": []
@@ -975,7 +1012,7 @@
               "id": "os3g228",
               "author": "c-digs",
               "text": "Maybe the contrast is more striking to me because the Copilot CLI, in contrast, was superbly documented.\n\nThis ECS Express Mode feels like hot garbage in comparison.",
-              "score": 5,
+              "score": 6,
               "created_utc": "2026-06-17 00:53:04",
               "is_submitter": true,
               "replies": []
@@ -984,7 +1021,7 @@
               "id": "os4gg4u",
               "author": "PhatOofxD",
               "text": "while I agree it's bad it's still better than Azure and Google lol ",
-              "score": 4,
+              "score": 6,
               "created_utc": "2026-06-17 04:33:02",
               "is_submitter": false,
               "replies": []
@@ -995,7 +1032,7 @@
           "id": "os3h8k9",
           "author": "aseriesoftubes",
           "text": "AWS laid off almost all of their technical writers. Engineers and PMs now write most docs. ",
-          "score": 85,
+          "score": 92,
           "created_utc": "2026-06-17 00:59:41",
           "is_submitter": false,
           "replies": [
@@ -1003,7 +1040,7 @@
               "id": "os3kp9j",
               "author": "Sensitive_Ad8147",
               "text": "No they don’t, now Eng and PM let ai write docs ",
-              "score": 85,
+              "score": 91,
               "created_utc": "2026-06-17 01:19:03",
               "is_submitter": false,
               "replies": [
@@ -1011,7 +1048,7 @@
                   "id": "os3sc6o",
                   "author": "aseriesoftubes",
                   "text": "That’s fair…",
-                  "score": 8,
+                  "score": 10,
                   "created_utc": "2026-06-17 02:02:19",
                   "is_submitter": false,
                   "replies": []
@@ -1020,7 +1057,7 @@
                   "id": "os3zw5y",
                   "author": "Seref15",
                   "text": "and that AI isnt even a good model, it's Nova",
-                  "score": 8,
+                  "score": 4,
                   "created_utc": "2026-06-17 02:46:05",
                   "is_submitter": false,
                   "replies": []
@@ -1033,10 +1070,20 @@
           "id": "os3tjj3",
           "author": "jerryk414",
           "text": "Try using GovCloud.\n\nThe documentation is basically non-existent.\n\nIf I had a dollar for every time I found GovCloud docs stating X is supported in Y service, only to spend hours getting things setup assuming it will work, only for the IaC to fail with a non-descript error, leading to hours of debugging only to finally then figure out that the  issue is that its them not me, i would have about $6.",
-          "score": 15,
+          "score": 17,
           "created_utc": "2026-06-17 02:09:13",
           "is_submitter": false,
-          "replies": []
+          "replies": [
+            {
+              "id": "os9k8f6",
+              "author": "E1337Recon",
+              "text": "Man when we started the GovCloud Support Team over there a couple years ago it was a constant uphill battle with PMs and SDMs to get them to update What’s New posts, GovCloud docs, etc to be very explicit about what is and isn’t in GovCloud. I swear we found new things every day that were just wrong.",
+              "score": 1,
+              "created_utc": "2026-06-17 21:34:56",
+              "is_submitter": false,
+              "replies": []
+            }
+          ]
         },
         {
           "id": "os3n9v1",
@@ -1050,7 +1097,7 @@
               "id": "os3ojjq",
               "author": "AWSSupport",
               "text": "Hi there, \n\nI want to make sure your feedback about our pricing pages is seen by our Service Team. If you could Chat Message us additional details about this, I will forward them internally. \n\n\\- Gee J.",
-              "score": -7,
+              "score": -6,
               "created_utc": "2026-06-17 01:40:28",
               "is_submitter": false,
               "replies": []
@@ -1061,7 +1108,7 @@
           "id": "os3gyqc",
           "author": "clintkev251",
           "text": "Use the provide feedback link in each of those doc pages (at least for the last two, the first is a blog which don't really get updated often in my experience). Those feedback items are reviewed directly by the docs team and usually fixed relatively quickly.",
-          "score": 17,
+          "score": 18,
           "created_utc": "2026-06-17 00:58:10",
           "is_submitter": false,
           "replies": [
@@ -1086,7 +1133,7 @@
                   "id": "os6uagz",
                   "author": "reasonman",
                   "text": "doc updates are a lot like the rest of the dev cycle internally and it takes a minute to go from 'track down the right person' => 'convince them it's wrong' => 'make the change' => 'deploy to all regions'. i've frequently fielded customer issues with the docs and had to chase down updates. it's one of my least favorite things because it's such a hassle. even doing work internally is difficult because i'm frequently coming up against incomplete or incorrect docs.",
-                  "score": 2,
+                  "score": 3,
                   "created_utc": "2026-06-17 14:26:13",
                   "is_submitter": false,
                   "replies": []
@@ -1108,7 +1155,7 @@
           "id": "os3vgjd",
           "author": "ultrathink-art",
           "text": "The technical writer layoffs hit hardest for CLI/SDK docs — examples that should be verified against actual running services. The AI tooling angle makes it worse: LLMs confidently reproduce the wrong syntax from their training data, so now you're debugging against two stale sources simultaneously.",
-          "score": 6,
+          "score": 7,
           "created_utc": "2026-06-17 02:20:27",
           "is_submitter": false,
           "replies": []
@@ -1144,7 +1191,7 @@
           "id": "os3fqyf",
           "author": "newbietofx",
           "text": "Report to aws repost ",
-          "score": 4,
+          "score": 2,
           "created_utc": "2026-06-17 00:51:21",
           "is_submitter": false,
           "replies": []
@@ -1207,7 +1254,7 @@
               "id": "os6s4vr",
               "author": "AWSSupport",
               "text": "Hello,\n\nYou're welcome to send us more details about this via private message & we'll pass your feedback along internally.\n\n\\- Adri N.",
-              "score": 1,
+              "score": 2,
               "created_utc": "2026-06-17 14:16:16",
               "is_submitter": false,
               "replies": []
@@ -1220,6 +1267,15 @@
           "text": "I recently implemented an endpoint to receive SNS https notifications of SES inbound email. I built and tested it based on the sample notification json provided on the doc page. When we finally got it set up, the real notification structure was significantly different.  It didn't require a total rewrite but it was certainly annoying.",
           "score": 1,
           "created_utc": "2026-06-17 17:37:55",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "osa3q03",
+          "author": "magnetik79",
+          "text": "For sure. Posted this yesterday: https://www.reddit.com/r/aws/comments/1u82yrv/minor_quibble_documentation_updates_when_new/\n\nThe moment they stopped taking documentation fixes from the public via GitHub PRs was a terrible change.\n\nAWS documentation used to the be big win vs. GCP/Azure in that the quality was well above - I feel that gap might be closing sadly.\n",
+          "score": 1,
+          "created_utc": "2026-06-17 23:14:02",
           "is_submitter": false,
           "replies": []
         },
@@ -1272,7 +1328,7 @@
               "id": "os3mcoc",
               "author": "c-digs",
               "text": "Look at these docs for `copilot`: \n\n- https://aws.github.io/copilot-cli/docs/manifest/lb-web-service/\n- https://aws.github.io/copilot-cli/docs/manifest/scheduled-job/\n\nTop tier stuff.  Cohesive.  Works.  But it reached EOL 12JUN",
-              "score": 3,
+              "score": 4,
               "created_utc": "2026-06-17 01:28:12",
               "is_submitter": true,
               "replies": []
@@ -1283,15 +1339,15 @@
           "id": "os3izkm",
           "author": "sghokie",
           "text": "Download Kiro, tell it what you want to do, let it build it, ask it to explain it in detail how it works.",
-          "score": -4,
+          "score": -5,
           "created_utc": "2026-06-17 01:09:35",
           "is_submitter": false,
           "replies": []
         },
         {
           "id": "os41ojp",
-          "author": "YasharF",
-          "text": "I would use Amazon Q from within the AWS Console for AWS related questions.\n\nThe age of finding and reading docs is kind of gone.",
+          "author": "[deleted]",
+          "text": "[deleted]",
           "score": -2,
           "created_utc": "2026-06-17 02:56:36",
           "is_submitter": false,
@@ -1319,7 +1375,7 @@
               "id": "os3hrin",
               "author": "Rollingprobablecause",
               "text": "You guys never fix anything lol. But thanks for the low effort reddit response.",
-              "score": 4,
+              "score": 3,
               "created_utc": "2026-06-17 01:02:37",
               "is_submitter": false,
               "replies": [
@@ -1327,7 +1383,7 @@
                   "id": "os3i32b",
                   "author": "c-digs",
                   "text": "Also, they are getting paid to make this stuff work.  I'm not getting my 2 hours back flailing with these broken docs.",
-                  "score": 5,
+                  "score": 4,
                   "created_utc": "2026-06-17 01:04:26",
                   "is_submitter": true,
                   "replies": []
@@ -1368,7 +1424,7 @@
           "id": "or0v83i",
           "author": "Miserygut",
           "text": "6 days: https://aws.amazon.com/about-aws/whats-new/2026/06/amazon-ecs-fargate-32vcpu/",
-          "score": 6,
+          "score": 7,
           "created_utc": "2026-06-11 12:34:09",
           "is_submitter": false,
           "replies": []
@@ -1382,9 +1438,9 @@
       "url": "https://www.reddit.com/r/aws/comments/1u2vl0n/anyone_moved_away_from_a_monolith_to_modern_cloud/",
       "author": "Routine_Day8121",
       "created_utc": "2026-06-11 10:47:19",
-      "score": 28,
+      "score": 30,
       "num_comments": 34,
-      "upvote_ratio": 0.67,
+      "upvote_ratio": 0.68,
       "text": "The moment let's modernize the monolith comes up, it feels like we're choosing between two bad options: a risky big‑bang rewrite that will slip by a year, or a slow, half planned migration that quietly makes things worse before they get better.\n\nThe codebase is full of tight coupling, weird side effects, and hidden contracts that only exist in people’s heads. On diagrams, the target architecture looks clean and bounded; in reality, one endpoint in the monolith reaches into five different parts of the system and nobody is totally sure what breaks if you move just that piece.\n\nYou read about strangler fig patterns, modular monoliths, anti corruption layers, etc., and they all sound reasonable. The hard part is applying any of that while still shipping features, keeping the current system stable, and not burning out the people who understand the old code.\n\nThat’s the tension I keep running into, how to move towards a more modern architecture without turning the next 18 months into one long high risk migration project that everyone secretly dreads.",
       "is_original_content": false,
       "link_flair_text": "discussion",
@@ -1404,7 +1460,7 @@
               "id": "or0vjfs",
               "author": "ENBD",
               "text": "Chip away at the monolith so that over time it becomes irrelevant.",
-              "score": 12,
+              "score": 13,
               "created_utc": "2026-06-11 12:35:54",
               "is_submitter": false,
               "replies": [
@@ -1412,7 +1468,7 @@
                   "id": "or1s114",
                   "author": "mr_jim_lahey",
                   "text": "https://martinfowler.com/bliki/StranglerFigApplication.html",
-                  "score": 10,
+                  "score": 9,
                   "created_utc": "2026-06-11 15:13:57",
                   "is_submitter": false,
                   "replies": []
@@ -1432,7 +1488,7 @@
               "id": "or111sp",
               "author": "zan-xhipe",
               "text": "This is the way. It's not big and flashy, but it works. With a big rewrite everything has to be right at the same time. When you pull out functionality incrementally it is ok if something goes wrong (it will). ",
-              "score": 1,
+              "score": 0,
               "created_utc": "2026-06-11 13:05:16",
               "is_submitter": false,
               "replies": []
@@ -1452,7 +1508,7 @@
           "id": "or0j8md",
           "author": "Cultural-Ambition211",
           "text": "When we first did our AWS migrations around 10 years ago we had zero experience and no consultants in helping. Literally devs on the ground figuring it out as they went along. \n\nThe decision management made was that you replicate your on-prem architecture but on AWS instead. If you had a SQL database on prem you had one on cloud. Windows server becomes an EC2. \n\nWhile horribly inefficient and a complete waste of resources it did allow for future, incremental upgrades to be made which did actually make use of AWS features. ",
-          "score": 47,
+          "score": 48,
           "created_utc": "2026-06-11 11:21:26",
           "is_submitter": false,
           "replies": [
@@ -1460,7 +1516,7 @@
               "id": "or0wfvv",
               "author": "Miserygut",
               "text": "Lift-and-shift makes sense if you're spending ridiculous amounts on hosting or there's a massive risk attached to it e.g. the datacentre is being shut down and you *have* to get out by a specific date.\n\nIn our case we added a component to emit messages from our colo setup into a newly built AWS stack and ran both in parallel, gradually replacing the functions of the colo setup until our contract expired. Worked nicely and avoided a massive risky capex on year 5 that nobody wanted.",
-              "score": 12,
+              "score": 13,
               "created_utc": "2026-06-11 12:40:48",
               "is_submitter": false,
               "replies": [
@@ -1481,7 +1537,7 @@
           "id": "or0pdem",
           "author": "steezy1341",
           "text": "Ai slop",
-          "score": 7,
+          "score": 5,
           "created_utc": "2026-06-11 12:00:23",
           "is_submitter": false,
           "replies": []
@@ -1490,7 +1546,7 @@
           "id": "or3bywe",
           "author": "turn-based-games",
           "text": "I see LLM slop; I downvote everyone engaging with it",
-          "score": 4,
+          "score": 6,
           "created_utc": "2026-06-11 19:20:41",
           "is_submitter": false,
           "replies": []
@@ -1508,7 +1564,7 @@
           "id": "or0euog",
           "author": "muntaxitome",
           "text": "Moving from monolith to distributed monolith is usually a waste of time. When the buzzwords like strangler fig come out I would just cancel the project straight up. Those don't actually solve any issues.",
-          "score": 6,
+          "score": 4,
           "created_utc": "2026-06-11 10:51:18",
           "is_submitter": false,
           "replies": [
@@ -1516,7 +1572,7 @@
               "id": "or0fj3a",
               "author": "VisualOpinion6973",
               "text": "the real issue is when management thinks microservices will magically fix all technical debt but team still doesn't understand domain boundaries in current system.",
-              "score": 7,
+              "score": 6,
               "created_utc": "2026-06-11 10:56:06",
               "is_submitter": false,
               "replies": []
@@ -1525,7 +1581,7 @@
               "id": "or0rev0",
               "author": "lamchakchan",
               "text": "I concur, only do this if this is an engineering owning team decision.  Micro services is truly a buzz word you will pay deeply for if not needed.  Try fixing the code coupling and abstractions within the monolith by addressing that alone without microservice solutioning.  ",
-              "score": -3,
+              "score": -2,
               "created_utc": "2026-06-11 12:12:33",
               "is_submitter": false,
               "replies": []
@@ -1573,7 +1629,7 @@
           "id": "or0i80t",
           "author": "cakeofzerg",
           "text": "have u considered this new thing nowadays called Ai",
-          "score": -1,
+          "score": -2,
           "created_utc": "2026-06-11 11:14:40",
           "is_submitter": false,
           "replies": [
@@ -1601,7 +1657,7 @@
           "id": "or0qccg",
           "author": "droning-on",
           "text": "We do it all the time.  Need help?",
-          "score": -2,
+          "score": -3,
           "created_utc": "2026-06-11 12:06:14",
           "is_submitter": false,
           "replies": []
@@ -1696,8 +1752,8 @@
       "url": "https://aws.amazon.com/about-aws/whats-new/2026/06/aws-sign-in/",
       "author": "jsonpile",
       "created_utc": "2026-06-16 20:06:15",
-      "score": 25,
-      "num_comments": 1,
+      "score": 30,
+      "num_comments": 2,
       "upvote_ratio": 1.0,
       "text": "[External Link]",
       "is_original_content": false,
@@ -1712,6 +1768,15 @@
           "text": "Wow, we no longer have to enforce this via IAM now, about time.   \nGreat work 😄",
           "score": 3,
           "created_utc": "2026-06-17 00:05:31",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "osb3utb",
+          "author": "ju015",
+          "text": "Same, feels like this should’ve been standard ages ago. Let's see if it actually lands this time",
+          "score": 1,
+          "created_utc": "2026-06-18 02:43:09",
           "is_submitter": false,
           "replies": []
         }
@@ -1887,181 +1952,15 @@
       ]
     },
     {
-      "id": "1u2n7jh",
-      "title": "Is it a good idea to go fully serverless for inference (startup)?",
-      "subreddit": "aws",
-      "url": "https://www.reddit.com/r/aws/comments/1u2n7jh/is_it_a_good_idea_to_go_fully_serverless_for/",
-      "author": "nazmulhusain",
-      "created_utc": "2026-06-11 03:04:43",
-      "score": 17,
-      "num_comments": 18,
-      "upvote_ratio": 0.69,
-      "text": "Hello everyone, though maybe this is the right place to ask.\n\nWe’re 3 people still developing our MVP, we got a pre-seed investment under many contingencies, one of which being that the MVP is released at max Q4 2026. \n\nWe want to avoid devops entirely and just focus on shipping features, so we are leaning heavily into managed services. Our current planned stack is Turborepo for managing the codebase, Cloudflare Pages for the frontend, and Supabase for auth and database. For our AI features, we are looking at Featherless AI’s serverless inference because they grant access to a lot of APIs on a flat monthly rate (no a per-token one) which is important to us because we need to keep costs both manageable and predictable\n\nHas anyone run a similar serverless stack in production? I am specifically curious if relying on flat-rate APIs and managed databases actually keeps costs predictable as user volume grows, or if we will just hit severe rate limits that force us onto other tiers anyway. Any feedback on this setup would be great, thank you in advance!!\n\n",
-      "is_original_content": false,
-      "link_flair_text": "discussion",
-      "permalink": "https://reddit.com/r/aws/comments/1u2n7jh/is_it_a_good_idea_to_go_fully_serverless_for/",
-      "domain": "self.aws",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "or6jct8",
-          "author": "Prox_The_Dank",
-          "text": "None of this sounds AWS related, when you say serverless, do you mean like lambd? amplify? Fargate? \n\nWhere do you actually plan on using AWS here? ",
-          "score": 12,
-          "created_utc": "2026-06-12 06:32:21",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oqyr9cx",
-          "author": "12345-password",
-          "text": "What does your ai say about it",
-          "score": 31,
-          "created_utc": "2026-06-11 03:11:10",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oqyrlr3",
-          "author": "CorpT",
-          "text": "Try it and see?   His long would it take for you to determine if this is feasible or not.  ",
-          "score": 5,
-          "created_utc": "2026-06-11 03:13:19",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "or6lwh3",
-          "author": "Previous_Arrival6052",
-          "text": "Unless your startup blows up in a month you don’t have to worry about the user number thing (yet) but you DO have to worry about costs. From what I know Featherless ai has tiers, and the basic plan won’t get you far, so when you calculate costs assume it’s whichever most expensive one they have. Also, make sure to read their security docs well especially if you’re using proprietary data for that MVP, they gotta have a zero retention policy.",
-          "score": 2,
-          "created_utc": "2026-06-12 06:53:29",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "or6ownc",
-          "author": "Previous_Arrival6052",
-          "text": "Unless your startup blows up in a month you don’t have to worry about the user number thing (yet) but you DO have to worry about costs. From what I know Featherless ai has tiers, and the basic plan won’t get you far, so when you calculate costs assume it’s whichever most expensive one they have. Also, make sure to read their security docs well especially if you’re using proprietary data for that MVP, they gotta have a zero retention policy.",
-          "score": 2,
-          "created_utc": "2026-06-12 07:19:00",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "os4h1tu",
-              "author": "Pwrgaming55",
-              "text": "Yess, they do have a zero retention policy. I’ve been using them for a while now and no security complaints, arguably better than if I hosted through a closed API provider",
-              "score": 1,
-              "created_utc": "2026-06-17 04:37:20",
-              "is_submitter": false,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "oqys9bu",
-          "author": "gautiexe",
-          "text": "The tipping point in terms of cost will come at a certain scale. At smaller scales, serverless will be better.",
-          "score": 3,
-          "created_utc": "2026-06-11 03:17:17",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "or6jr1v",
-              "author": "ziroux",
-              "text": "Also the need for devops will come with scale, so it's a good idea to start with it (even one). Same goes to security and compliance, it will guide the shape of prod infra. ",
-              "score": 1,
-              "created_utc": "2026-06-12 06:35:36",
-              "is_submitter": false,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "oqysn8e",
-          "author": "cakeofzerg",
-          "text": "for inference of what? ml or llm? the two big downsides to serverless are cold starts and higher cost per cpu second. its really really good for bursty workloads that are latency insensitive. you can still use them for apis if you are careful  \nand add snap start aslong as you dont do long lived connections or have tight latency requirements (most front ends are out then)",
-          "score": 2,
-          "created_utc": "2026-06-11 03:19:31",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "or0qnpp",
-          "author": "ArticleAdventurous36",
-          "text": "Fully serverless is fine for an MVP, but I wouldn’t optimize around avoiding DevOps entirely. The risk is that you move the ops work into pricing limits, queue behavior, cold starts, observability gaps, and vendor support tickets. Flat-rate inference sounds predictable until one power user or one bad loop starts burning through shared limits. I’d ship with the managed stack, but put usage caps, request logging, fallback models, and a clean provider abstraction in from day one so you are not negotiating architecture under pressure later.",
-          "score": 2,
-          "created_utc": "2026-06-11 12:08:08",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "or7fanl",
-          "author": "cachemonet0x0cf6619",
-          "text": ". why are you even using aws if that’s your tool choice? what even are you using aws for? \n\nyou’re probably better off using railway for hosting. \n\nif you want aws use cloudfront and an s3 bucket for the static app. you can still use supabase cause you probably using their auth. that’s fine. you’ll need an email provided that isn’t ses. try resend. ",
-          "score": 1,
-          "created_utc": "2026-06-12 10:59:50",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oro0f2j",
-          "author": "coinclink",
-          "text": ">We want to avoid devops entirely and just focus on shipping features\n\nWhat in the world does this even mean?\n\nHow do you manage versions of the software you're building and deploy them? What happens when a service goes down? What is your plan for backups and on-call support? What is your mean time to recovery and mean time to repair? What is your plan to communicate changes to users? What is your plan to ensure security and compliance?\n\nThere is so much more to delivering a product/service than just shipping features.",
-          "score": 1,
-          "created_utc": "2026-06-14 20:48:23",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "orxyh85",
-          "author": "Professional_Gene_63",
-          "text": "You will have long running lambdas doing nothing but waiting for a response. It will work but you will pay for time used. In the long run that is not the right approach. You can do way more with server model or hybrid.\n\nLambda -> sqs -> inference runner -> callback\n\nBut look into durable objects of Cloudflare first, AWS has nothing like it and can be the thing you want.",
-          "score": 1,
-          "created_utc": "2026-06-16 07:38:05",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "or6nhh6",
-          "author": "dariusbiggs",
-          "text": "Generally, no, it is not a good idea to go serverless at the start unless everyone has significant experience with serverless already. \n\nYou will also always need DevOps, even with serverless. Testing and continuous deployment are key there. \n\nIt is easiest to start with a monolith where possible and deal with the problem of scaling once you have meaningful observability metrics and/or customer feedback to indicate as such.\n\nYou are very likely going to end up cutting corners especially with that deadline, and the first ones are going to be security, privacy, authentication, infrastructure as code, compliance, testing, and devops.\n\nGood luck.",
-          "score": 1,
-          "created_utc": "2026-06-12 07:06:49",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "or7es9f",
-              "author": "cachemonet0x0cf6619",
-              "text": "is this sarcasm? i can’t tell if this is satire or not. ",
-              "score": 1,
-              "created_utc": "2026-06-12 10:56:17",
-              "is_submitter": false,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "oqys1s2",
-          "author": "DarthKey",
-          "text": "Sounds like yall need an expert. Dm me if you want professional advice (means you’re gonna pay me)",
-          "score": -12,
-          "created_utc": "2026-06-11 03:16:06",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
       "id": "1u7b3h3",
       "title": "Replaced our bastion hosts with Cloudflare Zero Trust + Transit Gateway — here's the full setup",
       "subreddit": "aws",
       "url": "https://www.reddit.com/r/aws/comments/1u7b3h3/replaced_our_bastion_hosts_with_cloudflare_zero/",
       "author": "tasrie_amjad",
       "created_utc": "2026-06-16 11:40:51",
-      "score": 17,
+      "score": 20,
       "num_comments": 23,
-      "upvote_ratio": 0.7,
+      "upvote_ratio": 0.72,
       "text": "We had the usual mess: bastion host per VPC, security group rules nobody fully understood, SSH keys floating around. Classic.\n\nReplaced the whole thing with Cloudflare WARP on endpoints and cloudflared connectors running inside each VPC. Transit Gateway handles the routing across accounts so you're not deploying connectors everywhere. Identity policies from the IdP control who reaches which private CIDR, so devs get their subnets and that's it.\n\nNo inbound rules open to the internet. No jump host to patch. SSH still works against private IPs, same as before, except now every connection has an audit trail and you can revoke access without touching a security group.\n\nOne thing that bit us: split tunnel config when your VPCs share overlapping ranges with RFC 1918 space on corporate laptops. Worth reading the cloudflared docs on that before you go live.\n\nWrote the full walkthrough here if useful: [https://tasrieit.com/blog/cloudflare-zero-trust-setup-aws-vpc-warp](https://tasrieit.com/blog/cloudflare-zero-trust-setup-aws-vpc-warp)\n\nAnyone done this across AWS Organizations with RAM shared TGWs? Curious if you hit issues with route propagation there.",
       "is_original_content": false,
       "link_flair_text": "technical resource",
@@ -2073,7 +1972,7 @@
           "id": "orywvct",
           "author": "jregovic",
           "text": "We do it with SSM and just in time node access.",
-          "score": 60,
+          "score": 62,
           "created_utc": "2026-06-16 12:03:52",
           "is_submitter": false,
           "replies": [
@@ -2129,7 +2028,7 @@
           "id": "oryz0xd",
           "author": "r1ckm4n",
           "text": "We just do Identity Center and SSM. ",
-          "score": 29,
+          "score": 32,
           "created_utc": "2026-06-16 12:16:33",
           "is_submitter": false,
           "replies": [
@@ -2137,7 +2036,7 @@
               "id": "orzak5u",
               "author": "tasrie_amjad",
               "text": "If you only have aws users thats a great option",
-              "score": -7,
+              "score": -6,
               "created_utc": "2026-06-16 13:18:02",
               "is_submitter": true,
               "replies": [
@@ -2256,9 +2155,9 @@
       "url": "https://formkiq.com/blog/serverless-stacks/from-12-second-p95-to-61ms-optimizing-serverless-aws-application",
       "author": "formkiqmike",
       "created_utc": "2026-06-16 12:38:42",
-      "score": 17,
+      "score": 18,
       "num_comments": 3,
-      "upvote_ratio": 0.95,
+      "upvote_ratio": 0.91,
       "text": "[External Link]",
       "is_original_content": false,
       "link_flair_text": "serverless",
@@ -2279,7 +2178,7 @@
           "id": "os14eip",
           "author": "amiable_amoeba",
           "text": "The fix was changing customer visible behavior and making folder modification date inconsistent with child files.\n\nI think it would be interesting to explain why that is okay for your customers, and alternatives to remove the bottleneck but keep last modified accurate.",
-          "score": 9,
+          "score": 8,
           "created_utc": "2026-06-16 18:10:18",
           "is_submitter": false,
           "replies": [
@@ -2287,7 +2186,7 @@
               "id": "os2nrnu",
               "author": "formkiqmike",
               "text": "That’s the tradeoff we made, and it’s worth clarifying that the timestamp being relaxed is folder-level metadata, not the authoritative modified date of the child documents.\n\nIn our case, the parent folder LastModifiedDate is primarily used as a folder-level freshness/sort indicator, not the source of truth for document-level modification accuracy. The document records themselves still retain their own accurate modified timestamps. So the decision was that a parent folder timestamp being up to 60 seconds behind during high-volume imports is acceptable, especially compared with making every child write contend on the same parent folder item.\n\nThere are definitely alternatives if a customer requires strict parent-folder accuracy, such as:\n\n* Updating the parent folder asynchronously from a stream or queue\n* Maintaining a separate folder activity record\n* Using a sharded timestamp pattern\n* Allowing the behavior to be configured\n\nEvery optimization involves a tradeoff. After discussions with clients, the preference was to prioritize performance while preserving accurate modified timestamps on the child documents themselves.",
-              "score": 1,
+              "score": 0,
               "created_utc": "2026-06-16 22:21:08",
               "is_submitter": true,
               "replies": []
@@ -2305,7 +2204,7 @@
       "created_utc": "2026-06-11 23:57:20",
       "score": 16,
       "num_comments": 18,
-      "upvote_ratio": 0.77,
+      "upvote_ratio": 0.79,
       "text": "Running production AI workloads on Bedrock ($1K+/mo, Opus 4.6). Two issues:\n\nOpus 4.7 quota silently set to 0 on April 1st; previous support case (177766767700033) closed without resolution after weeks\n\nNew Fable 5 quota request ticket submitted with all requested details, awaiting review\n\nAlready answered all the technical questions (TPM, RPM, use case, etc). Currently consuming Opus 4.6 allocation. Just need the newer model versions enabled. Has anyone else experienced models being removed without notice? Have AWS tickets worked on these cases?",
       "is_original_content": false,
       "link_flair_text": "discussion",
@@ -2317,7 +2216,7 @@
           "id": "or5kqwz",
           "author": "LandingHooks",
           "text": "1k mo? That’s cute.",
-          "score": 35,
+          "score": 34,
           "created_utc": "2026-06-12 02:25:59",
           "is_submitter": false,
           "replies": []
@@ -2326,7 +2225,7 @@
           "id": "or4xnuh",
           "author": "AWSSupport",
           "text": "Hello,\n\nUpon reviewing your case, I can see that our team has reached out to you. You can check out the latest response from your original case within your Support Center: http://go.aws/support-center.\n\nI'll also share an update to your private message shortly.\n\n\\- Elle G.",
-          "score": 10,
+          "score": 9,
           "created_utc": "2026-06-12 00:08:37",
           "is_submitter": false,
           "replies": [
@@ -2334,7 +2233,7 @@
               "id": "or53byj",
               "author": "Alblez",
               "text": "Thanks, Elle. I checked the Support Center just now — the latest correspondence is my response to the questionnaire (submitted today). I don’t see a new message from your team yet. Could there be a delay, or was it perhaps added to a different case? I have two related cases: 178112756900680 (Fable 5) and 177766767700033 (Opus 4.7, now closed). Appreciate the help.",
-              "score": 6,
+              "score": 5,
               "created_utc": "2026-06-12 00:42:15",
               "is_submitter": true,
               "replies": [
@@ -2342,7 +2241,7 @@
                   "id": "or55cf4",
                   "author": "AWSSupport",
                   "text": "If you haven't already included Opus access in your current open case, I'd recommend doing so to avoid any further delays.\n\n\\- Elle G.",
-                  "score": 6,
+                  "score": 7,
                   "created_utc": "2026-06-12 00:54:14",
                   "is_submitter": false,
                   "replies": []
@@ -2449,7 +2348,7 @@
           "id": "or6dwn3",
           "author": "[deleted]",
           "text": "[deleted]",
-          "score": -5,
+          "score": -4,
           "created_utc": "2026-06-12 05:48:04",
           "is_submitter": false,
           "replies": [
@@ -2484,7 +2383,7 @@
       "created_utc": "2026-06-15 13:56:27",
       "score": 14,
       "num_comments": 2,
-      "upvote_ratio": 0.8,
+      "upvote_ratio": 0.82,
       "text": "[External Link]",
       "is_original_content": false,
       "link_flair_text": "article",
@@ -2513,113 +2412,28 @@
       ]
     },
     {
-      "id": "1u2h9ya",
-      "title": "AWS Credits revamp",
+      "id": "1u7nbkp",
+      "title": "re:Invent 2026 Early Bird Registration",
       "subreddit": "aws",
-      "url": "https://www.reddit.com/r/aws/comments/1u2h9ya/aws_credits_revamp/",
-      "author": "Miserable_Fix2021",
-      "created_utc": "2026-06-10 22:38:08",
+      "url": "https://i.redd.it/rkhwcmq73p7h1.png",
+      "author": "jeffbarr",
+      "created_utc": "2026-06-16 19:21:02",
       "score": 12,
-      "num_comments": 2,
+      "num_comments": 1,
       "upvote_ratio": 0.88,
-      "text": "“Today, we are announcing the credits detail page in the AWS Billing and Cost Management console with public API and Amazon Q integration, giving customers one place to see and control every credit.”\n\nWhat’s your thought?\n\nhttps://aws.amazon.com/blogs/aws-cloud-financial-management/introducing-the-aws-credits-detail-page/",
+      "text": "[External Link]",
       "is_original_content": false,
-      "link_flair_text": "general aws",
-      "permalink": "https://reddit.com/r/aws/comments/1u2h9ya/aws_credits_revamp/",
-      "domain": "self.aws",
-      "is_self": true,
+      "link_flair_text": "re:Invent",
+      "permalink": "https://reddit.com/r/aws/comments/1u7nbkp/reinvent_2026_early_bird_registration/",
+      "domain": "i.redd.it",
+      "is_self": false,
       "comments": [
         {
-          "id": "oqxv5m6",
-          "author": "Quinnypig",
-          "text": "Good improvement from where I sit. ",
-          "score": 9,
-          "created_utc": "2026-06-11 00:09:34",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
-      "id": "1u2rth4",
-      "title": "Disappointing experience with AWS Nova Act",
-      "subreddit": "aws",
-      "url": "https://www.reddit.com/r/aws/comments/1u2rth4/disappointing_experience_with_aws_nova_act/",
-      "author": "ItsHoney",
-      "created_utc": "2026-06-11 07:07:21",
-      "score": 12,
-      "num_comments": 9,
-      "upvote_ratio": 0.78,
-      "text": "Hi,\n\nI was trying to use AWS Nova Act for some form filling automations on real estate vendor portals. After researching I came across nova act and it looked like a promising service.\n\nUnfortunately the model itself felt dumb. It would try to click in a box when trying to click a hyperlink and fail. Even when I gave it a tool and explicitly told it to use the tool for clicking hyperlinks it ignored my advice. I am now using Fable 5 to just build a quick harness and using AgentCore browser use instead with Claude.\n\nHas anyone used this service? Was i just using it wrong?",
-      "is_original_content": false,
-      "link_flair_text": "discussion",
-      "permalink": "https://reddit.com/r/aws/comments/1u2rth4/disappointing_experience_with_aws_nova_act/",
-      "domain": "self.aws",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "or02rx0",
-          "author": "cakeofzerg",
-          "text": "AWS core services are great, maybe best in business. Stray from the core and you are in for a world of pain, most of these satilite services are just someones promotion project, they get shipped and abandoned. ",
-          "score": 14,
-          "created_utc": "2026-06-11 09:14:41",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "or03tl1",
-              "author": "ItsHoney",
-              "text": "Thats truly what it felt like. It felt half baked and rushed",
-              "score": 6,
-              "created_utc": "2026-06-11 09:23:54",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "or25fhb",
-          "author": "ultrathink-art",
-          "text": "Nova Act never really graduated past controlled demos for multi-step workflows. Browser automation is especially brutal because any ambiguous state — overlapping elements, dynamic content, weird iframe nesting — causes the model to guess rather than ask. Fable/Claude handles it better but you still need explicit fallback logic for when it gets confused mid-sequence.",
-          "score": 9,
-          "created_utc": "2026-06-11 16:13:23",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "orzf176",
-          "author": "PrimalPettalStash",
-          "text": "kinda glad someone said this out loud, the demos made it look super slick but i had a feeling it’d be clumsy in real portals. curious how it compares long term vs your Claude + AgentCore setup, that combo seems to be what more people are drifting to for actual production stuff.",
+          "id": "os7wbcz",
+          "author": "saphilip",
+          "text": "registered! don't recall seeing an early bird discount before",
           "score": 1,
-          "created_utc": "2026-06-16 13:40:00",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "orznwvi",
-              "author": "ItsHoney",
-              "text": "I went live with the claude combo last week. I provided a harness to claude so it can use dom manipulation to click what it sees. (Nova refused to use the harness and kept clicking on a box instead of the hyperlink).\n\nSo far it seems really intelligent. The agent backs out the moment it notices a discrepancy from our usual automation workflow (such as a UI change) which is what was required in our case.\n\nI am also using AgentCore memory to store memories as it traverses through portals, so it can reuse the same memories and hopefully use less tokens the next time when it visits the same portal. ",
-              "score": 1,
-              "created_utc": "2026-06-16 14:21:53",
-              "is_submitter": true,
-              "replies": [
-                {
-                  "id": "orzo8s8",
-                  "author": "ItsHoney",
-                  "text": "One bug i noticed was that when I turned on the browser recording, it caused some infinite loop inside the browser window which stalled my agent. Turning off the recording fixed the issue. (Fable helped me debug this bug lol)",
-                  "score": 2,
-                  "created_utc": "2026-06-16 14:23:24",
-                  "is_submitter": true,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "oqzpid0",
-          "author": "AWSSupport",
-          "text": "Hi there, \n\nSorry to hear about this. \n\nWe're always aiming to improve, and customer feedback is key to helping us grow. You can share all your thoughts/ideas on what we can do better, here:\nhttp://go.aws/feedback \n\n\\- Reece W.",
-          "score": 0,
-          "created_utc": "2026-06-11 07:16:50",
+          "created_utc": "2026-06-17 17:13:48",
           "is_submitter": false,
           "replies": []
         }
@@ -2646,7 +2460,7 @@
           "id": "orb6oit",
           "author": "dragonnfr",
           "text": "This is the same argument as 'why use managed services at all.' Yes you can recreate it. But who's patching it at 2am? Who's handling the scaling? \\*\\*That's\\*\\* what you're paying for.",
-          "score": 11,
+          "score": 13,
           "created_utc": "2026-06-12 21:51:03",
           "is_submitter": false,
           "replies": []
@@ -2765,7 +2579,7 @@
           "id": "orb56oo",
           "author": "Ok_Principle_9459",
           "text": "Can almost guarantee you that agentcore is not going to be feature-complete enough, and you'll end up fighting the tool. Bedrock in general is pretty ass IMO, and has all kinds of quirks you can avoid (handling structured outputs, error handling) by just using the LLM provider's SDK. I would strongly recommend just using ECS Fargate tasks.",
-          "score": -2,
+          "score": -1,
           "created_utc": "2026-06-12 21:43:17",
           "is_submitter": false,
           "replies": []
@@ -2781,7 +2595,7 @@
       "created_utc": "2026-06-15 23:09:02",
       "score": 10,
       "num_comments": 0,
-      "upvote_ratio": 0.81,
+      "upvote_ratio": 0.78,
       "text": "[External Link]",
       "is_original_content": false,
       "link_flair_text": "general aws",
@@ -2791,30 +2605,266 @@
       "comments": []
     },
     {
-      "id": "1u7nbkp",
-      "title": "re:Invent 2026 Early Bird Registration",
+      "id": "1u2rth4",
+      "title": "Disappointing experience with AWS Nova Act",
       "subreddit": "aws",
-      "url": "https://i.redd.it/rkhwcmq73p7h1.png",
-      "author": "jeffbarr",
-      "created_utc": "2026-06-16 19:21:02",
-      "score": 6,
-      "num_comments": 1,
-      "upvote_ratio": 0.81,
-      "text": "[External Link]",
+      "url": "https://www.reddit.com/r/aws/comments/1u2rth4/disappointing_experience_with_aws_nova_act/",
+      "author": "ItsHoney",
+      "created_utc": "2026-06-11 07:07:21",
+      "score": 9,
+      "num_comments": 9,
+      "upvote_ratio": 0.72,
+      "text": "Hi,\n\nI was trying to use AWS Nova Act for some form filling automations on real estate vendor portals. After researching I came across nova act and it looked like a promising service.\n\nUnfortunately the model itself felt dumb. It would try to click in a box when trying to click a hyperlink and fail. Even when I gave it a tool and explicitly told it to use the tool for clicking hyperlinks it ignored my advice. I am now using Fable 5 to just build a quick harness and using AgentCore browser use instead with Claude.\n\nHas anyone used this service? Was i just using it wrong?",
       "is_original_content": false,
-      "link_flair_text": "re:Invent",
-      "permalink": "https://reddit.com/r/aws/comments/1u7nbkp/reinvent_2026_early_bird_registration/",
-      "domain": "i.redd.it",
-      "is_self": false,
+      "link_flair_text": "discussion",
+      "permalink": "https://reddit.com/r/aws/comments/1u2rth4/disappointing_experience_with_aws_nova_act/",
+      "domain": "self.aws",
+      "is_self": true,
       "comments": [
         {
-          "id": "os7wbcz",
-          "author": "saphilip",
-          "text": "registered! don't recall seeing an early bird discount before",
-          "score": 1,
-          "created_utc": "2026-06-17 17:13:48",
+          "id": "or02rx0",
+          "author": "cakeofzerg",
+          "text": "AWS core services are great, maybe best in business. Stray from the core and you are in for a world of pain, most of these satilite services are just someones promotion project, they get shipped and abandoned. ",
+          "score": 15,
+          "created_utc": "2026-06-11 09:14:41",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "or03tl1",
+              "author": "ItsHoney",
+              "text": "Thats truly what it felt like. It felt half baked and rushed",
+              "score": 4,
+              "created_utc": "2026-06-11 09:23:54",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "or25fhb",
+          "author": "ultrathink-art",
+          "text": "Nova Act never really graduated past controlled demos for multi-step workflows. Browser automation is especially brutal because any ambiguous state — overlapping elements, dynamic content, weird iframe nesting — causes the model to guess rather than ask. Fable/Claude handles it better but you still need explicit fallback logic for when it gets confused mid-sequence.",
+          "score": 9,
+          "created_utc": "2026-06-11 16:13:23",
           "is_submitter": false,
           "replies": []
+        },
+        {
+          "id": "orzf176",
+          "author": "[deleted]",
+          "text": "[removed]",
+          "score": 1,
+          "created_utc": "2026-06-16 13:40:00",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "orznwvi",
+              "author": "ItsHoney",
+              "text": "I went live with the claude combo last week. I provided a harness to claude so it can use dom manipulation to click what it sees. (Nova refused to use the harness and kept clicking on a box instead of the hyperlink).\n\nSo far it seems really intelligent. The agent backs out the moment it notices a discrepancy from our usual automation workflow (such as a UI change) which is what was required in our case.\n\nI am also using AgentCore memory to store memories as it traverses through portals, so it can reuse the same memories and hopefully use less tokens the next time when it visits the same portal. ",
+              "score": 1,
+              "created_utc": "2026-06-16 14:21:53",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "orzo8s8",
+                  "author": "ItsHoney",
+                  "text": "One bug i noticed was that when I turned on the browser recording, it caused some infinite loop inside the browser window which stalled my agent. Turning off the recording fixed the issue. (Fable helped me debug this bug lol)",
+                  "score": 2,
+                  "created_utc": "2026-06-16 14:23:24",
+                  "is_submitter": true,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "oqzpid0",
+          "author": "AWSSupport",
+          "text": "Hi there, \n\nSorry to hear about this. \n\nWe're always aiming to improve, and customer feedback is key to helping us grow. You can share all your thoughts/ideas on what we can do better, here:\nhttp://go.aws/feedback \n\n\\- Reece W.",
+          "score": 1,
+          "created_utc": "2026-06-11 07:16:50",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1u6bfby",
+      "title": "Confused about permissions and access at scale",
+      "subreddit": "aws",
+      "url": "https://www.reddit.com/r/aws/comments/1u6bfby/confused_about_permissions_and_access_at_scale/",
+      "author": "FeistyBoysenberry376",
+      "created_utc": "2026-06-15 09:16:17",
+      "score": 7,
+      "num_comments": 18,
+      "upvote_ratio": 0.89,
+      "text": "I'm having hard time finding right approach for IAM setup. \n\nRight now, I have 200 users. IAM users are used with granular permissions.\n\nTwo teams have the same permissions, while other users have very different permissions. Everything is inside one AWS account. I'm trying to move some resources to other accounts but is long term goal. I'd seperate prod and staging, at least.\n\nThese two teams are moved to IAM IC.\n\nThe problem that I have is that there are teams with 3-5 users per team / project. Even in one project, members dont have the same necessary. Some of them have AWS Console access, some have seperate account for CLI access using keys. I'd like to avoid long-lived creds because of the security and rotation headaches. We had one of the keys leaked before so we would like to eliminate their use.\n\nI often see that IC is recommended for workforce access, but I don't see how we could actually manage it on the large scale. I'd need a lot of permission sets and it would be hard to find them or to manage in general.\n\n  \nOne solution that comes to mind is to organize this using ABAC. Tagging (terraform)  + IAM. Matching user's  \n Tag eith resource tag, for example project tag.\n\nThere are many blogs and tutorials for basics, but I could not find a production example of setup, way to manage workforce access to AWS.\n\n  \nDo you have some resources or suggestions?",
+      "is_original_content": false,
+      "link_flair_text": "security",
+      "permalink": "https://reddit.com/r/aws/comments/1u6bfby/confused_about_permissions_and_access_at_scale/",
+      "domain": "self.aws",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "orrawco",
+          "author": "Interstellar_031720",
+          "text": "I would be careful making ABAC the main answer too early. It can work, but it only stays safe if your tagging discipline is excellent. At 200 users and many small projects, bad/missing tags become an authorization bug, not just metadata mess.\n\nThe pattern I would aim for:\n\n1. Stop creating IAM users and long-lived keys. Move people to Identity Center + roles, even if the permission model is imperfect at first.\n2. Split accounts harder than you think: org/root, shared/network/security/logging, then workload accounts by environment/team/project where it makes sense.\n3. Use coarse permission sets for humans: readonly, developer/poweruser non-prod, deployer, prod-breakglass. Avoid one custom permission set per person.\n4. Put most fine-grained access in the deployment pipeline/IaC role, not in each human’s console role.\n5. Treat prod as mostly read-only for humans. Break-glass role should be time-boxed, logged, alerted, and reviewed.\n6. Use ABAC only for the places where the resource model is clean and tags are enforced by policy/IaC. Do not rely on “people remember to tag things correctly.”\n\nFor CLI access, have users assume roles via SSO. If someone needs programmatic access, first ask whether a workload role, CI role, or temporary STS session is the real need. Long-lived personal access keys should become the weird exception that needs justification.\n\nSo: IC is probably still the workforce access layer, but the scalability comes from account boundaries + a small permission-set taxonomy + IaC, not from trying to perfectly model every project/person difference inside IC.",
+          "score": 12,
+          "created_utc": "2026-06-15 09:45:50",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "orrid1l",
+              "author": "FeistyBoysenberry376",
+              "text": "> Stop creating IAM users and long-lived keys. Move people to Identity Center + roles, even if the permission model is imperfect at first\n\nWhat do you mean by roles?\n\nPermission sets kinda act as roles for IC. You mean that one identity can use a permission set to assume different roles? I haven't considered that.\n\n> Split accounts harder than you think: org/root, shared/network/security/logging, then workload accounts by environment/team/project where it makes sense.\n\nYeah, that's my plan. The problem are apps which are not created to work on different accounr and cross-account resource access, which was not done before. \n\n> Use coarse permission sets for humans: readonly, developer/poweruser non-prod, deployer, prod-breakglass. Avoid one custom permission set per person\n\nI was thinking about generic PS which can be assigned to one account, but then I have to use * for Resource field.\n\n> Put most fine-grained access in the deployment pipeline/IaC role, not in each human’s console role.\n\nRole per deployment (project)?\n\n> Use ABAC only for the places where the resource model is clean and tags are enforced by policy/IaC. Do not rely on “people remember to tag things correctly\n\nYeah, definitely. I was going to suggest tagging thought IaC and ban tag actions with SCP. For creating resources without tags, it could be useful to have alerts for that.\n\nSo basically, separate resources into units, probably by project, and that way policies can have * or prefix-match?",
+              "score": 1,
+              "created_utc": "2026-06-15 10:45:24",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "orx5qca",
+                  "author": "Zenin",
+                  "text": "ABAC is a dead end in AWS: Only a subset of services and resources actually support it at all much less securely.\n\nYour only *real* resource container in AWS is the Account.  Get used to having a *lot* of accounts such as each application+env gets its own account.  Rough scoping of Permission settings (Admin, ReadOnly, Security Audit, etc) so you can map user/group X to account Y with permission set Admin.\n\nTrying to split access to different applications within a single account is simply futile in the long run as again too many services simply don't support it at all and trying to work around with things like name prefix restrictions will blow up your policy so large it overflows the hard limits (ask me how I know).",
+                  "score": 3,
+                  "created_utc": "2026-06-16 03:53:41",
+                  "is_submitter": false,
+                  "replies": []
+                },
+                {
+                  "id": "orsdjr8",
+                  "author": "Interstellar_031720",
+                  "text": "By roles I mean IAM roles in the target AWS accounts, not separate human IAM users. Identity Center permission sets are the template/control-plane part; when assigned to an account, they effectively create/use account roles that the user federates into. So the human signs in through IC/SSO, then lands in an account with a role-shaped set of permissions.\n\nFor the `Resource: *` concern: yes, some human permission sets will need `*` for read/list/discovery actions because AWS APIs are inconsistent there. I would not try to eliminate every `*`. I would make the broad human roles low-risk, then move dangerous mutations into narrower deployment roles.\n\nA practical split might be:\n\n- humans: readonly/support/debug in most accounts, poweruser only in non-prod\n- CI/IaC: project/app deployment roles with the specific write permissions\n- prod: mostly pipeline-driven, with break-glass for humans\n\nFor cross-account apps, do not force everything into one account just to avoid IAM complexity. Pick the account boundary first, then give the app an execution role that can assume a specific role in the other account if needed. That cross-account trust should be explicit and boring.\n\nABAC/tagging can help, but I would treat it as an extra constraint, not the foundation. SCPs to deny tag tampering or require tags are useful guardrails, but prefix/account/project boundaries are easier to reason about during an incident.",
+                  "score": 2,
+                  "created_utc": "2026-06-15 13:49:12",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            },
+            {
+              "id": "oruskkg",
+              "author": "TheVoidInMe",
+              "text": "Fucking AI. Dead Internet is real…",
+              "score": -3,
+              "created_utc": "2026-06-15 20:12:20",
+              "is_submitter": false,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "orr8xly",
+          "author": "bittrance",
+          "text": "It sounds like you are not using IaC extensively? You probably need to start there? Creating permission sets at scale with real least privilege requires automation.",
+          "score": 2,
+          "created_utc": "2026-06-15 09:28:56",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "orrdt43",
+              "author": "FeistyBoysenberry376",
+              "text": "Yeah. We just started with IaC... ",
+              "score": 1,
+              "created_utc": "2026-06-15 10:09:44",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "orraq36",
+          "author": "Dull-Mathematician45",
+          "text": "sounds like you have many independent teams living in one or a few AWS accounts and then trying to isolate access. That is annoying.\n\nCreate many more accounts. each team gets 3-5 accounts. give the team power user access except for prod being locked down with limited readonly access. create a break glass role for prod that triggers an alarm when used when prod has an issue. Then you are assigning users to accounts instead of trying to ensure tags are kept up to date and designing complex policies.\n\nBan IAM users. just use roles.\n\nMostly ban logging into prod accounts, including for yourself. It should all be IaC.",
+          "score": 2,
+          "created_utc": "2026-06-15 09:44:23",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "orrg0xx",
+              "author": "FeistyBoysenberry376",
+              "text": "We have few teams, but one team has some of its devs dedicated / assigned to one project. There isn't clear structure and one can be working on multiple projects.\n\nThe problem with separating into account is that some resources are shared among projects. Right know, we have one workload account. Everything is in it...",
+              "score": 0,
+              "created_utc": "2026-06-15 10:27:18",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "orrirf9",
+                  "author": "Dull-Mathematician45",
+                  "text": "> one can be working on multiple projects.\n\nyou can assign those users to multiple groups. They choose the account and role to access each time they touch AWS. My cli profile has 20+ accounts.\n\n> some resources are shared among projects\n\nVPC endpoints. And, put the shared resource behind an API and expose it over a private NLB. It gets its own account and you have people assigned to that group to maintain it.",
+                  "score": 2,
+                  "created_utc": "2026-06-15 10:48:23",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "orrikcp",
+          "author": "FeistyBoysenberry376",
+          "text": "All resources are in management account (yeah, I know... I wish I was here before they made mistake.. 🥲).",
+          "score": 2,
+          "created_utc": "2026-06-15 10:46:55",
+          "is_submitter": true,
+          "replies": []
+        },
+        {
+          "id": "orr8h6l",
+          "author": "Square_Bet_7435",
+          "text": "bruh ABAC with tags is solid approach for your scale",
+          "score": 1,
+          "created_utc": "2026-06-15 09:24:58",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "os2lr69",
+          "author": "ultrathink-art",
+          "text": "Account-per-team via AWS Organizations is cleaner than trying to segment permissions inside a single account — you get blast radius containment by default and your IAM IC permission sets stay simple. SCPs at the org level become your actual guardrails. Moving to OU-per-team now is easier than retrofitting it when you have 500 users and 30 overlapping permission sets.",
+          "score": 1,
+          "created_utc": "2026-06-16 22:10:47",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "orr9hy7",
+          "author": "pint",
+          "text": "IC is a major painpoint for me. i hate it with burning passion, it is enterprisey nonsense, it is complicated, and feels dated in its offerings. yet, eventually we are funneled into it for one reason or the other, so maybe better to just accept our faith, and deal with it.",
+          "score": 0,
+          "created_utc": "2026-06-15 09:33:55",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "orrxnka",
+              "author": "[deleted]",
+              "text": "[deleted]",
+              "score": 1,
+              "created_utc": "2026-06-15 12:25:21",
+              "is_submitter": false,
+              "replies": [
+                {
+                  "id": "ors0fsm",
+                  "author": "pint",
+                  "text": "IC = Identity Center",
+                  "score": 1,
+                  "created_utc": "2026-06-15 12:40:59",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            },
+            {
+              "id": "orwz5dp",
+              "author": "kernelnqyx",
+              "text": "lol this is exactly how i feel about IC, it’s like getting forced into using some clunky corporate VPN from 2009 but with extra steps  \nthat said, once you bite the bullet and standardize on SSO + short‑lived creds, at least the key leak anxiety mostly goes away, which kinda makes the pain slightly more tolerable",
+              "score": 1,
+              "created_utc": "2026-06-16 03:10:05",
+              "is_submitter": false,
+              "replies": []
+            }
+          ]
         }
       ]
     },
@@ -2839,7 +2889,7 @@
           "id": "or7omyk",
           "author": "ArticleAdventurous36",
           "text": "I’d first separate “replication lag” from “reads depending on replication timing.” Global Tables are eventually consistent across regions, so if the secondary region has logic that assumes fresh writes from us-east-1, occasional weirdness is almost expected under bursty conditions. I’d look at replication latency per replica, write conflict metrics, consumed capacity by region, and whether the spikes line up with traffic shape or AWS Health events. The fix may be less about tuning DynamoDB and more about making the app tolerate stale cross-region reads explicitly.",
-          "score": 6,
+          "score": 5,
           "created_utc": "2026-06-12 12:00:40",
           "is_submitter": false,
           "replies": [
@@ -2853,6 +2903,89 @@
               "replies": []
             }
           ]
+        }
+      ]
+    },
+    {
+      "id": "1u89wb0",
+      "title": "How are you doing self-service infra?",
+      "subreddit": "aws",
+      "url": "https://www.reddit.com/r/aws/comments/1u89wb0/how_are_you_doing_selfservice_infra/",
+      "author": "RoseSec_",
+      "created_utc": "2026-06-17 13:15:32",
+      "score": 6,
+      "num_comments": 7,
+      "upvote_ratio": 0.81,
+      "text": "Curious if anyone is doing self-service AWS accounts, EC2 instances, etc. without control tower? Looking into creating a service catalog to make self-service provisioning easier for teams, but curious how others approach this when managing the resources in IaC",
+      "is_original_content": false,
+      "link_flair_text": "discussion",
+      "permalink": "https://reddit.com/r/aws/comments/1u89wb0/how_are_you_doing_selfservice_infra/",
+      "domain": "self.aws",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "os6ksqj",
+          "author": "ArticleAdventurous36",
+          "text": "We had better luck treating self-service as a thin portal over approved IaC modules rather than letting teams provision directly. Requests go through a form or repo template which triggers Terraform or OpenTofu in CI with fixed network, IAM, tagging, budget and instance-size guardrails.",
+          "score": 5,
+          "created_utc": "2026-06-17 13:41:30",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "os6w1sp",
+              "author": "RoseSec_",
+              "text": "This is how I've been thinking about approaching it. Maybe a Service Now request that creates a GitLab issue from a template that is sucked up into some Terraform",
+              "score": 3,
+              "created_utc": "2026-06-17 14:34:20",
+              "is_submitter": true,
+              "replies": []
+            },
+            {
+              "id": "os7p9pv",
+              "author": "nekolai",
+              "text": "do you do anything to persist tf state, or treat every self-serve deploy as a 'one-shot' and let it ride on its own from that point?",
+              "score": -1,
+              "created_utc": "2026-06-17 16:43:28",
+              "is_submitter": false,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "osasjo9",
+          "author": "Desperate_Weekend428",
+          "text": "I had good luck with Terraform modules and a simple service catalog..teams can spin up what they need themselves.. while IaC stays as the source of truth and keeps things consistent",
+          "score": 2,
+          "created_utc": "2026-06-18 01:35:42",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "os6jvg7",
+          "author": "EgoistHedonist",
+          "text": "By painstakingly building self-service automation flows on top of Backstage.",
+          "score": 2,
+          "created_utc": "2026-06-17 13:37:00",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "os6ho8d",
+          "author": "oneplane",
+          "text": "GitOps and Atlantis",
+          "score": -1,
+          "created_utc": "2026-06-17 13:26:11",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "os6lzvj",
+          "author": "8gxe",
+          "text": "Coder",
+          "score": -1,
+          "created_utc": "2026-06-17 13:47:14",
+          "is_submitter": false,
+          "replies": []
         }
       ]
     }
