@@ -1,11 +1,11 @@
 {
   "metadata": {
-    "last_updated": "2026-07-11 17:25:01",
+    "last_updated": "2026-07-12 03:49:57",
     "time_filter": "week",
     "subreddit": "mcp",
     "total_items": 20,
-    "total_comments": 97,
-    "file_size_bytes": 140329
+    "total_comments": 96,
+    "file_size_bytes": 134659
   },
   "items": [
     {
@@ -15,7 +15,7 @@
       "url": "https://i.redd.it/4o48pudjrxbh1.png",
       "author": "ElectronicUnit6303",
       "created_utc": "2026-07-08 04:47:05",
-      "score": 54,
+      "score": 59,
       "num_comments": 16,
       "upvote_ratio": 0.95,
       "text": "[External Link]",
@@ -29,7 +29,7 @@
           "id": "ow8ass6",
           "author": "_suren",
           "text": "The useful part here is mining conversations, not just indexing the repo. A lot of project context lives in “why we chose this” and “what broke last time,” and normal code search misses that.\n\nI’d be careful with automatic updates every 5 hours though. Memory tools get dangerous when they quietly promote stale chat into project truth. I’d want a review step: new facts, changed facts, stale facts, delete/keep.\n\nAlso provenance per page would help a lot. If the wiki says “auth uses X,” show whether that came from code, a chat, a commit, or an inferred summary.",
-          "score": 8,
+          "score": 7,
           "created_utc": "2026-07-08 04:55:24",
           "is_submitter": false,
           "replies": [
@@ -157,9 +157,9 @@
       "url": "https://i.redd.it/wfvixvvwn0ch1.png",
       "author": "Donthaveaphd",
       "created_utc": "2026-07-08 14:32:08",
-      "score": 33,
+      "score": 39,
       "num_comments": 7,
-      "upvote_ratio": 0.88,
+      "upvote_ratio": 0.92,
       "text": "[External Link]",
       "is_original_content": false,
       "link_flair_text": "showcase",
@@ -222,6 +222,110 @@
           "created_utc": "2026-07-09 16:19:11",
           "is_submitter": true,
           "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1ur8dwl",
+      "title": "I sandboxed 70 MCP servers and logged what they actually do at runtime: here's what I found",
+      "subreddit": "mcp",
+      "url": "https://www.reddit.com/r/mcp/comments/1ur8dwl/i_sandboxed_70_mcp_servers_and_logged_what_they/",
+      "author": "Timely-Ad-3747",
+      "created_utc": "2026-07-08 22:50:31",
+      "score": 24,
+      "num_comments": 11,
+      "upvote_ratio": 0.95,
+      "text": "The official MCP registry verifies *who* published a server, but nothing verifies *what it does once you run it*. Most of the trust tooling out there is static analysis, scanning source and metadata. That misses the stuff that only shows up at runtime: a server connecting somewhere unrelated to its job, reading files outside its lane, or quietly changing behavior in a later version after you've already trusted it.\n\nSo I built a small harness: run each server in a throwaway Linux container under strace, log every file open and network connection, and seed a fake credential in the environment as a canary to see if anything tries to read or exfiltrate it. Then I ran it across 70 servers, the 20 most-downloaded on npm plus 50 from the long tail.\n\nResults:\n\n* **67 clean** at startup, no sensitive-file reads, no unexpected network.\n* **3** make outbound HTTPS calls at boot before any tool is called (okx-trade-mcp, razorpay/blade-mcp, notebooklm-mcp-server), all to hosts consistent with what they're for, none touched sensitive files or the canary.\n* **1** (bullmq-mcp) reads `/etc/passwd` at startup, which looked bad until the trace showed it's a normal glibc user lookup and the contents never leave the process. Benign.\n\nHonest scope: this only captures startup + idle behavior right now, not what a server does when a tool is actually called, which is where more of the interesting behavior lives. Tool-call tracing and cross-version diffing (to catch rug pulls) are next.\n\nRepo with the harness, per-server manifests, and full writeup: [**https://github.com/BhaveshThapar/mcp-audit**](https://github.com/BhaveshThapar/mcp-audit)\n\nTwo things I'd want the sub's take on:\n\n1. Is runtime behavior worth watching, or is static scanning + the registry's namespace auth enough in practice?\n2. Would you actually want something like this, a behavior check your client runs before installing a server?",
+      "is_original_content": false,
+      "link_flair_text": "resource",
+      "permalink": "https://reddit.com/r/mcp/comments/1ur8dwl/i_sandboxed_70_mcp_servers_and_logged_what_they/",
+      "domain": "self.mcp",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "oweqtcy",
+          "author": "jun_builds",
+          "text": "One blind spot bigger than startup-vs-tool-call timing: the move you'd most want to catch may never be a syscall on the server you're tracing. A server can exfiltrate through its tool output — crafted text the host reads that steers the agent into making the outbound call itself, or folds a stolen value into the next tool's arguments. Your strace on that process sees nothing; the egress leaves from somewhere you're not watching.\n\n  \nWhich is why the surface that catches this is the client boundary — what the agent does with tool results — not the server's own file/network trace. The sandbox is still worth keeping; it just can't see a confused-deputy flow by design.",
+          "score": 3,
+          "created_utc": "2026-07-09 01:50:51",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "owfjzfr",
+              "author": "Timely-Ad-3747",
+              "text": "You're right, and this is the sharpest version of the limitation. A confused-deputy flow, server returns crafted output that steers the agent into making the call, or folds a stolen value into the next tool's arguments, never shows up in the server's own syscalls. The egress leaves from the client, which the sandbox isn't watching by design.\n\nWhere I land: the sandbox catches the direct class (postmark-style BCC, unexpected egress, sensitive reads) and version drift, but it's structurally blind to indirect exfil through tool output; that's a client-boundary problem, what the agent does with results. The one artifact both surfaces share is the tool output/schema itself, which is at least analyzable statically and diffable across versions even when the runtime exfil isn't visible server-side.\n\nSo honest scope: sandbox as one layer (direct misbehavior + drift), client-boundary monitoring as the layer that catches confused-deputy, different observation points, both needed.\n\nSince you clearly think about this, do you see the client-boundary monitor as the actually durable product, and the server sandbox as more of a first-pass filter? I keep going back and forth on whether the sandbox is the foundation or just the easy 30%.",
+              "score": 1,
+              "created_utc": "2026-07-09 04:53:37",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "owf9rt0",
+          "author": "_suren",
+          "text": "Runtime behavior is the interesting bit here.\n\nStatic metadata can tell you what the server claims, but the useful signals are things like unexpected egress, reading outside the expected paths, spawning child processes, or changing tool behavior after install. I’d also separate “risky by design” from “risky by surprise.” A browser automation MCP will touch the network; a calculator MCP doing that is different.\n\nThe report would be stronger if each server had a short expected-behavior profile beside the observed behavior.",
+          "score": 1,
+          "created_utc": "2026-07-09 03:44:51",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "owfk0yq",
+              "author": "Timely-Ad-3747",
+              "text": "Agreed, that's the \"risky by design vs risky by surprise\" split, and it's the right frame. A browser-automation server touching the network is expected; a calculator doing it isn't. The fix is cheap, too: the server declares its tools, so I can generate an expected-behavior profile from what it advertises and diff observed against expected, then surface only the surprises. Adding a per-server expected-vs-observed view. Thanks, that makes the report a lot more useful.",
+              "score": 1,
+              "created_utc": "2026-07-09 04:53:55",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "owl26mp",
+          "author": "joPrincess1",
+          "text": "interesting how much of \"browser support for agents\" right now still just means dev tools bolted on so an agent can click around - navigate, snapshot, submit. none of that touches the confused-deputy case you two landed on above, which is exactly what happens once the agent is in the browser acting on tool output.\n\nopera's the one I've actually used that does something past that baseline - their CLI has a token compression layer on snapshots, so at least someone's optimizing the loop instead of just wrapping it. but that's still a cost problem, not a trust one. compression doesn't tell you anything about whether the click that just fired was the click you expected.\n\nkind of expected more from a browser specifically, tbh. they're sitting exactly on the client boundary you're describing - seems like the natural place to diff expected vs observed action, not just shrink the trace.\n\nanyone seen a browser actually doing that, or is it sandboxes all the way down still?",
+          "score": 1,
+          "created_utc": "2026-07-09 22:19:31",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "owotf84",
+              "author": "Timely-Ad-3747",
+              "text": "The client-boundary point is right; that surface is exactly where you'd expect vs observed action, not just shrink the trace. Compression is a cost optimization; it tells you nothing about whether the click that fired was the click you intended. I haven't seen a browser actually verifying the action semantically; mostly, it's still sandboxes wrapping dev tools. That action-level diff is the open problem.",
+              "score": 1,
+              "created_utc": "2026-07-10 12:48:52",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "owvs9t6",
+          "author": "Street_Inevitable_77",
+          "text": "The confused-deputy sub-thread is the part that stuck with me. One thing that helped on the server side of my own MCP was treating every individual tool call as its own authorization boundary instead of trusting the session once at connect. Even if the client gets steered into a bad call, running each call in a per-user context with row-level security that fails closed on a missing policy caps the blast radius to that one user's own data. It doesn't detect the confused-deputy flow, but it bounds what a steered call can actually reach.  \n  \nQuestion on the harness: would it be feasible to also assert the negative, like seed two users' canaries and verify that a call scoped to user A can never surface user B's value? I'm curious whether that kind of isolation check fits the strace approach at all, or whether it only really lives at the app and db layer.",
+          "score": 1,
+          "created_utc": "2026-07-11 12:24:10",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "owe1pse",
+          "author": "Kind-Atmosphere9655",
+          "text": "Startup strace is the right instrument but it catches the least interesting attacks. The three okx/razorpay/notebooklm boot-time calls are the honest servers phoning home. The ones actually worth fearing stay quiet at boot and only reach out mid-tool-call, once real arguments are flowing through, so a trace that stops after startup sees nothing.\n\n  \nTwo things I'd add. Seed the canary per tool invocation with plausible-looking data, not just once in the env, because lazy exfil waits for a call that looks worth stealing from. And re-run the whole harness on every version bump and diff the syscall profile, since the failure mode you named (behavior changes in a later version after you already trusted it) is a diff problem, not a scan problem.\n\n  \nTrust-on-first-use plus a pinned hash gets you most of the way. The sandbox is what catches the drift.",
+          "score": 0,
+          "created_utc": "2026-07-08 23:32:22",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "owe8j8w",
+              "author": "Timely-Ad-3747",
+              "text": "\n\n",
+              "score": 1,
+              "created_utc": "2026-07-09 00:08:55",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
         }
       ]
     },
@@ -535,158 +639,6 @@
       ]
     },
     {
-      "id": "1ur8dwl",
-      "title": "I sandboxed 70 MCP servers and logged what they actually do at runtime: here's what I found",
-      "subreddit": "mcp",
-      "url": "https://www.reddit.com/r/mcp/comments/1ur8dwl/i_sandboxed_70_mcp_servers_and_logged_what_they/",
-      "author": "Timely-Ad-3747",
-      "created_utc": "2026-07-08 22:50:31",
-      "score": 23,
-      "num_comments": 11,
-      "upvote_ratio": 0.94,
-      "text": "The official MCP registry verifies *who* published a server, but nothing verifies *what it does once you run it*. Most of the trust tooling out there is static analysis, scanning source and metadata. That misses the stuff that only shows up at runtime: a server connecting somewhere unrelated to its job, reading files outside its lane, or quietly changing behavior in a later version after you've already trusted it.\n\nSo I built a small harness: run each server in a throwaway Linux container under strace, log every file open and network connection, and seed a fake credential in the environment as a canary to see if anything tries to read or exfiltrate it. Then I ran it across 70 servers, the 20 most-downloaded on npm plus 50 from the long tail.\n\nResults:\n\n* **67 clean** at startup, no sensitive-file reads, no unexpected network.\n* **3** make outbound HTTPS calls at boot before any tool is called (okx-trade-mcp, razorpay/blade-mcp, notebooklm-mcp-server), all to hosts consistent with what they're for, none touched sensitive files or the canary.\n* **1** (bullmq-mcp) reads `/etc/passwd` at startup, which looked bad until the trace showed it's a normal glibc user lookup and the contents never leave the process. Benign.\n\nHonest scope: this only captures startup + idle behavior right now, not what a server does when a tool is actually called, which is where more of the interesting behavior lives. Tool-call tracing and cross-version diffing (to catch rug pulls) are next.\n\nRepo with the harness, per-server manifests, and full writeup: [**https://github.com/BhaveshThapar/mcp-audit**](https://github.com/BhaveshThapar/mcp-audit)\n\nTwo things I'd want the sub's take on:\n\n1. Is runtime behavior worth watching, or is static scanning + the registry's namespace auth enough in practice?\n2. Would you actually want something like this, a behavior check your client runs before installing a server?",
-      "is_original_content": false,
-      "link_flair_text": "resource",
-      "permalink": "https://reddit.com/r/mcp/comments/1ur8dwl/i_sandboxed_70_mcp_servers_and_logged_what_they/",
-      "domain": "self.mcp",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "oweqtcy",
-          "author": "jun_builds",
-          "text": "One blind spot bigger than startup-vs-tool-call timing: the move you'd most want to catch may never be a syscall on the server you're tracing. A server can exfiltrate through its tool output — crafted text the host reads that steers the agent into making the outbound call itself, or folds a stolen value into the next tool's arguments. Your strace on that process sees nothing; the egress leaves from somewhere you're not watching.\n\n  \nWhich is why the surface that catches this is the client boundary — what the agent does with tool results — not the server's own file/network trace. The sandbox is still worth keeping; it just can't see a confused-deputy flow by design.",
-          "score": 3,
-          "created_utc": "2026-07-09 01:50:51",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "owfjzfr",
-              "author": "Timely-Ad-3747",
-              "text": "You're right, and this is the sharpest version of the limitation. A confused-deputy flow, server returns crafted output that steers the agent into making the call, or folds a stolen value into the next tool's arguments, never shows up in the server's own syscalls. The egress leaves from the client, which the sandbox isn't watching by design.\n\nWhere I land: the sandbox catches the direct class (postmark-style BCC, unexpected egress, sensitive reads) and version drift, but it's structurally blind to indirect exfil through tool output; that's a client-boundary problem, what the agent does with results. The one artifact both surfaces share is the tool output/schema itself, which is at least analyzable statically and diffable across versions even when the runtime exfil isn't visible server-side.\n\nSo honest scope: sandbox as one layer (direct misbehavior + drift), client-boundary monitoring as the layer that catches confused-deputy, different observation points, both needed.\n\nSince you clearly think about this, do you see the client-boundary monitor as the actually durable product, and the server sandbox as more of a first-pass filter? I keep going back and forth on whether the sandbox is the foundation or just the easy 30%.",
-              "score": 1,
-              "created_utc": "2026-07-09 04:53:37",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "owf9rt0",
-          "author": "_suren",
-          "text": "Runtime behavior is the interesting bit here.\n\nStatic metadata can tell you what the server claims, but the useful signals are things like unexpected egress, reading outside the expected paths, spawning child processes, or changing tool behavior after install. I’d also separate “risky by design” from “risky by surprise.” A browser automation MCP will touch the network; a calculator MCP doing that is different.\n\nThe report would be stronger if each server had a short expected-behavior profile beside the observed behavior.",
-          "score": 1,
-          "created_utc": "2026-07-09 03:44:51",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "owfk0yq",
-              "author": "Timely-Ad-3747",
-              "text": "Agreed, that's the \"risky by design vs risky by surprise\" split, and it's the right frame. A browser-automation server touching the network is expected; a calculator doing it isn't. The fix is cheap, too: the server declares its tools, so I can generate an expected-behavior profile from what it advertises and diff observed against expected, then surface only the surprises. Adding a per-server expected-vs-observed view. Thanks, that makes the report a lot more useful.",
-              "score": 1,
-              "created_utc": "2026-07-09 04:53:55",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "owl26mp",
-          "author": "joPrincess1",
-          "text": "interesting how much of \"browser support for agents\" right now still just means dev tools bolted on so an agent can click around - navigate, snapshot, submit. none of that touches the confused-deputy case you two landed on above, which is exactly what happens once the agent is in the browser acting on tool output.\n\nopera's the one I've actually used that does something past that baseline - their CLI has a token compression layer on snapshots, so at least someone's optimizing the loop instead of just wrapping it. but that's still a cost problem, not a trust one. compression doesn't tell you anything about whether the click that just fired was the click you expected.\n\nkind of expected more from a browser specifically, tbh. they're sitting exactly on the client boundary you're describing - seems like the natural place to diff expected vs observed action, not just shrink the trace.\n\nanyone seen a browser actually doing that, or is it sandboxes all the way down still?",
-          "score": 1,
-          "created_utc": "2026-07-09 22:19:31",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "owotf84",
-              "author": "Timely-Ad-3747",
-              "text": "The client-boundary point is right; that surface is exactly where you'd expect vs observed action, not just shrink the trace. Compression is a cost optimization; it tells you nothing about whether the click that fired was the click you intended. I haven't seen a browser actually verifying the action semantically; mostly, it's still sandboxes wrapping dev tools. That action-level diff is the open problem.",
-              "score": 1,
-              "created_utc": "2026-07-10 12:48:52",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "owvs9t6",
-          "author": "Street_Inevitable_77",
-          "text": "The confused-deputy sub-thread is the part that stuck with me. One thing that helped on the server side of my own MCP was treating every individual tool call as its own authorization boundary instead of trusting the session once at connect. Even if the client gets steered into a bad call, running each call in a per-user context with row-level security that fails closed on a missing policy caps the blast radius to that one user's own data. It doesn't detect the confused-deputy flow, but it bounds what a steered call can actually reach.  \n  \nQuestion on the harness: would it be feasible to also assert the negative, like seed two users' canaries and verify that a call scoped to user A can never surface user B's value? I'm curious whether that kind of isolation check fits the strace approach at all, or whether it only really lives at the app and db layer.",
-          "score": 1,
-          "created_utc": "2026-07-11 12:24:10",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "owe1pse",
-          "author": "Kind-Atmosphere9655",
-          "text": "Startup strace is the right instrument but it catches the least interesting attacks. The three okx/razorpay/notebooklm boot-time calls are the honest servers phoning home. The ones actually worth fearing stay quiet at boot and only reach out mid-tool-call, once real arguments are flowing through, so a trace that stops after startup sees nothing.\n\n  \nTwo things I'd add. Seed the canary per tool invocation with plausible-looking data, not just once in the env, because lazy exfil waits for a call that looks worth stealing from. And re-run the whole harness on every version bump and diff the syscall profile, since the failure mode you named (behavior changes in a later version after you already trusted it) is a diff problem, not a scan problem.\n\n  \nTrust-on-first-use plus a pinned hash gets you most of the way. The sandbox is what catches the drift.",
-          "score": 0,
-          "created_utc": "2026-07-08 23:32:22",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "owe8j8w",
-              "author": "Timely-Ad-3747",
-              "text": "\n\n",
-              "score": 1,
-              "created_utc": "2026-07-09 00:08:55",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        }
-      ]
-    },
-    {
-      "id": "1unlyu8",
-      "title": "apple's safari mcp server is more interesting than i initially thought",
-      "subreddit": "mcp",
-      "url": "https://www.reddit.com/r/mcp/comments/1unlyu8/apples_safari_mcp_server_is_more_interesting_than/",
-      "author": "Low-Trust2491",
-      "created_utc": "2026-07-04 22:33:17",
-      "score": 16,
-      "num_comments": 4,
-      "upvote_ratio": 1.0,
-      "text": "apple's safari mcp server only exposes 17 tools and runs inside an isolated webdriver session, while the community safari-mcp implementation has around 96 tools and can work with existing browser sessions.\n\nthe difference is pretty interesting. apple seems to be treating mcp as a clean-room debugging environment rather than giving agents access to your actual browser state.\n\nthere's also the bigger issue that most browser automation tooling is still heavily chromium-first.\n\nthis comparison goes deeper into both approaches:\n\n[https://rune.codes/hub/tech-trends/the-safari-mcp-server-could-change-how-developers-debug-websites](https://rune.codes/hub/tech-trends/the-safari-mcp-server-could-change-how-developers-debug-websites)\n\ndo you think browser mcp tools should be isolated by default, or is access to real browser sessions more useful?",
-      "is_original_content": false,
-      "link_flair_text": "resource",
-      "permalink": "https://reddit.com/r/mcp/comments/1unlyu8/apples_safari_mcp_server_is_more_interesting_than/",
-      "domain": "self.mcp",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "ovlf1ah",
-          "author": "awizemann",
-          "text": "From what I’ve read (still trying to get my hands on it), the safari MCP is a sandbox, but what isn’t know is it you can use it to log into a site in the sandbox. That would be a game changer. I can’t see why they wouldn’t allow it, since that is a test in and of itself, but they are so privacy conscious (new Apple Intelligence on OS27 won’t touch medical or legal documents), they could very well block it or session destroy after the test. ",
-          "score": 1,
-          "created_utc": "2026-07-04 23:20:47",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "ovljkja",
-              "author": "Low-Trust2491",
-              "text": "yeah, the login part is what i'm curious about too. if they allow that inside the sandbox, it'd be a pretty big deal. guess we'll have to actually get our hands on it and see 😭",
-              "score": 2,
-              "created_utc": "2026-07-04 23:47:13",
-              "is_submitter": true,
-              "replies": [
-                {
-                  "id": "ovmsr4j",
-                  "author": "tribat",
-                  "text": "This is interesting.  I’ve done a bunch of work on headless browsers and browser automation. It’s still a mess and hard to tell what tools to use. ",
-                  "score": 1,
-                  "created_utc": "2026-07-05 05:06:49",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        }
-      ]
-    },
-    {
       "id": "1uskt2w",
       "title": "Who knows someone at GitHub/NPM team?",
       "subreddit": "mcp",
@@ -801,82 +753,15 @@
       ]
     },
     {
-      "id": "1unqagb",
-      "title": "Foreman - a skill for building better tools",
-      "subreddit": "mcp",
-      "url": "https://www.reddit.com/r/mcp/comments/1unqagb/foreman_a_skill_for_building_better_tools/",
-      "author": "blair_hudson",
-      "created_utc": "2026-07-05 02:13:45",
-      "score": 13,
-      "num_comments": 8,
-      "upvote_ratio": 0.93,
-      "text": "Hi r/mcp, I originally posted this on r/ClaudeCode but it doesn't seem like anyone over there is really interested in tool design so thought you might have better insight. Over the last few years I’ve found that AI models are incredibly good at writing code, but surprisingly bad at designing for safety.\n\nThey will integrate APIs, generate schemas, expose functions, and create tool specs, but miss important stuff like capability boundaries, authorization, side effects, idempotency, confused deputy risks, and failure modes.\n\nSo I wrote the reference I wished existed based on everything I've seen in my professional work, which was reached #1 best seller in Generative AI on Amazon Australia on day 2 (my 5 mins of fame. yay).\n\nI’ve started working on an agent skill called that helps coding agents like CC, Codex, etc apply those ideas on relevant tasks, like designing or reviewing tools. This applies to MCP and framework native tool calls.\n\nThe goal is to help agents question risky operations, spot missing safeguards, identify unclear authority boundaries, and avoid unsafe tool calls before they happen.\n\nRepo is here: [https://github.com/blairhudson/foreman](https://github.com/blairhudson/foreman)\n\nRight now it's runnable and a strong foundation and the next step is working out the right approach to evaluating it. I’d be super grateful for your feeedback and ideas as I work out the right approach.\n\nWhat would you measure for an agent skill like this?\n\nA few things I'm thinking through:\n\n\\- is it retrieved on relevant tasks?  \n\\- does it impact outputs positively when retrieved for design tasks?  \n\\- does it spot unsafe tools during review tasks?  \n\\- what is the impact on token consumption?  \n\\- maybe we need a specific tool design benchmark?\n\nWould love to know your thoughts please",
-      "is_original_content": false,
-      "link_flair_text": "showcase",
-      "permalink": "https://reddit.com/r/mcp/comments/1unqagb/foreman_a_skill_for_building_better_tools/",
-      "domain": "self.mcp",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "ovqsrw9",
-          "author": "WorldlyAd7946",
-          "text": "Went through the repo rather than just the post 👍\n\n\"The strongest thing in the repo is your own line, the model may choose intent, the runtime owns authority\". I think it's worth following where it leads though: a skill is design-time, its the sign writer in your own metaphor. Something still has to bolt the railing in at runtime, hooks or a gate in front of the tools, so I'd frame foreman as composing with runtime enforcement rather than sitting instead of it. The skill helps the user design the safer tool, the gate enforces policy when something calls it anyway.\n\nOn what to measure, four things come to my own mind from reading the repo:\n\n1. You already have the start of the answer in evals.json, 5 cases with assertions but no runner. Build the runner before adding cases. The number you want is the with/without delta, same agent, same task, skill on vs off, graded against your own assertions.\n\n2. Only one of your five cases is benign (the weather one). Around half the set should be safe tools that must pass clean, otherwise you cant see the false positive rate at all?\n\n3. Seed new cases from real shipped vulns rather than synthetic ones and see if it catches them? I.e. command injection via shell wrapped spawns on windows, path traversal in fs servers, env passthrough leaking tokens, confused deputy in aggregators, etc... If it catches what actually shipped, it works!? 🤷\n\n4. From the manifest, your first question (is it retrieved on relevant tasks?) doesnt currently apply to your own skill? It triggers on an explicit command so it fires when called, not when relevant. If you want passive retrieval on risky tasks thats a description field job, and then retrieval rate becomes measurable, a tripwire task where it should have fired without being asked.\n\nI like it, as a foundation btw, great idea... I'm not trying to be critical but constructive and attempt to answer your question. It grabbed my attention as it's related to a lot of my own research 🙃👍",
-          "score": 1,
-          "created_utc": "2026-07-05 19:50:30",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "ovrui8c",
-              "author": "blair_hudson",
-              "text": "Thanks for taking the time to write such a detailed reply! Lots to chew on. What’s the focus of your research??",
-              "score": 1,
-              "created_utc": "2026-07-05 22:46:41",
-              "is_submitter": true,
-              "replies": [
-                {
-                  "id": "ovsyipx",
-                  "author": "WorldlyAd7946",
-                  "text": "At work I work in science and engineering where things need to be accurate, so I do a lot on ensuring accuracy and antisycophancy.\n\nOutside of work I have a nearly four year project on self evolving general purpose agents and memory systems.\n\nYour post just caught my attention as in my work, your question about defining tests I often find relatively easy, but in my own research outside of work, quantifying outcomes is often a pretty involved thought experiment 😅... So I understand the pain of what you are trying to achieve here 👍",
-                  "score": 1,
-                  "created_utc": "2026-07-06 02:24:54",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            },
-            {
-              "id": "owcsmzv",
-              "author": "touristtam",
-              "text": "> You already have the start of the answer in evals.json, 5 cases with assertions but no runner. Build the runner before adding cases. The number you want is the with/without delta, same agent, same task, skill on vs off, graded against your own assertions.\n\nWhat's your recommendation regarding runners?",
-              "score": 1,
-              "created_utc": "2026-07-08 19:58:46",
-              "is_submitter": false,
-              "replies": [
-                {
-                  "id": "owgj5jx",
-                  "author": "WorldlyAd7946",
-                  "text": "Do you mean specifically to foreman? I can give it some more thoughts regarding the exact case you are wanting to test if so, but generally...\n\nLoad a case, run the same agent on the same task twice, once with the skill in context and once without, everything else static, grade both against the case's own assertions. The output you want is the with/without delta, not a score.\n\nGrade deterministic where you can, but as is often the case, some things are a bit more fuzzy. Here you can use a model as judge, test the judge on a couple you already know the answer to first, a judge that passes everything is worse than none.\n\nYou can obviously  get into frameworks if you outgrow the hand rolled one or need to, I.e. Inspect on python (the AISI one, splits solver from scorer nicely), promptfoo if in js and want quick yaml a/b. But when we don't have hundreds  of cases a nicely  tailored one, provided it's well structured, should be most useful imho.👍",
-                  "score": 1,
-                  "created_utc": "2026-07-09 09:34:43",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        }
-      ]
-    },
-    {
       "id": "1urjz28",
       "title": "We built Sendmux MCP server so AI agents can receive, send, and route emails",
       "subreddit": "mcp",
       "url": "https://www.reddit.com/r/mcp/comments/1urjz28/we_built_sendmux_mcp_server_so_ai_agents_can/",
       "author": "EmailNo8428",
       "created_utc": "2026-07-09 08:14:21",
-      "score": 11,
+      "score": 12,
       "num_comments": 2,
-      "upvote_ratio": 0.92,
+      "upvote_ratio": 0.93,
       "text": "**Disclosure:** I’m the founder of Sendmux.\n\nWe wanted agents to have a real email surface instead of duct-taping together SMTP, IMAP, parsing, webhooks, and API keys for every project.\n\nSo we shipped a Sendmux MCP server that gives agents an email inbox API and outbound-sending tools. \n\n**For cold email marketers**\n\nSendmux allows you to load all your cold email infrastructure and set thresholds and send from any sending software. Sendmux does automatic distribution ensuring it stays within set thresholds (per sec, per min, per hour, etc.).\n\n**What it does:**\n\n* receive inbound email into agent mailboxes\n* read parsed email as clean JSON\n* send single or batch outbound emails\n* work with webhooks, logs, domains, and mailbox-scoped access\n* connect through hosted OAuth or run locally via the PyPI package\n\nThe main use case is letting coding agents, support agents, QA agents, or workflow agents interact with email safely without giving them broad mailbox access or asking them to scrape raw MIME/IMAP responses.\n\n**Hosted MCP URL:**\n\n`https://mcp.sendmux.ai/mcp`\n\n**Official MCP registry name:**\n\n`io.github.Sendmux/sendmux-mcp`\n\n**Docs:**\n\n[https://sendmux.ai/docs/guides/mcp](https://sendmux.ai/docs/guides/mcp)\n\n**GitHub:**\n\n[https://github.com/Sendmux/sendmux-sdk](https://github.com/Sendmux/sendmux-sdk)\n\nI’d be interested in feedback from people building MCP workflows: would you rather expose email as a small set of high-level tools or keep it closer to raw API primitives?",
       "is_original_content": false,
       "link_flair_text": null,
@@ -912,9 +797,9 @@
       "url": "https://www.reddit.com/r/mcp/comments/1uplm45/we_started_with_litellm_now_im_wondering_if_that/",
       "author": "LongIndustry7208",
       "created_utc": "2026-07-07 05:22:19",
-      "score": 10,
+      "score": 12,
       "num_comments": 13,
-      "upvote_ratio": 0.73,
+      "upvote_ratio": 0.78,
       "text": "LiteLLM was an easy pick early on. One API, swap providers anytime, running the same day. It did the job.\n\nWe've grown, and now I'm less sure. It was meant to be a thin layer, but it isn't one anymore. It's become real infrastructure, and I keep wondering if that's where we want to be in a year.\n\nThe things we keep hitting are all related. Once a few teams are on it, observability gets murky and I can't really see what's going on. Governance is rough too, who's allowed to use what, who sets the limits. And we keep building the rest ourselves: logging, retries, dashboards, more of it every month. At some point a wrapper quietly turns into another platform you have to maintain, and I'm not sure where that line is.\n\nMaybe I'm overthinking it. But every new requirement becomes one more thing we own, and the \"simple\" part is mostly gone.\n\nFor anyone past a handful of apps: did you stay with LiteLLM or move on? I don't want a feature comparison. I just want to know what your setup looks like now, and whether you'd make the same choice again.",
       "is_original_content": false,
       "link_flair_text": null,
@@ -922,6 +807,15 @@
       "domain": "self.mcp",
       "is_self": true,
       "comments": [
+        {
+          "id": "ow2lzpm",
+          "author": "InkyaCat",
+          "text": "Would I make the same choice? For prototyping, maybe, for where you are now no. I'd rather own a smaller surface deliberately than inherit a big one by accident. Worth seriously pricing out a managed gateway (Truefoundry,Portkey, etc.) just so the maintenance burden lands on someone whose actual job it is",
+          "score": 3,
+          "created_utc": "2026-07-07 12:28:34",
+          "is_submitter": false,
+          "replies": []
+        },
         {
           "id": "ow37pop",
           "author": "BidWestern1056",
@@ -932,11 +826,11 @@
           "replies": []
         },
         {
-          "id": "ow2lzpm",
-          "author": "InkyaCat",
-          "text": "Would I make the same choice? For prototyping, maybe, for where you are now no. I'd rather own a smaller surface deliberately than inherit a big one by accident. Worth seriously pricing out a managed gateway (Truefoundry,Portkey, etc.) just so the maintenance burden lands on someone whose actual job it is",
+          "id": "ow5y0a8",
+          "author": "drfritz2",
+          "text": "Move on to what? \n\nIf you are enterprise, buy the enterprise licence from them and ask for support.\n\nThe thing is that AI requires a lot of infrastructure, much more than before. \n\n",
           "score": 2,
-          "created_utc": "2026-07-07 12:28:34",
+          "created_utc": "2026-07-07 21:06:26",
           "is_submitter": false,
           "replies": []
         },
@@ -974,15 +868,6 @@
           "text": "LiteLLM is really great for research purpose. Imaging you want to test your dataset or benchmark for whole bunch of LLMs LiteLLM is the easiest way. \n\nBut honestly, lot of things in LiteLLM breaks in production . I would recommend using something like openrouter or in world automatic router for that purpose",
           "score": 1,
           "created_utc": "2026-07-07 16:38:03",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ow5y0a8",
-          "author": "drfritz2",
-          "text": "Move on to what? \n\nIf you are enterprise, buy the enterprise licence from them and ask for support.\n\nThe thing is that AI requires a lot of infrastructure, much more than before. \n\n",
-          "score": 1,
-          "created_utc": "2026-07-07 21:06:26",
           "is_submitter": false,
           "replies": []
         },
@@ -1197,7 +1082,7 @@
           "id": "ovwy0yi",
           "author": "Affectionate-Bit6525",
           "text": "I see a lot of them get promoted in here.  Don’t use AI slop for your pitch.  Don’t make it super long: “Here’s a thing I built that solves problem X”.  Link boom, you don’t need to waste everyone’s time with AI slop.\n\nAlso make sure you do your research and you aren’t just shoveling the same mcp that’s been pitched every other day (looking at you memory mcps).",
-          "score": 5,
+          "score": 4,
           "created_utc": "2026-07-06 17:10:29",
           "is_submitter": false,
           "replies": [
@@ -1205,7 +1090,7 @@
               "id": "ovyaybd",
               "author": "Zeflonex",
               "text": "Solid, nah we ain’t doing anything in that space \n\nI find it boring tbh\n\nThanks for the advice ",
-              "score": -2,
+              "score": -3,
               "created_utc": "2026-07-06 20:38:46",
               "is_submitter": true,
               "replies": []
@@ -1332,9 +1217,9 @@
       "url": "https://v.redd.it/dudj918c8fbh1",
       "author": "Opening_Library9560",
       "created_utc": "2026-07-05 14:28:08",
-      "score": 9,
+      "score": 10,
       "num_comments": 4,
-      "upvote_ratio": 0.85,
+      "upvote_ratio": 0.92,
       "text": "[External Link]",
       "is_original_content": false,
       "link_flair_text": "showcase",
@@ -1389,9 +1274,9 @@
       "url": "https://www.reddit.com/r/mcp/comments/1upjg03/so_whats_the_best_mcp_for_trading/",
       "author": "Rukaiya_Braillard",
       "created_utc": "2026-07-07 03:32:30",
-      "score": 9,
+      "score": 8,
       "num_comments": 7,
-      "upvote_ratio": 0.84,
+      "upvote_ratio": 0.83,
       "text": "Hey y'all. I'm deep diving into AI assisted trading and trying to figure out which mcp setup actually holds up in practice without it just being a glorified chat wrapper experiment. \n\nHonestly I've wasted so much time with half baked services that look great in demos but fall aport the moment volume hits or execution gets real. Dealing with pro APIs that introduce random latency or just fail silently when you need them most has been my reality lately. I've been eyeing alpaca's mcp service but I'm hesitant to jump in without if it's actually stable. \n\nAnyone know any good ones foe live trading? Ty. ",
       "is_original_content": false,
       "link_flair_text": "question",
@@ -1403,7 +1288,7 @@
           "id": "ow0t9oo",
           "author": "MyLinedChart",
           "text": "Been developing IB algos for 10+ years so a few thoughts\n\nHave tested Alpaca, FMP, IB, plus quite a few others, and they're all going to have latency at some point. Pretty much just the nature of the beast\n\nMy suggestion is to figure out how to codify your process and decision logic beforehand, then build the automation around that process. Trying to have the AI reason off live candles and pull the trigger in real time puts it exactly where latency and silent fails do the most damage.\n\nLet the AI/MCP layer do the parts that tolerate latency: analyzing your setups, planning with you on how you trade, reviewing your filled trades with you, etc. Keep the actual execution to a static, decided-before-the-market-opens process that runs the same way every time. Can have your preferred AI write the Python for you, too.\n\nWhat does your process look like before the AI touches it? That's usually where the real answer is.",
-          "score": 4,
+          "score": 3,
           "created_utc": "2026-07-07 04:16:51",
           "is_submitter": false,
           "replies": []
@@ -1607,97 +1492,6 @@
       "comments": []
     },
     {
-      "id": "1uokcud",
-      "title": "Build vs buy on MCP gateway/tool servers",
-      "subreddit": "mcp",
-      "url": "https://www.reddit.com/r/mcp/comments/1uokcud/build_vs_buy_on_mcp_gatewaytool_servers/",
-      "author": "DegreeSilent3402",
-      "created_utc": "2026-07-06 02:08:37",
-      "score": 7,
-      "num_comments": 14,
-      "upvote_ratio": 1.0,
-      "text": "Been going back and forth on this for weeks. We're a \\~5,000 person company and engineering wants to just build our own MCP gateway plus tool servers in house. They're confident on the actual tool logic. I'm way less confident about everything else: auth and token refresh across clients, rate limiting once real agent traffic hits it, etc etc\n\nI've seen enough custom integration projects turn into maintenance nightmares over the years that I'm skeptical going in, but I want to actually understand how manageable this is at scale rather than just assume the worst.\n\nIf you've run this in production, what were the biggest pain points and takeaways? Did you start with \"just build it\" and end up needing a gateway layer anyway? Anyone regret going custom, or regret buying a platform when you could've just built it yourselves?\n\nNot trying to get pitched, genuinely just want the scar tissue from people who've been through this. Thanks in advance.",
-      "is_original_content": false,
-      "link_flair_text": null,
-      "permalink": "https://reddit.com/r/mcp/comments/1uokcud/build_vs_buy_on_mcp_gatewaytool_servers/",
-      "domain": "self.mcp",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "ow0effh",
-          "author": "torresmateo",
-          "text": "Disclosure first: I work at Arcade, we sell a runtime in this space, so discount accordingly. Trying to give you my honest take and not a pitch.\n\nFirst of all, you're right: \"MCP servers\" (the tool logic your eng is confident about) and \"the runtime around them\" (auth, token lifecycle, rate limiting, audit, policy) are different projects. The servers are the easy part and you'll build them either way. \n\nYour specific fears are the right ones.\n\nAuth/token refresh: the OAuth flow works fine on day one and for a handful of users. The cost is that it never ends per-user vaulting + refresh/rotation, plus a permission surface that shifts every time someone joins, leaves, or changes roles. The two traps in-house builds fall into in my experience. 1) passing the user's full token into the LLM context (now prompt injection = credential theft), or using one shared service account (now you can't prove agent-vs-human in an audit). Per-user, least-privilege, resolved-at-call-time auth is the actual hard path. If you're building this in-house, make sure to get this right because refactoring auth is... not a happy experience.\n\nRate limiting: agents fan out far more calls than a UI, so you need real backoff/retry/failover. And once actions run long they exceed LLM timeouts, so you're suddenly building async queues, polling, and dead-letter handling you never scoped for. This is harness specific in many cases, so the MCP runtime has little to offer in that regard, but at the very least you should be able to tune the timeouts for tool calls etc.\n\nScope creep: This is a very common pattern. Teams start with \"just an internal MCP server\", but as things get adopted and features are requested, you're likely to feel the tech debt pile up early (at around the third integration to a 3rd party service I'd say from experience)\n\nTo be fair, building is the right call if you're single-user, if agent infra IS your product, or if you own every API with zero third-party SaaS. A 5k-person shop is usually none of those. Also, people who regret buying usually picked a tool that made them re-author their access policies instead of mapping to their existing IdP, so that's the thing to test in any eval.\n\nThere's much more pain points for a large team around policy enforcement and governance, but those are so diverse that I can't give a good \"general\" representative pain point. If you're shopping for an MCP runtime though, make sure they have a story for governance, auditability, and policy enforcement.\n\nLonger writeup here if it helps: https://www.arcade.dev/blog/mcp-runtime-build-vs-buy/. Happy to get specific on your setup.",
-          "score": 2,
-          "created_utc": "2026-07-07 02:45:40",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ovt3fl1",
-          "author": "WorldlyAd7946",
-          "text": "At 5k people, you have either the cost of the tool or the cost of the maintenance....\n\nSounds obvious but what I mean by that is, I personally think the custom built route will always be the option with the best ultimate end, however what the company needs to understand and do is not approach it as a cost saving excersise (not saying they are, but I often hear this as a contributing argument), but as an investment, and accept, particularly at that scale that it will need a dedicated member of staff or at least time allocation shared amongst  a couple of staff, following the build, for maintenance, support and ongoing development. It's a product in itself, even if just an internal one. \n\nIf people think it's a cheap option to do in-house, it isn't, but it will give you a tailored one, which I don't know what industry area you work in, but is certainly something I feel important and see the value in. If you are confident on building the tools, I'd consider it, it depends on your deployment.",
-          "score": 1,
-          "created_utc": "2026-07-06 02:51:34",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ovt3ot3",
-          "author": "KELTONDREY",
-          "text": "What load are we talking about ?\nHow many tools do you have ?\nHow many tool calls are you getting ?",
-          "score": 1,
-          "created_utc": "2026-07-06 02:53:01",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ovtvob9",
-          "author": "Extra_Taro_6870",
-          "text": "on basics mcp gateway is nothing more than api gateway. l7 load balancing, authentication, oidc support, rate limiting, monitoring etc. you can pick any api gateway for that purpose, paid or free. In any case a team required to maintain and make it platform. All cost money. There is no cost free solution.",
-          "score": 1,
-          "created_utc": "2026-07-06 06:03:54",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ovuxyie",
-          "author": "EbbCommon9300",
-          "text": "Just a shill here but check out assury.ai before you decide to build. We were the first to market with governance controls and now we give you full observability, hooks, shadow agents, live drift, credential starvation, SSO etc.",
-          "score": 1,
-          "created_utc": "2026-07-06 11:20:53",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ovtr24l",
-          "author": "General-Jaguar-8164",
-          "text": "Did you consider litellm?",
-          "score": 0,
-          "created_utc": "2026-07-06 05:26:44",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ovufn1u",
-          "author": "Future_AGI",
-          "text": "The tool logic is the easy 20%. The auth, token-refresh, rate-limit, and observability scaffolding around it is where the multi-year maintenance lives, and that part is the same whether your tools are custom or not. What's worked for teams I've seen: build your own tool servers but put an existing gateway in front for the boring cross-cutting stuff instead of hand-rolling it. There are OSS OpenAI-compatible gateways with MCP support you can self-host and that gets you virtual keys, routing, and rate limiting without buying a black box or building it twice.",
-          "score": 0,
-          "created_utc": "2026-07-06 08:54:35",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ovulyzu",
-          "author": "maguyva-ai",
-          "text": "tool logic is the easy 20% here. auth, token refresh, rate limiting once real agent traffic hits it - that's the part that eats teams alive. worth prototyping the ugly parts before committing either way",
-          "score": 0,
-          "created_utc": "2026-07-06 09:49:37",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
       "id": "1uoqtei",
       "title": "MCP Connector to all agents",
       "subreddit": "mcp",
@@ -1825,15 +1619,190 @@
       ]
     },
     {
+      "id": "1uqhtke",
+      "title": "cocoon sandbox: microvm sandboxes exposed as MCP tools",
+      "subreddit": "mcp",
+      "url": "https://www.reddit.com/r/mcp/comments/1uqhtke/cocoon_sandbox_microvm_sandboxes_exposed_as_mcp/",
+      "author": "Side_Comprehensive",
+      "created_utc": "2026-07-08 04:02:27",
+      "score": 7,
+      "num_comments": 1,
+      "upvote_ratio": 0.89,
+      "text": "i'm working on cocoon sandbox and wanted to share the mcp side.\n\nsandbox-mcp is a stdio MCP server that lets clients create microvm sandboxes, run commands, move files, keep sessions, checkpoint, branch checkpoints, hibernate, fork, and release sandboxes.\n\nthe actual sandbox is a linux microvm. net=none uses firecracker with no nic, only vsock. net=egress uses cloud hypervisor + cni when outbound network is needed.\n\nwhy i built it this way: coding agents need real machines, but the sandbox should be cheap enough to create per task. warm claims are sub-ms, golden snapshot clones are tens of ms.\n\nrepo: https://github.com/cocoonstack/sandbox\nmcp docs: https://cocoonstack.github.io/sandbox/mcp.html\n\ncurious if mcp folks prefer this as one big sandbox server, or split tools for exec/files/checkpoints separately.",
+      "is_original_content": false,
+      "link_flair_text": null,
+      "permalink": "https://reddit.com/r/mcp/comments/1uqhtke/cocoon_sandbox_microvm_sandboxes_exposed_as_mcp/",
+      "domain": "self.mcp",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "ow8xga1",
+          "author": "ImportantPurple8178",
+          "text": "split. three reasons:\n\n**permission scoping** — you can grant exec but not checkpoint. one monolithic tool makes that impossible. agent gets either everything or nothing.\n\n**tool selection clarity** — one tool one verb. the model's selection is cleaner when each tool maps to a single action. a big server with 8 verbs means the model has to pick not just \"sandbox\" but also reason about which operation inside the same call.\n\n**failure attribution** — when something goes wrong you know exactly which tool the agent misused.\n\nexception: if exec + file transfer always happen together in your most common workflow, expose a compound convenience tool that wraps both — but keep the primitives available separately.",
+          "score": 1,
+          "created_utc": "2026-07-08 07:55:11",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1uqshhr",
+      "title": "I built an MCP server for Ultralytics Platform workflows",
+      "subreddit": "mcp",
+      "url": "https://v.redd.it/e9byuxa470ch1",
+      "author": "RossGeller092",
+      "created_utc": "2026-07-08 13:19:47",
+      "score": 7,
+      "num_comments": 3,
+      "upvote_ratio": 0.89,
+      "text": "[External Link]",
+      "is_original_content": false,
+      "link_flair_text": "showcase",
+      "permalink": "https://reddit.com/r/mcp/comments/1uqshhr/i_built_an_mcp_server_for_ultralytics_platform/",
+      "domain": "v.redd.it",
+      "is_self": false,
+      "comments": [
+        {
+          "id": "owaa8ug",
+          "author": "Content-Parking-621",
+          "text": "Looks like clean implementation. I would suggest adding a tool for querying training history and comparing runs across experiments. That's the most repetitive dashboard task in YOLO workflows.",
+          "score": 2,
+          "created_utc": "2026-07-08 13:25:19",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "owaclhg",
+              "author": "RossGeller092",
+              "text": "Good point. I already have a tool \"**training\\_monitor**\" that returns latest metrics and recent metric history, so you can call it across multiple models and compare runs from the agent.\n\nI should make that workflow clearer in the docs/examples.",
+              "score": 1,
+              "created_utc": "2026-07-08 13:36:46",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "1uozvr4",
+      "title": "I built a remote MCP server that gives your agent read/write access to an entire tabletop RPG campaign (transcripts, world graph, notes)",
+      "subreddit": "mcp",
+      "url": "https://www.reddit.com/r/mcp/comments/1uozvr4/i_built_a_remote_mcp_server_that_gives_your_agent/",
+      "author": "mpigsley",
+      "created_utc": "2026-07-06 15:02:39",
+      "score": 7,
+      "num_comments": 0,
+      "upvote_ratio": 1.0,
+      "text": "*Realms of Shod is a TTRPG platform that records and transcribes your sessions, then extracts a structured world from them: entities (characters, places, factions…), typed relationships, session transcripts split into scenes, and markdown notes.*\n\nI just shipped an MCP server so that agents can work with it directly.\n\n**What's exposed (22 tools):**\n\n* **Realms**: list\\_realms, get\\_realm, create\\_realm, edit\\_realm\n* **Sessions**: list\\_sessions, get\\_session, get\\_session\\_transcriptions\n* **Entities**: list\\_entities, get\\_entity, create\\_entity, edit\\_entity, edit\\_entity\\_notes, delete\\_entity, merge\\_entities\n* **Relationships**: list\\_relationships, create\\_relationship, delete\\_relationship\n* **Notes**: list\\_notes, get\\_note, create\\_note, edit\\_note, delete\\_note\n\n**Auth is the standard MCP OAuth flow, not copy-paste tokens.** The server publishes authorization-server discovery metadata, so from Claude Code or another agent harness, you just add the server and authenticate. It opens a browser, you log into Realms of Shod, your account is linked, and the token is issued automatically. Bearer API tokens still work if you're running headless. Every tool call is scoped to the authenticated user's permissions.\n\n**Implementation notes,** since this sub appreciates them: the MCP server is a separate service from the product, built on Hono and the \\`@modelcontextprotocol/sdk\\`, using the web-standard Streamable HTTP transport. It's a deliberately thin gateway: stateless per request, no database of its own, and every tool call delegated to the platform's public API. That API is the same one you can hit directly with an API token minted in the app, so anything the MCP tools do, you can also script yourself.\n\nThat split has paid off in three ways. The MCP SDK moves fast, and I can ship protocol updates without redeploying the product. An agent hammering tools is isolated from the app serving real users. And since the gateway has no session state, scaling it simply means running more replicas. There's also no second copy of the permission model to drift since all permission checks live in the main app's API, and the MCP layer just passes the user's token through.\n\nWhat people actually do with it:\n\n* Dump years of old campaign notes in and have the agent build the compendium, entities, relationships, and all\n* Post-session cleanup: \"find duplicates and merge them,\" \"create entities for anyone new in last night's transcript\"\n* Recall: \"find the scene where X betrayed Y\" without scrubbing hours of transcript\n* GM coaching from the transcripts (\"where did pacing drag?\")\n\nThe read+write combination allows your agent to maintain your realm.\n\nSetup docs: [https://realmsofshod.com/docs/integrations/mcp](https://realmsofshod.com/docs/integrations/mcp)\n\nWould love feedback, especially from anyone who's built MCP servers over permission-scoped multi-user data. Curious how others handle it.",
+      "is_original_content": false,
+      "link_flair_text": "showcase",
+      "permalink": "https://reddit.com/r/mcp/comments/1uozvr4/i_built_a_remote_mcp_server_that_gives_your_agent/",
+      "domain": "self.mcp",
+      "is_self": true,
+      "comments": []
+    },
+    {
+      "id": "1uokcud",
+      "title": "Build vs buy on MCP gateway/tool servers",
+      "subreddit": "mcp",
+      "url": "https://www.reddit.com/r/mcp/comments/1uokcud/build_vs_buy_on_mcp_gatewaytool_servers/",
+      "author": "DegreeSilent3402",
+      "created_utc": "2026-07-06 02:08:37",
+      "score": 6,
+      "num_comments": 14,
+      "upvote_ratio": 0.88,
+      "text": "Been going back and forth on this for weeks. We're a \\~5,000 person company and engineering wants to just build our own MCP gateway plus tool servers in house. They're confident on the actual tool logic. I'm way less confident about everything else: auth and token refresh across clients, rate limiting once real agent traffic hits it, etc etc\n\nI've seen enough custom integration projects turn into maintenance nightmares over the years that I'm skeptical going in, but I want to actually understand how manageable this is at scale rather than just assume the worst.\n\nIf you've run this in production, what were the biggest pain points and takeaways? Did you start with \"just build it\" and end up needing a gateway layer anyway? Anyone regret going custom, or regret buying a platform when you could've just built it yourselves?\n\nNot trying to get pitched, genuinely just want the scar tissue from people who've been through this. Thanks in advance.",
+      "is_original_content": false,
+      "link_flair_text": null,
+      "permalink": "https://reddit.com/r/mcp/comments/1uokcud/build_vs_buy_on_mcp_gatewaytool_servers/",
+      "domain": "self.mcp",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "ow0effh",
+          "author": "torresmateo",
+          "text": "Disclosure first: I work at Arcade, we sell a runtime in this space, so discount accordingly. Trying to give you my honest take and not a pitch.\n\nFirst of all, you're right: \"MCP servers\" (the tool logic your eng is confident about) and \"the runtime around them\" (auth, token lifecycle, rate limiting, audit, policy) are different projects. The servers are the easy part and you'll build them either way. \n\nYour specific fears are the right ones.\n\nAuth/token refresh: the OAuth flow works fine on day one and for a handful of users. The cost is that it never ends per-user vaulting + refresh/rotation, plus a permission surface that shifts every time someone joins, leaves, or changes roles. The two traps in-house builds fall into in my experience. 1) passing the user's full token into the LLM context (now prompt injection = credential theft), or using one shared service account (now you can't prove agent-vs-human in an audit). Per-user, least-privilege, resolved-at-call-time auth is the actual hard path. If you're building this in-house, make sure to get this right because refactoring auth is... not a happy experience.\n\nRate limiting: agents fan out far more calls than a UI, so you need real backoff/retry/failover. And once actions run long they exceed LLM timeouts, so you're suddenly building async queues, polling, and dead-letter handling you never scoped for. This is harness specific in many cases, so the MCP runtime has little to offer in that regard, but at the very least you should be able to tune the timeouts for tool calls etc.\n\nScope creep: This is a very common pattern. Teams start with \"just an internal MCP server\", but as things get adopted and features are requested, you're likely to feel the tech debt pile up early (at around the third integration to a 3rd party service I'd say from experience)\n\nTo be fair, building is the right call if you're single-user, if agent infra IS your product, or if you own every API with zero third-party SaaS. A 5k-person shop is usually none of those. Also, people who regret buying usually picked a tool that made them re-author their access policies instead of mapping to their existing IdP, so that's the thing to test in any eval.\n\nThere's much more pain points for a large team around policy enforcement and governance, but those are so diverse that I can't give a good \"general\" representative pain point. If you're shopping for an MCP runtime though, make sure they have a story for governance, auditability, and policy enforcement.\n\nLonger writeup here if it helps: https://www.arcade.dev/blog/mcp-runtime-build-vs-buy/. Happy to get specific on your setup.",
+          "score": 2,
+          "created_utc": "2026-07-07 02:45:40",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "ovt3fl1",
+          "author": "WorldlyAd7946",
+          "text": "At 5k people, you have either the cost of the tool or the cost of the maintenance....\n\nSounds obvious but what I mean by that is, I personally think the custom built route will always be the option with the best ultimate end, however what the company needs to understand and do is not approach it as a cost saving excersise (not saying they are, but I often hear this as a contributing argument), but as an investment, and accept, particularly at that scale that it will need a dedicated member of staff or at least time allocation shared amongst  a couple of staff, following the build, for maintenance, support and ongoing development. It's a product in itself, even if just an internal one. \n\nIf people think it's a cheap option to do in-house, it isn't, but it will give you a tailored one, which I don't know what industry area you work in, but is certainly something I feel important and see the value in. If you are confident on building the tools, I'd consider it, it depends on your deployment.",
+          "score": 1,
+          "created_utc": "2026-07-06 02:51:34",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "ovt3ot3",
+          "author": "KELTONDREY",
+          "text": "What load are we talking about ?\nHow many tools do you have ?\nHow many tool calls are you getting ?",
+          "score": 1,
+          "created_utc": "2026-07-06 02:53:01",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "ovtvob9",
+          "author": "Extra_Taro_6870",
+          "text": "on basics mcp gateway is nothing more than api gateway. l7 load balancing, authentication, oidc support, rate limiting, monitoring etc. you can pick any api gateway for that purpose, paid or free. In any case a team required to maintain and make it platform. All cost money. There is no cost free solution.",
+          "score": 1,
+          "created_utc": "2026-07-06 06:03:54",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "ovuxyie",
+          "author": "EbbCommon9300",
+          "text": "Just a shill here but check out assury.ai before you decide to build. We were the first to market with governance controls and now we give you full observability, hooks, shadow agents, live drift, credential starvation, SSO etc.",
+          "score": 1,
+          "created_utc": "2026-07-06 11:20:53",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "ovtr24l",
+          "author": "General-Jaguar-8164",
+          "text": "Did you consider litellm?",
+          "score": 0,
+          "created_utc": "2026-07-06 05:26:44",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "ovufn1u",
+          "author": "Future_AGI",
+          "text": "The tool logic is the easy 20%. The auth, token-refresh, rate-limit, and observability scaffolding around it is where the multi-year maintenance lives, and that part is the same whether your tools are custom or not. What's worked for teams I've seen: build your own tool servers but put an existing gateway in front for the boring cross-cutting stuff instead of hand-rolling it. There are OSS OpenAI-compatible gateways with MCP support you can self-host and that gets you virtual keys, routing, and rate limiting without buying a black box or building it twice.",
+          "score": 0,
+          "created_utc": "2026-07-06 08:54:35",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "ovulyzu",
+          "author": "maguyva-ai",
+          "text": "tool logic is the easy 20% here. auth, token refresh, rate limiting once real agent traffic hits it - that's the part that eats teams alive. worth prototyping the ugly parts before committing either way",
+          "score": 0,
+          "created_utc": "2026-07-06 09:49:37",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
       "id": "1uq1sfl",
       "title": "My Claude Code and Codex agents kept needing to send each other files, so I built them an inbox - open source MCP server, one Go binary",
       "subreddit": "mcp",
       "url": "https://www.reddit.com/r/mcp/comments/1uq1sfl/my_claude_code_and_codex_agents_kept_needing_to/",
       "author": "Fit_Violinist_2985",
       "created_utc": "2026-07-07 17:26:23",
-      "score": 7,
+      "score": 6,
       "num_comments": 4,
-      "upvote_ratio": 1.0,
+      "upvote_ratio": 0.88,
       "text": "[https://github.com/shehryarsaroya/agenttransfer](https://github.com/shehryarsaroya/agenttransfer)  \n  \nThe problem: agents on different machines (and different runtimes - claude code on my laptop, codex on the desktop) constantly need to hand each other build outputs and datasets. Base64-through-the-context-window corrupts somewhere in the hundreds of KB and is dead long before 2 GB - the bytes shouldn't go anywhere near the model.  \n  \nSo, an MCP server where every agent gets an email address, a folder, and an inbox. The local bridge (agenttransfer mcp) streams uploads and downloads straight to and from disk - the tool result is just the link, size, and hash, so a 5 GB handoff costs the context window nothing. File tools: whoami, list\\_files, upload\\_file, send\\_file, download\\_file, check\\_inbox (long-polls), read\\_message, share\\_file, create\\_upload\\_request, get\\_receipts. Coordination tools ride the same bridge: find\\_agents, set\\_card, create\\_space, post\\_to\\_space, read\\_space and friends, so a fleet can discover peers by capability and work in shared spaces without leaving MCP.  \n  \nsend\\_file delivers instantly to agents on the same instance and as ordinary email to everyone else, with the file riding an expiring sha256-verified share link. Push delivery exists too: register a webhook and get a small HMAC-signed POST when something arrives (Standard Webhooks, SSRF-guarded). Every action lands in a signed receipt chain. One static Go binary, MIT, self host it or use the hosted instance (open signup, agents register themselves). There's also a hosted streamable-HTTP endpoint for runtimes that only speak remote MCP - it carries the core file tools and caps inline content at 1 MiB, so the local bridge is what moves the big stuff.  \n  \nKnown gaps: uploads aren't resumable yet (downloads are), discovery/spaces aren't on the hosted HTTP endpoint (bridge/CLI/REST only), no encryption at rest (client-side --encrypt/--seal exists for sends).  \n  \nQuestion for people building MCP servers: how are you handling big binary payloads? The 1 MiB inline cap on the remote endpoint felt like the honest choice vs pretending base64 scales - curious what others do.",
       "is_original_content": false,
       "link_flair_text": null,
@@ -1865,34 +1834,6 @@
           "text": "Love the focus on pointers and hashes. This is how you move MCP from hackathon demo territory into a real production surface. Moving bytes out of the context window is critical for reliability since base64 doesn't scale for real world workloads. \n\n\n\nAt [Arcade.dev](http://Arcade.dev) we've seen that treating the protocol as a control plane is the only way to get multi-agent coordination to actually work at scale.",
           "score": 1,
           "created_utc": "2026-07-08 23:58:42",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
-      "id": "1uqhtke",
-      "title": "cocoon sandbox: microvm sandboxes exposed as MCP tools",
-      "subreddit": "mcp",
-      "url": "https://www.reddit.com/r/mcp/comments/1uqhtke/cocoon_sandbox_microvm_sandboxes_exposed_as_mcp/",
-      "author": "Side_Comprehensive",
-      "created_utc": "2026-07-08 04:02:27",
-      "score": 6,
-      "num_comments": 1,
-      "upvote_ratio": 0.81,
-      "text": "i'm working on cocoon sandbox and wanted to share the mcp side.\n\nsandbox-mcp is a stdio MCP server that lets clients create microvm sandboxes, run commands, move files, keep sessions, checkpoint, branch checkpoints, hibernate, fork, and release sandboxes.\n\nthe actual sandbox is a linux microvm. net=none uses firecracker with no nic, only vsock. net=egress uses cloud hypervisor + cni when outbound network is needed.\n\nwhy i built it this way: coding agents need real machines, but the sandbox should be cheap enough to create per task. warm claims are sub-ms, golden snapshot clones are tens of ms.\n\nrepo: https://github.com/cocoonstack/sandbox\nmcp docs: https://cocoonstack.github.io/sandbox/mcp.html\n\ncurious if mcp folks prefer this as one big sandbox server, or split tools for exec/files/checkpoints separately.",
-      "is_original_content": false,
-      "link_flair_text": null,
-      "permalink": "https://reddit.com/r/mcp/comments/1uqhtke/cocoon_sandbox_microvm_sandboxes_exposed_as_mcp/",
-      "domain": "self.mcp",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "ow8xga1",
-          "author": "ImportantPurple8178",
-          "text": "split. three reasons:\n\n**permission scoping** — you can grant exec but not checkpoint. one monolithic tool makes that impossible. agent gets either everything or nothing.\n\n**tool selection clarity** — one tool one verb. the model's selection is cleaner when each tool maps to a single action. a big server with 8 verbs means the model has to pick not just \"sandbox\" but also reason about which operation inside the same call.\n\n**failure attribution** — when something goes wrong you know exactly which tool the agent misused.\n\nexception: if exec + file transfer always happen together in your most common workflow, expose a compound convenience tool that wraps both — but keep the primitives available separately.",
-          "score": 1,
-          "created_utc": "2026-07-08 07:55:11",
           "is_submitter": false,
           "replies": []
         }
