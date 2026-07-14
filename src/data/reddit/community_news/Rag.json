@@ -1,11 +1,11 @@
 {
   "metadata": {
-    "last_updated": "2026-07-13 11:29:57",
+    "last_updated": "2026-07-14 03:29:56",
     "time_filter": "week",
     "subreddit": "Rag",
     "total_items": 20,
-    "total_comments": 99,
-    "file_size_bytes": 139421
+    "total_comments": 77,
+    "file_size_bytes": 118547
   },
   "items": [
     {
@@ -48,7 +48,7 @@
           "id": "owfxm0d",
           "author": "KitchenAmoeba4438",
           "text": "Most of your instinct is correct. The \"chunk → embed → top-k → LLM\" loop is the part that falls over, and nearly every fix on your list is a real fix. Where I actually saw improvements when I implemented:\n\nRetrieval isn't a vector store. Pure vector recall misses product codes, error codes, doc numbers, system names, the stuff people actually search for. Fuse vector + BM25 + a typed graph and rerank the top-k with a cross-encoder. That one change beats any amount of chunking cleverness.\n\nStop chunking documents into blind windows. Keep the original documented stored. Extract that into typed claims and resolved entities first, keep the heading/section structure, embed that and keep it pointed at the original document it was derived from. The payoff isn't just recall, a wrong answer is now traceable to a specific claim instead of a 512-token blob, which kills most of your \"debugging is hard\" problem.\n\nStaleness and contradictions have to be a real job, not something you hope a reindex fixes. If two claims share a subject+attribute but disagree on the value, that's a flag, not a coin toss at generation time.\n\nPermissions go in the retrieval filter, before recall. Anything you enforce in the prompt leaks.\n\nBuild the eval set before the retriever. BEIR-style, in CI, or you're flying blind on every change you make.\n\nFlat out, that's what I've been building, it's called aimee. Aimee-kb is a Hybrid vector-graph retriever (Gemma4 or custom embeddings + BM25 + a typed knowledge/PageRank graph, fused by reciprocal-rank fusion, cross-encoder rerank on top), with a background \"curator\" that extracts docs into typed claims and entities and self-joins them to catch contradictions. Runs on-prem, single embedder per deployment, Chinese and English both fine since the embedder is multilingual, retrieval quality gated by BEIR in CI.\n\nWhat it is not: a turnkey product with an RBAC admin console. It's the engine. ACL, versioning, audit logs are metadata filtering and plumbing you wire into your own identity system. The retrieval core is the hard part, and that's the part it solves.\n\nIf I rebuilt from scratch tomorrow: start from claims and a graph, not chunks, and write the eval set first. Everything else is downstream of those two decisions. Vectors do come in, but later, and must be a fused-hybrid approach with that graph. Don't just chunk and vector, it doesn't get you to where your end goal is.",
-          "score": 8,
+          "score": 9,
           "created_utc": "2026-07-09 06:37:03",
           "is_submitter": false,
           "replies": [
@@ -56,7 +56,7 @@
               "id": "owjipkn",
               "author": "jrochkind",
               "text": "Whyyyy do LLMs want to say weird things like\n\n> which kills most of your \"debugging is hard\" problem.\n\nInstead of, say, \"which makes debugging a lot easier\".",
-              "score": 3,
+              "score": 5,
               "created_utc": "2026-07-09 18:22:47",
               "is_submitter": false,
               "replies": [
@@ -83,7 +83,7 @@
                   "id": "owg16nx",
                   "author": "KitchenAmoeba4438",
                   "text": "1. Claim schema. Keep the core tiny: subject / attribute / value, a confidence score, and a pointer back to the exact place in the original document it came from (file, heading path, line range). Validity and version don't go on the claim, they live on the source doc and get inherited. Every field you add to the extraction schema costs you accuracy, because you're asking the model to produce things it can't actually see in the text. Subject/attribute/value is structured enough to catch contradictions and loose enough that a 4B model gets it right most of the time.\n\n2. Bad extraction from messy docs. Two things. Parsing is a separate stage that comes first, and for scans and Excel it's most of the battle. If the parser hands you clean text with structure intact (headings, table cells as rows), extraction is easy. If it hands you garbage, no LLM saves you. Second, extraction runs in the background and is cheap to rerun, so I don't try to get it perfect on the first pass. In fact, I do something that seems to be heretical to this community: I re-run synthesis passes whenever there is no other load on the synthesis LLM. Every claim has a confidence and a source pointer, so a bad one is visible and reversible instead of baked in. Make the extractor return JSON against a schema so you're not parsing model prose with regex. For tables, pull claims row by row, don't flatten the whole thing into a paragraph.\n\n3. Graph nodes and edges. Start with entity → relation → entity, plus claim and doc-section, and let systems, processes and departments show up as entities on their own rather than designing them in advance. The edge property that actually pays off is temporal validity (valid\\_from / valid\\_until). That's how you answer \"what was true as of date X\" instead of blending every version together. PageRank over the graph is what tells you which node is authoritative when three docs mention the same system. I wouldn't model permissions as edges. Permission is a filter, not knowledge (see 7).\n\n4. Conflicts. Don't block, and don't silently pick a winner. Detect them structurally (same subject and attribute, different value, write a contradicts link), then resolve by metadata at answer time: newest effective date and highest-authority doc wins. If they're genuinely tied, show both with citations and say they conflict. The point is that the contradiction becomes a piece of data, so it turns up in eval and in the audit log instead of being decided at random inside the model.\n\n5. Eval set size. Less than you'd guess. 50 to 100 real queries with known-good answers already catches regressions. The mistake is generating the whole set with an LLM and trusting it, because then you're measuring whether your retriever agrees with the generator, not whether it's correct. Create your core by hand, and for your extended data, let the LLM draft, but review the relevance labels by hand. And pull the queries from real user logs, not from your head. The exact-term ones (product codes, error codes) are exactly what you'd never think to write.\n\n6. Chinese and English. One multilingual model for everything. A strong multilingual embedder (Aimee supports any embedder with <= 4k dims) puts both languages in the same space, so an English query hits a Chinese doc and the other way round, which is what you want in a mixed KB. Two separate pipelines gives you two corpora that can't see each other. The BM25 half of hybrid search covers per-language exact matching; the vector half stays unified.\n\n7. ACL ordering. Filter before recall, as a predicate on the candidate set, not retrieve-then-filter. Retrieve-then-filter works until someone with narrow permissions asks a question where the whole top-k is documents they can't see. Then you either return nothing after reranking or you've leaked the titles and the fact those docs exist. Put the ACL in the same WHERE clause as the vector, BM25 and graph query so forbidden docs never enter the pool. Harder to keep fast, but it's the only version that doesn't leak.\n\nYou've got the model right: structured claims, a temporal typed graph, hybrid search, ACL in the retrieval layer, eval from the start. The chunks-in-a-vector-DB setup is the tutorial. This is the thing that survives contact with real users.",
-                  "score": 3,
+                  "score": 2,
                   "created_utc": "2026-07-09 07:05:16",
                   "is_submitter": false,
                   "replies": []
@@ -229,9 +229,9 @@
       "url": "https://www.reddit.com/r/Rag/comments/1usojml/what_does_production_rag_looks_like/",
       "author": "syed_kaif777",
       "created_utc": "2026-07-10 14:00:42",
-      "score": 21,
+      "score": 25,
       "num_comments": 15,
-      "upvote_ratio": 0.94,
+      "upvote_ratio": 1.0,
       "text": "Hey chat,\nLet's say I'm a building a RAG project,\nI have included the features :\n\nHybrid search — BM25 + vector search merged with Reciprocal Rank Fusion,\nCohere reranking, HyDE query expansion, Persistent index, Incremental indexing, Source citations, No hallucination policy.\n\nWhat should I include more to make the RAG production ready? And get ahead of people who are building \"traditional RAG\" and calling it capstone Project.\n\n",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -281,7 +281,7 @@
           "id": "ox36p2n",
           "author": "Mameiro",
           "text": "Honestly, at this point I’d stop adding retrieval features and start adding failure handling. Production RAG is less about having HyDE + reranking + hybrid search and more about:\n\n\n\n1. can you tell when retrieval failed?\n\n2. can you reproduce a bad answer?\n\n3. can you trace which chunks were used?\n\n4. can you roll back a bad index update?\n\n5.can users only retrieve what they’re allowed to see?\n\n6. what happens when the source data changes?\n\n\n\nA lot of “production RAG” is basically observability, evals, permissions, and boring data plumbing. The fancy retrieval stack gets you a demo. Knowing why it failed at 2am gets you production.",
-          "score": 3,
+          "score": 5,
           "created_utc": "2026-07-12 14:20:54",
           "is_submitter": false,
           "replies": [
@@ -380,9 +380,9 @@
       "url": "https://www.reddit.com/r/Rag/comments/1uuhp3e/kreuzberg_document_extraction_for_rag_is_being/",
       "author": "Goldziher",
       "created_utc": "2026-07-12 14:56:20",
-      "score": 21,
+      "score": 22,
       "num_comments": 2,
-      "upvote_ratio": 0.96,
+      "upvote_ratio": 0.91,
       "text": "Hi all,\n\nI'm the author of Kreuzberg. The next version of Kreuzberg will be released as Xberg - why? Well, we discovered that the name is not easy to pronounce or understand for people who don't have the German context, and this wasn't working well. Xberg is a common name for Kreuzberg in Berlin, and it has the advantage of being shorter and easier - so here we go.\n\nAnyhow, this brings me to the point of the post. Since renaming a repo is a complex business, and we had to rename the repo to preserve the stars - but we now need to overwrite tags, it becomes pretty messy. As a result, we decided to go for an LTS version - published from a different repo: https://github.com/kreuzberg-dev/kreuzberg-lts. LTS in this context means that we will continue to do bug fixes and security updates until the end of this year, but no newer feature work.\n\nWe will announce Xberg v1.0.0 when it's officially published (it's still in RC). If you want to test it now - you can install the pre-release (available on pypi under xberg). The new repo is here: https://github.com/xberg-io/xberg",
       "is_original_content": false,
       "link_flair_text": "Showcase",
@@ -417,9 +417,9 @@
       "url": "https://www.reddit.com/r/Rag/comments/1usfkpd/enterprise_vector_dbs/",
       "author": "Pure-Hawk-6165",
       "created_utc": "2026-07-10 06:30:06",
-      "score": 20,
+      "score": 21,
       "num_comments": 19,
-      "upvote_ratio": 0.89,
+      "upvote_ratio": 0.9,
       "text": "Hi everyone,\n\nQdrant and ChromaDB are excellent open-source vector databases, but I’m curious about what organizations use in enterprise production environments.\n\nWhat are the best enterprise-grade alternatives for large-scale AI/RAG applications? I’m interested in solutions that offer high availability, scalability, strong security, managed services, and proven production reliability.\n\nIf you’ve used or evaluated options like Pinecone, Weaviate, Milvus/Zilliz, Azure AI Search, Amazon OpenSearch, Elasticsearch, or others, I’d love to hear your experience. What made you choose them over Qdrant or ChromaDB?\n\nLooking forward to your recommendations and real-world insights!",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -431,7 +431,7 @@
           "id": "owo8xb8",
           "author": "PiaRedDragon",
           "text": "We use Paddock(baa.ai), it is super efficient, fully on prem, scales to multi-millions of documents.\n\nThe reason we went with them is not on your list.  The dirty secret of RAG is that similarity search fails when you have to many documents, because you end up with 1000s of documents that have a high similarity score.  Paddock allows you to shard based on entities, such as topics, or people, or customers, or basically anything you want.\n\nSo if a customer comes to you and says delete my data, it is a single shard that gets deleted and job done.  Or if you need that only certain people or groups of people can access the data, you apply the permission on a per shard basis.\n\nThey even allow temporal sharding, so all interactions with a customer in a day, week, month etc etc.\n\nWe tried everything else, but nothing could meet the requirements of our law firm.",
-          "score": 10,
+          "score": 11,
           "created_utc": "2026-07-10 10:47:31",
           "is_submitter": false,
           "replies": [
@@ -576,7 +576,7 @@
       "url": "https://www.reddit.com/r/Rag/comments/1utiblp/cdrag_rag_with_llmguided_document_retrieval/",
       "author": "Much_Pie_274",
       "created_utc": "2026-07-11 12:04:46",
-      "score": 18,
+      "score": 19,
       "num_comments": 4,
       "upvote_ratio": 1.0,
       "text": "Hi all,\n\nI developed an addition on a CRAG (Clustered RAG) framework that uses LLM-guided cluster-aware retrieval. Standard RAG retrieves the top-K most similar documents from the entire corpus using cosine similarity. While effective, this approach is blind to the semantic structure of the document collection and may under-retrieve documents that are relevant at a higher level of abstraction.\n\n**CDRAG (Clustered Dynamic RAG)** addresses this with a two-stage retrieval process:\n\n1. Pre-cluster all (embedded) documents into semantically coherent groups\n2. Extract LLM-generated keywords per cluster to summarise content\n3. At query time, route the query through an LLM that selects relevant clusters and allocates a document budget across them\n4. Perform cosine similarity retrieval within those clusters only\n\nThis allows the retrieval budget to be distributed intelligently across the corpus rather than spread blindly over all documents.\n\nEvaluated on 100 legal questions from the legal RAG bench dataset, scored by an LLM judge:\n\n* **Faithfulness**: +12% over standard RAG\n* **Overall quality**: +8%\n* Outperforms on 5/6 metrics\n\nCode and full writeup available on GitHub. Interested to hear whether others have explored similar cluster-routing approaches.\n\n[https://github.com/BartAmin/Clustered-Dynamic-RAG](https://github.com/BartAmin/Clustered-Dynamic-RAG)",
@@ -654,308 +654,95 @@
       ]
     },
     {
-      "id": "1up6cnx",
-      "title": "Is RAG still relevant in 2026?",
+      "id": "1uvi3bf",
+      "title": "What's one RAG improvement that mattered far more than you expected?",
       "subreddit": "Rag",
-      "url": "https://www.reddit.com/r/Rag/comments/1up6cnx/is_rag_still_relevant_in_2026/",
-      "author": "Crazy-Economist-3091",
-      "created_utc": "2026-07-06 18:45:54",
-      "score": 14,
-      "num_comments": 34,
-      "upvote_ratio": 0.67,
-      "text": "As the title suggests , is RAG still valuable in 2026 ? Is it worth digging in for research ? I heared a couple of critics as modern LLMs got too powerful to be helped with RAG , What do you think?",
+      "url": "https://www.reddit.com/r/Rag/comments/1uvi3bf/whats_one_rag_improvement_that_mattered_far_more/",
+      "author": "recro69",
+      "created_utc": "2026-07-13 17:26:53",
+      "score": 15,
+      "num_comments": 9,
+      "upvote_ratio": 1.0,
+      "text": "When I started working on RAG I thought changing models would make the difference.\n\n\n\nThat wasn't what I found.\n\n\n\nSome of the improvements came from really simple changes. For example better chunking, adding a reranker and building an evaluation set with user questions made a big impact.\n\n\n\nIt made me curious, about what other teams discovered after building and deploying RAG systems.\n\n\n\nWhat is one change that had a bigger impact than you thought it would?\n\n\n\nIt could be related to retrieval, indexing, chunking, evaluation, prompting, caching, GraphRAG or something else entirely.",
       "is_original_content": false,
       "link_flair_text": "Discussion",
-      "permalink": "https://reddit.com/r/Rag/comments/1up6cnx/is_rag_still_relevant_in_2026/",
+      "permalink": "https://reddit.com/r/Rag/comments/1uvi3bf/whats_one_rag_improvement_that_mattered_far_more/",
       "domain": "self.Rag",
       "is_self": true,
       "comments": [
         {
-          "id": "ovxly4f",
-          "author": "gulensah",
-          "text": "What are the options, if you want to chat within 100 pages pdf ? Not trying to criticize, but curious about alternatives. ",
-          "score": 22,
-          "created_utc": "2026-07-06 18:51:25",
+          "id": "oxbevz9",
+          "author": "kinto_un_fly",
+          "text": "Can you explain what do mean by better chunking? What you have done for better chunking?",
+          "score": 5,
+          "created_utc": "2026-07-13 17:52:26",
           "is_submitter": false,
           "replies": [
             {
-              "id": "ovxy6sb",
-              "author": "OnyxProyectoUno",
-              "text": "People who don't understand the problem space chasing trends on solutions to problems they don't understand.\n\nX is dead etc",
-              "score": 20,
-              "created_utc": "2026-07-06 19:44:44",
-              "is_submitter": false,
-              "replies": [
-                {
-                  "id": "owmopwa",
-                  "author": "DorkyMcDorky",
-                  "text": "Remember the \"If you use \\_\\_\\_, you're doing it wrong\" fad?\n\nIt'll never go away.  If the poster is young, we should be easy.  We've all been there.",
-                  "score": 2,
-                  "created_utc": "2026-07-10 03:40:14",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            },
-            {
-              "id": "ovypxie",
-              "author": "bn-batman_40",
-              "text": "Yup. No context window can fit hundreds of pages. We need RAG and it can’t be dead.",
-              "score": 10,
-              "created_utc": "2026-07-06 21:43:14",
-              "is_submitter": false,
-              "replies": []
-            },
-            {
-              "id": "ow4y2yu",
-              "author": "pppeer",
-              "text": "Indeed. Let alone that typical industry use case is not one document but hundreds or thousands of them. ",
-              "score": 2,
-              "created_utc": "2026-07-07 18:34:10",
-              "is_submitter": false,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "ovxqkt5",
-          "author": "ryanchants",
-          "text": "Let's assume that the latest LLMs make RAG irrelevant, which I don't agree with, but we'll take the extreme stance.\n\nLatest LLMs are expensive and slow. Much like compute, we're not squeezing out every value out of previous generations and just using more capability to hide bloat. Improve the grounding of what you're feeding into the LLMs, and you can get better results on older models. Take the higher-level reasoning models away, and you can get some really fast, cheap responses. There places where I'd rather query cheaper model 5x and get more targeted responses faster than letting latest ones bloviate and burn tokens.",
-          "score": 10,
-          "created_utc": "2026-07-06 19:11:26",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ovxvbw0",
-          "author": "pdlug",
-          "text": "Well, retrieval has been an area of research and systems since the 1940s. I don't see anything about LLMs that makes this less relevant. I'd bet the opposite. Bigger context window still has to be filled with the right knowledge, and contradictions within it still have to be resolved. Capacity doesn't solve selection. And physics doesn't go away: more tokens means more data transfer, more prefill compute, and higher latency and cost on every single query. Whole classes of optimization problems get more relevant by the day, not less.",
-          "score": 10,
-          "created_utc": "2026-07-06 19:32:09",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ow0t8xu",
-          "author": "Mkboii",
-          "text": "1. The models don't know anything recent.\n2. The models hallucinate still\n3. The model companies use search in their chat experiences all the time to give better responses, which is RAG\n4. The model companies don't let you fine-tune their model anymore, which means anyone who wants frontier performance but on proprietary data has to either host a trillion param llm themselves or use RAG.\n5. Context lengths have gone up but enterprise data doesn't fit in it.\n6. Claude code and codex work on RAG they read files, grep, use ast to retrieve and augment their code generations.\n\n\nWe are using more RAG than ever.",
-          "score": 8,
-          "created_utc": "2026-07-07 04:16:43",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "owxh2fc",
-              "author": "One_Catch_5154",
-              "text": "Just asking . Is fine tuning not allowed? ",
+              "id": "oxelry4",
+              "author": "dh119",
+              "text": "Necessary but easy to bloat token overlapping is a lever",
               "score": 1,
-              "created_utc": "2026-07-11 17:33:31",
-              "is_submitter": false,
-              "replies": [
-                {
-                  "id": "owxittr",
-                  "author": "Mkboii",
-                  "text": "OpenAI said fine-tuning isn't allowed on models starting gpt 5 series, i.e. reasoning models don't support it.\n\nAzure OpenAi allows it but it's invite only and you need to work with Microsoft to get it, so who knows how long that's gonna last.\n\nAnthropic doesn't allow it, amazon bedrock probably gives haiku fine-tuning, but sonnet and opus aren't available.\n\nGoogle allows it I guess, but their models are hardly frontier, and their 3.1 pro isn't supported still.",
-                  "score": 2,
-                  "created_utc": "2026-07-11 17:41:40",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "ovxwjvm",
-          "author": "BandiDragon",
-          "text": "Now RAG has switched to wiki LLM or knowledge bases accessible with grep tools.\n\nVector databases are still useful for cheaper/multilanguage or massive knowledge retrieval.",
-          "score": 7,
-          "created_utc": "2026-07-06 19:37:35",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "owiggep",
-              "author": "CosmicNavigator44",
-              "text": "Smart money is a hybrid setup of RAG and wiki LLM. Using a simple RAG setup with Wiki LLM. Data enrichment and meta data augmention is non negotiable, is an absolute must.",
-              "score": 2,
-              "created_utc": "2026-07-09 15:45:40",
+              "created_utc": "2026-07-14 03:17:30",
               "is_submitter": false,
               "replies": []
             }
           ]
         },
         {
-          "id": "ovxsflo",
+          "id": "oxbb8cu",
+          "author": "syed_kaif777",
+          "text": "i would definitely say that using evals helped me a lot, for understanding the RAG system more deeply.  ",
+          "score": 3,
+          "created_utc": "2026-07-13 17:37:24",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oxby2k0",
+          "author": "Dapper-Wolverine-200",
+          "text": "embedding didn't work for me due to inaccuracies, Only does FTS for now",
+          "score": 1,
+          "created_utc": "2026-07-13 19:13:03",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oxc80dy",
           "author": "First_Inspection_478",
-          "text": "Good bait",
-          "score": 8,
-          "created_utc": "2026-07-06 19:19:36",
+          "text": "Contextual retrieval",
+          "score": 1,
+          "created_utc": "2026-07-13 19:56:24",
           "is_submitter": false,
           "replies": []
         },
         {
-          "id": "ow1jn5c",
-          "author": "fustercluck6000",
-          "text": ">as modern LLMs got too powerful to be helped with RAG\n\nTell me you have no idea what you’re talking about without telling me you have no idea what you’re talking about lol (directed at people making this kind of argument btw, not you). \n\nIt's called retrieval-*augmented* generation for a reason, and I think a lot of people just want to have a hot take about AI without a basic understanding of how these models work. RAG and model performance aren't mutually exclusive--they're complements to each other (em dash intentional). RAG's just an umbrella term for different methods of connecting an LLM to external data via context. That includes Perplexity, Claude Code with the latest and greatest Claude Shythos...\n\n  \nWhen you insert 'real-world' information in the prompt to inform model responses, you're augmenting generation with retrieval. Think about copying and pasting an email into ChatGPT for it to draft a response. You're *manually* fishing a particular email out of your inbox, selecting *only* the relevant parts of the email chain, then inserting it in the context with prompting. A production RAG system isn't really too different, it just does it *automatically* at scale.",
-          "score": 4,
-          "created_utc": "2026-07-07 07:41:34",
+          "id": "oxcr2cx",
+          "author": "PiaRedDragon",
+          "text": "I was surprised that summarizing the chunks did not help nor did Atomic chunking.",
+          "score": 1,
+          "created_utc": "2026-07-13 21:20:23",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oxd8cey",
+          "author": "MarcusAurelius68",
+          "text": "For me, adding a graph database alongside the vector database. ",
+          "score": 1,
+          "created_utc": "2026-07-13 22:43:44",
           "is_submitter": false,
           "replies": [
             {
-              "id": "ow3xn1u",
-              "author": "0Greek0",
-              "text": "Nice answer, because it puts any injection of knowledge into the RAG bucket, which is what it is.  I think people think RAG is just the take whatever doc -> embed with ada -> store in vector db -> hyde search... that's why they think current LLMs (as in developed during this last 6-12 months) work without RAG. ",
-              "score": 3,
-              "created_utc": "2026-07-07 16:09:48",
+              "id": "oxelwy6",
+              "author": "dh119",
+              "text": "What’d you use for graph db?",
+              "score": 1,
+              "created_utc": "2026-07-14 03:18:22",
               "is_submitter": false,
               "replies": []
             }
           ]
-        },
-        {
-          "id": "ovxpwyw",
-          "author": "odrer-is-an-ilulsoin",
-          "text": "I'm admittedly poorly informed in this area, but I have wondered the same; however, more nuanced. Isn't Google's Notebook LM and features like Claude Co-work, doing RAG? Of course, this wouldn't satisfy a lot of people ( u/Icy_Regular7001 makes the point here) but wouldn't it satisfy the general population?  ",
-          "score": 2,
-          "created_utc": "2026-07-06 19:08:29",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "ovxrwq8",
-              "author": "[deleted]",
-              "text": "[removed]",
-              "score": 4,
-              "created_utc": "2026-07-06 19:17:17",
-              "is_submitter": false,
-              "replies": [
-                {
-                  "id": "ovxux2p",
-                  "author": "Willy988",
-                  "text": "Excellently put- emphasis on it gets absorbed and we just don’t think about it on a low level. ",
-                  "score": 2,
-                  "created_utc": "2026-07-06 19:30:20",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "ovxv176",
-          "author": "Particular-Hour-1400",
-          "text": "Nothing to do with modern LLMs being too powerful. It is more about the enterprise business and its proprietary, sometimes secret, way of doing business. Say you have a construction company and you have your own contracts, blueprint templates, bill of materials, local permit knowledge, etc then you build the RAGs that can leverage the 100+ year history of your company going forward. \n\nOr you are a law firm or health care provider using RAGs with vector databases and paddocks for keeping client information separated from each other because your regulated industry can be fined a LOT of money for leaking HIPAA, GDPR, etc data. Plus there are lifecycle to the data that have to be audited to be in compliance. You can easily do this with RAGs. \n\nRAGs will be relevant for a long time. Unless someone can come up with a better solution but until then...",
-          "score": 2,
-          "created_utc": "2026-07-06 19:30:51",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ovzqqlp",
-          "author": "Any_Risk_2900",
-          "text": "It is an architecture pattern.\nSo it is highly relevant in certain use-cases.\n",
-          "score": 2,
-          "created_utc": "2026-07-07 00:48:35",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ow1fp8s",
-          "author": "Extension_River_5970",
-          "text": "No, powerful LLMs that can reason, with larger context windows actually enable RAG further. We now have agentic RAG where LLMs can do some reasoning and valuation on the results rather than just pulling in top-k and leaving it at that. ",
-          "score": 2,
-          "created_utc": "2026-07-07 07:08:01",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ow1hi8o",
-          "author": "Glxblt76",
-          "text": "1. Many companies are interested in running LLMs locally\n2. Running LLMs locally, companies need to mind about the pressure on their own server infrastructure.\n3. Agentic search scaffolds exist but they are slower and more token expensive\n4. RAG nicely complements search scaffold by allowing a cheap screening mechanism.\n\nAt the end of the day, decision makers will test frontier LLMs, figure out the limits of expensive API usage / dependency on external providers / confidentiality concerns, ask how all this can be fixed cheaply, understand they can't do it themselves using frontier LLMs because it still requires to know your shit then maintain it, and then ask people who have experience in that domain (such as the typical user in this thread) to sort the mess.\n\nConclusion: I don't see a point where RAG is no longer relevant in at least part of the workflow. It will just become a more specialized component.",
-          "score": 2,
-          "created_utc": "2026-07-07 07:23:12",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ow1rwsv",
-          "author": "sotpak_",
-          "text": "It’s always relevant to know how tech works and there will be always a place for rag in the industry  \nBut I see the trend of moving from the rag to the skill db (you store data in the structured format when with rag you try to retrieve relevant information from chaos) ",
-          "score": 2,
-          "created_utc": "2026-07-07 08:53:14",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ow5wvn2",
-          "author": "Majesticnutz-",
-          "text": "It will definitely be relevant!\nThe question is often, what do you understand with RAG, each frontier model uses it, because they search e.g.vthe internet, this search is RAG as well!\nAnd if you want to use company proprietary data in general how can an LLM know that without RAG, it simply can't.",
-          "score": 2,
-          "created_utc": "2026-07-07 21:01:27",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "owh37d1",
-          "author": "ArgonTagar",
-          "text": "I think the fundamental problem here is 'Context Rot' (or the 'Lost in the middle' phenomenon). We always want to pack the most relevant context into the maximum token limit. That's why tools like Claude Code and other agentic harnesses use standard tools like ⁠grep⁠—the core concept is optimizing relevant context within a constrained window. Even if we eventually get a 1-trillion context window, as long as LLMs rely on standard Attention architectures, this rule will hold true. Too much noise dilutes the signal, a bottleneck that researchers like Jeff Dean have also pointed out.",
-          "score": 2,
-          "created_utc": "2026-07-09 11:54:53",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ow0wzra",
-          "author": "sreekanth850",
-          "text": "Rag is dead, search is dead. Lets grep. /s.",
-          "score": 2,
-          "created_utc": "2026-07-07 04:42:41",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ovy97ja",
-          "author": "Famous_Lime6643",
-          "text": "Great question - thought a lot about it myself.  I think vector RAG is one useful methodology among a basket of things that provide an agent with context.  Others include structured filesystems with informative naming conventions, as well as graph and relational DBs.  I think for relatively small corpuses containing relatively manageable document lengths (not hundreds of pages each) a modern tool-using agent can do pretty well with just a filesystem.  They are also really good at using databases, which can be normalized such that the agent finds the right doc and then reads that doc.  I do think that probably breaks down at scale and/or when docs can’t be simply put into a single category.  I think traditional vector RAG is still a great way to find things in large corpuses, large documents, or when documents contain tangential information that is outside primary classification.  It can also help jumpstart a graph DB traversal.  So…maybe not the only way of knowing for an agent…but still a useful one.",
-          "score": 1,
-          "created_utc": "2026-07-06 20:31:32",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ow84p8i",
-          "author": "kneeanderthul",
-          "text": "Yes LLMs are transformers of data \n\nBelieving that they’re good and storing and transforming is why folks keep having broken agents ",
-          "score": 1,
-          "created_utc": "2026-07-08 04:12:37",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ow87xbi",
-          "author": "Serious_Shake_9849",
-          "text": "what about  \"Privacy preserving of RAG\" would be good topic to do a project or ?\n\n  \n",
-          "score": 1,
-          "created_utc": "2026-07-08 04:34:56",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "owmohxi",
-          "author": "DorkyMcDorky",
-          "text": "Buzzword bingo alert.  Yes, search engines are important.  Yes, giving it to an LLM so it doesn't bullshit it's answer is also important.  Unless you have a billion bucks sitting around to train a model better than the frontiers, this is the way.\n\nStop reading javascript developer posts.  \"You're doing it wrong\" is so 2010.",
-          "score": 1,
-          "created_utc": "2026-07-10 03:38:50",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "owuogfi",
-          "author": "DawitSovm",
-          "text": "Bigger context windows solve **capacity**, not **selection**. The hard problem was never \"Can the model read more?\"it was \"Can we reliably give it the *right* information?\" That's why retrieval isn't going away. ",
-          "score": 1,
-          "created_utc": "2026-07-11 07:04:48",
-          "is_submitter": false,
-          "replies": []
         }
       ]
     },
@@ -966,9 +753,9 @@
       "url": "https://www.reddit.com/r/Rag/comments/1urlfx2/built_a_local_rag_app_that_answers_questions_from/",
       "author": "SilverConsistent9222",
       "created_utc": "2026-07-09 09:40:00",
-      "score": 13,
-      "num_comments": 2,
-      "upvote_ratio": 0.88,
+      "score": 10,
+      "num_comments": 3,
+      "upvote_ratio": 0.82,
       "text": "Been wanting to build this for a while, finally sat down and did it. It's a Flask app where you upload a PDF, it chunks and embeds it, and then you can ask questions and get answers pulled only from that document, not from the model's own training data.\n\nStack is pretty simple: Ollama for the chat model and the embedding model, ChromaDB as the vector store, Flask tying it together. Nothing exotic.\n\nHow it works, roughly:\n\n* PDF gets split into overlapping chunks so sentences don't get cut off between pieces\n* Each chunk gets turned into an embedding and stored in Chroma with PersistentClient, so it's saved on disk instead of disappearing every time you restart the app\n* When you ask something, the question also gets embedded, Chroma finds the closest matching chunks, and those get handed to the model as context\n* Prompt explicitly tells the model to only use that context and say it doesn't know if the answer isn't there, otherwise it'll just make something up from its own memory\n\nTested it by asking something not in the PDF and it correctly said it didn't know instead of guessing. Also tested with wifi off and it kept working, since the model, embeddings, and vector store all run locally with no external api calls in the loop.\n\nDidn't reach for a framework this time, wanted to see the moving parts directly, chunking, embedding, retrieval, prompt building, instead of having a library handle it. Not saying that's the better way to do it long term, just wanted to understand each step first before adding more on top.\n\nIf anyone's built something similar curious what vector db you went with and why, haven't compared Chroma against the others much.",
       "is_original_content": false,
       "link_flair_text": "Tutorial",
@@ -983,6 +770,15 @@
           "score": 4,
           "created_utc": "2026-07-09 09:40:20",
           "is_submitter": true,
+          "replies": []
+        },
+        {
+          "id": "oxbmdsi",
+          "author": "Chemical-Tree-1234",
+          "text": "Building it without a framework first is probably the best way to understand what’s actually happening.\n\nA useful next step would be testing retrieval quality rather than only whether it refuses unrelated questions. Try a small set of questions where you already know the correct source passage, then compare different chunk sizes, overlap and top-k values.\n\nMetadata filtering will also become important once you support more than one PDF.",
+          "score": 1,
+          "created_utc": "2026-07-13 18:23:30",
+          "is_submitter": false,
           "replies": []
         }
       ]
@@ -1044,15 +840,117 @@
       "comments": []
     },
     {
+      "id": "1uslexu",
+      "title": "Handling Real-Time Dynamic Data in LLM Chatbots?",
+      "subreddit": "Rag",
+      "url": "https://www.reddit.com/r/Rag/comments/1uslexu/handling_realtime_dynamic_data_in_llm_chatbots/",
+      "author": "Pure-Hawk-6165",
+      "created_utc": "2026-07-10 11:50:38",
+      "score": 8,
+      "num_comments": 11,
+      "upvote_ratio": 0.91,
+      "text": "I’m building a chatbot where the backend data is updated every 5 minutes via APIs. The dataset is quite large, so I can’t send it directly to the LLM in every request. Traditional RAG also doesn’t seem ideal since the knowledge changes every 5 minutes.\n\nHow would you architect this? Would you use a hybrid retrieval layer, SQL/vector search, caching, MCP, tool calling, query planning, or another approach? Looking for scalable enterprise-grade patterns for handling frequently changing data with LLMs. Any architecture suggestions or real-world implementations?",
+      "is_original_content": false,
+      "link_flair_text": "Discussion",
+      "permalink": "https://reddit.com/r/Rag/comments/1uslexu/handling_realtime_dynamic_data_in_llm_chatbots/",
+      "domain": "self.Rag",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "owoktne",
+          "author": "AsterionDB",
+          "text": "I'm sure the haters will be all over me for this but....I built a RAG server using the Oracle database. What you're looking to do would be simple for me. My content ingestion logic chunks and embeds each document as they arrive. No big deal.  \nEvery RAG request thusly retrieves the most current data based on ranking and the number of results.",
+          "score": 1,
+          "created_utc": "2026-07-10 12:02:28",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "owoowyo",
+          "author": "Badman_BobbyG",
+          "text": "MCP tools 100%. I assume this data is tabular/structured? If so that’s your index.",
+          "score": 1,
+          "created_utc": "2026-07-10 12:24:58",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "owou3cg",
+          "author": "Awesome_StaRRR",
+          "text": "Why not maintain a replica of the actual data, every 5 minutes, when the data arrives, you can update one db and then when write is completed, then you can replace this with that. Probably, this might require double to size, you are actually storing.\n\n  \nAlso what is the chatbot about? If it is general documents, have proper evalset. Then define the top k chunks required value. Again, everything depends on the usecase.",
+          "score": 1,
+          "created_utc": "2026-07-10 12:52:16",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "owq0el7",
+              "author": "Due_Midnight9580",
+              "text": "Instead of replica of whole db can't we perform operation in both realtime data (5min)  and db and combile the results?",
+              "score": 1,
+              "created_utc": "2026-07-10 16:02:12",
+              "is_submitter": false,
+              "replies": [
+                {
+                  "id": "owtpeyh",
+                  "author": "Awesome_StaRRR",
+                  "text": "Chances of inconsistency is higher, becoz of partial updates",
+                  "score": 1,
+                  "created_utc": "2026-07-11 02:48:49",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "owpwbi8",
+          "author": "iBornToWin",
+          "text": "Why cant you update the data independently and when llm asks, give it only the necessary data after querying ?",
+          "score": 1,
+          "created_utc": "2026-07-10 15:45:01",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "owubvy1",
+          "author": "Dry_Inspection_4583",
+          "text": "I would be genuinely interested in giving faultline a try, it's my own product, available open source.\n\nIt's quite cpu heavy to self host. But I will have the saas portion up, it's in the works.\n\nFaultline allows corrections, there's one other that allows them.\n\nOr, lazily, just delete the vector db at the start of the ingest script call via API. ",
+          "score": 1,
+          "created_utc": "2026-07-11 05:23:13",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "owupdpd",
+          "author": "hannune",
+          "text": "The fundamental problem is that your index freshness window needs to match your data change rate, which makes write-through indexing the right starting point: every API update that changes a document triggers an incremental re-embed and re-index of that document only, rather than a batch re-index of the full corpus. For the retrieval layer, pair that with a routing step that checks the update timestamp on each candidate chunk before reranking — if a chunk's indexed version is older than the last API pull cycle, the retrieval layer can flag it as stale and optionally re-fetch the live version before passing it to the LLM. SQL or a structured cache works better than vector search for anything with a well-defined schema and point-lookup access pattern (current price, current status), so the architecture that scales is usually a router that sends schema-driven queries to the structured store and semantic queries to the vector index. The five-minute window is actually generous enough for this to work cleanly — the hard cases are sub-second freshness requirements where you need streaming index updates, which is a different problem.",
+          "score": 1,
+          "created_utc": "2026-07-11 07:12:26",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "owuxk2v",
+          "author": "Odd-Literature-5302",
+          "text": "I'd probably keep the LLM stateless and let it fetch fresh data through tools instead of trying to keep everything in the context.",
+          "score": 1,
+          "created_utc": "2026-07-11 08:22:28",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
       "id": "1uq31iz",
       "title": "Are you using embedding LLM models at scale? What are the best practices you follow to optimize throughput ?",
       "subreddit": "Rag",
       "url": "https://www.reddit.com/r/Rag/comments/1uq31iz/are_you_using_embedding_llm_models_at_scale_what/",
       "author": "Rough_Practice7631",
       "created_utc": "2026-07-07 18:11:05",
-      "score": 8,
+      "score": 7,
       "num_comments": 6,
-      "upvote_ratio": 0.91,
+      "upvote_ratio": 1.0,
       "text": "By at scale, I mean at least 50k documents (e.g., 10-20 pages each) with relatively high frequency (say daily). Curious to know what empirical findings you have and what is the SOTA on this?",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -1125,9 +1023,9 @@
       "url": "https://www.reddit.com/r/Rag/comments/1uryeep/i_built_a_cli_tool_to_compile_messy_pdfswordexcel/",
       "author": "[deleted]",
       "created_utc": "2026-07-09 18:17:44",
-      "score": 8,
+      "score": 7,
       "num_comments": 4,
-      "upvote_ratio": 0.91,
+      "upvote_ratio": 0.9,
       "text": "Hi everyone,\n\nI was working on building a RAG pipeline and got frustrated with two common bottlenecks:\n\nFeeding giant documents into context windows is incredibly expensive and slow.\n\nStandard chunking tools split text randomly, completely losing the interconnected context of the document.\n\nI wanted a simple, dependency-free way to turn raw docs into something an LLM agent could traverse logically, without needing to spin up a heavy graph database.\n\nSo I wrote OmniOKF (Omni Open Knowledge Format compiler).\n\nWhat it does:\n\nConverts & Structures: It uses Microsoft's Python-native markitdown under the hood to parse .pdf, .docx, .xlsx, .pptx, .html, and .md files in memory (no complex binaries like Pandoc needed).\n\nSemantic Splitting: It breaks files down at header boundaries and uses Gemini Flash to refine and categorize them into small, atomic concept files (about 200-500 tokens each). This saves up to 75-95% in token costs per query because agents only load the exact nodes they need.\n\nAuto Cross-Linking: It automatically scans the generated files and links related topics using standard relative Markdown links (e.g., \\[SSL Config\\](../security/ssl-config.md)).\n\nMermaid Visualization: It outputs a master index.md containing a Mermaid flowchart mapping out the document relationships, which renders nicely on GitHub or Obsidian.\n\nCaching & Cost Saving: It computes MD5 hashes of your files so that subsequent runs are instant and don't cost any API tokens.\n\nOffline Mode: Includes a local heuristic classifier for sensitive data that you don't want going to cloud APIs.\n\nSetup and Try:\n\nIt has a guided interactive mode where you just drop in your file path:\n\ngit clone https://github.com/vishal-raaj-dnd/gemini-okf-compiler.git\n\ncd gemini-okf-compiler\n\npip install -r requirements.txt\n\n\\# Run the interactive CLI\n\npython main.py\n\nIt is completely open-source (MIT licensed). Check it out here: 👉 GitHub: [OKF compiler](https://github.com/vishal-raaj-dnd/gemini-okf-compiler)\n\nLet me know if you run into any issues, have feedback on the graph structure, or ideas for improvements!",
       "is_original_content": false,
       "link_flair_text": "Showcase",
@@ -1182,9 +1080,9 @@
       "url": "https://www.reddit.com/r/Rag/comments/1uuefjk/need_projects_for_learning/",
       "author": "kinto_un_fly",
       "created_utc": "2026-07-12 12:41:29",
-      "score": 8,
-      "num_comments": 5,
-      "upvote_ratio": 0.9,
+      "score": 7,
+      "num_comments": 7,
+      "upvote_ratio": 0.82,
       "text": "Hey. Hope yall doing great.\n\nI have started building projects and I am facing problems. My way of learning is look at others project, see how they have implemented things and then implement it from beginning with my own understanding. I dont like to use llm is my learning phase as I want understand deeply. So if you guys can share your RAG pipeline projects or resources so that I can learn from you guys. It would be great.",
       "is_original_content": false,
       "link_flair_text": "Tools & Resources",
@@ -1192,6 +1090,15 @@
       "domain": "self.Rag",
       "is_self": true,
       "comments": [
+        {
+          "id": "ox6ji1r",
+          "author": "Jeidoz",
+          "text": "It is not mine, but shared from friend of mine:\n\n- [RAG Systems: arXiv Paper Curator: A Learner-Focused Journey into Production RAG Systems](https://github.com/jamwithai/production-agentic-rag-course)\n- [VecS: MCP for Hybrid search in codebase](https://github.com/bytenokami/vecs)",
+          "score": 2,
+          "created_utc": "2026-07-13 00:15:26",
+          "is_submitter": false,
+          "replies": []
+        },
         {
           "id": "ox2rz4x",
           "author": "dh119",
@@ -1211,121 +1118,20 @@
           "replies": []
         },
         {
-          "id": "ox6ji1r",
-          "author": "Jeidoz",
-          "text": "It is not mine, but shared from friend of mine:\n\n- [RAG Systems: arXiv Paper Curator: A Learner-Focused Journey into Production RAG Systems](https://github.com/jamwithai/production-agentic-rag-course)\n- [VecS: MCP for Hybrid search in codebase](https://github.com/bytenokami/vecs)",
+          "id": "ox9asbb",
+          "author": "Personal-Pause-5538",
+          "text": "Honest undervalued method: virtually all tutorials for RAG leave out the graph level and do everything in flat blocks. Starting from building your own graph and then searching it gives a new perspective on the task. I chose HydraDB to build my graph as it represents entity connections, not vectors, although its documentation expects some familiarity with graph theory.",
           "score": 1,
-          "created_utc": "2026-07-13 00:15:26",
+          "created_utc": "2026-07-13 12:02:05",
           "is_submitter": false,
           "replies": []
         },
         {
-          "id": "ox75fse",
-          "author": "AIWithoutMath",
-          "text": "I’ve been working on an Adaptive GraphRAG project where I compare VectorRAG, GraphRAG, and HybridRAG pipelines. It covers ingestion, chunking, embeddings, retrieval, graph construction, reranking, and evaluation.\n\nI can share the repository with you. It may help you understand how an end-to-end RAG system is structured and then rebuild it using your own approach.\n\n[GitHub link](https://github.com/Britto1221/adaptive-graphrag)\n",
+          "id": "ox9kuvm",
+          "author": "According-Floor5177",
+          "text": "I would also suggest that you can take part in virtual hackathons that are around LLMs, RAG and VectorDB in general. You can have great projects in a very short span of time, and as you asked, look at good projects too.",
           "score": 1,
-          "created_utc": "2026-07-13 02:24:49",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
-      "id": "1up6e1p",
-      "title": "Agentic RAG is great until it silently breaks, how do you catch it?",
-      "subreddit": "Rag",
-      "url": "https://www.reddit.com/r/Rag/comments/1up6e1p/agentic_rag_is_great_until_it_silently_breaks_how/",
-      "author": "Illustrious-Second-7",
-      "created_utc": "2026-07-06 18:47:09",
-      "score": 7,
-      "num_comments": 9,
-      "upvote_ratio": 0.9,
-      "text": "We've been running a multi-step RAG pipeline in production for about 6 months, retrieval, reranking, LLM synthesis, output validation.\n\n\n\nA few weeks ago something in the retrieval step started returning slightly off-topic chunks. The LLM kept generating confident-sounding answers and we had no idea anything was wrong. Found out from a support ticket where a user said the information \"seemed outdated.\"\n\n\n\nTook us a while to trace it, a document update had shifted our embedding distribution just enough that top-k was pulling adjacent but wrong chunks. And our monitoring just didn't catch it. Unit tests run weekly not on every change, automated evals only flag regressions on failure modes you've already seen, and manual spot checks after deploys don't really scale past two engineers looking at a handful of outputs and calling it good.\n\n\n\nNothing there catches slow drift happening between runs.\n\n\n\nEven wired up PromptLayer to version and track the prompt outputs so I'd at least catch when answers shifted -- helped on the downstream side but it doesn't see the retrieval step, so it never told me the embeddings had moved. Still flying blind at the vector layer.\n\n\n\nWe still don't have a clean answer for this honestly. How are people getting per-request trace visibility into individual RAG chains, not dashboard aggregates, but what actually got retrieved for this specific query?",
-      "is_original_content": false,
-      "link_flair_text": "Discussion",
-      "permalink": "https://reddit.com/r/Rag/comments/1up6e1p/agentic_rag_is_great_until_it_silently_breaks_how/",
-      "domain": "self.Rag",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "ow09rh0",
-          "author": "marintkael",
-          "text": "The part that gets me here is that nothing in your stack was watching the retrieval layer itself. Latency, tokens, exceptions all stay green while relevance quietly rots, so the only surface that could catch it was a user ticket. That is the real gap, not the monitoring you had.\n\nThe three things you listed all key off failures you already know about. Weekly unit tests, evals for known regressions, spot checks after deploy. Slow drift is invisible to all of them because it is a new failure by definition.\n\nWhat tends to catch it is a small frozen retrieval set, maybe 50 to 100 queries with the doc ids you know should come back, run on every index or embedding change instead of weekly. When a document update shifts the distribution, that recall number moves before any user notices. You are measuring the retrieval step directly instead of inferring its health from the final answer, which is exactly where you got fooled, since a confident synthesis hides a bad top k.",
-          "score": 1,
-          "created_utc": "2026-07-07 02:21:27",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "ow4zgiz",
-              "author": "Illustrious-Second-7",
-              "text": "yeah wired up PromptLayer on the prompt + output side -- it doesn't see the retrieval step so it didn't catch the embedding shift, but at least i know now when the answer layer itself changes. still looking for something that gives actual trace visibility into what got retrieved if anyone's found it.",
-              "score": 1,
-              "created_utc": "2026-07-07 18:39:41",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "ow0o10j",
-          "author": "First_Ad5164",
-          "text": "Per request traces seem essential for this. You need to see the query retrieved chunks reranker scores document versions and final answer in one place.\n\nI would also monitor retrieval quality separately from answer quality. Changes in score distribution source diversity or document age can reveal drift before users notice bad answers.\n\nA small set of fixed probe queries can help too. Run them after every document or embedding update and compare both the retrieved chunks and the final response against a baseline.\n",
-          "score": 1,
-          "created_utc": "2026-07-07 03:42:29",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ow1mhxs",
-          "author": "Successful-Moose-377",
-          "text": "The frozen query set above covers the drift side. For the per-request part you asked about, log provenance with every answer: the chunk ids and scores that actually went into the prompt, stored next to the output. A ticket like your \"seemed outdated\" one takes minutes instead of a week, you open that request and see what the answer was built from.doesn't prevent the drift, but at least a wrong answer isn't a mystery anymore, you see which chunk fed it. And yeah, PromptLayer sits downstream of this   the logging has to happen at the retriever itself.",
-          "score": 1,
-          "created_utc": "2026-07-07 08:06:04",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ow1p4h2",
-          "author": "Future_AGI",
-          "text": "The slow-drift-between-runs case is the hardest one, because the answer still looks confident and every point-in-time check passes. We build open-source eval and observability tooling, the two things that moved the needle for us were scoring groundedness on every response in prod (does the answer actually trace to the retrieved chunks) instead of only on known failure modes, and watching the retrieval-score distribution over time so a shift shows up as drift before a user files a ticket. Continuous per-response eval plus a trace you can open on the bad ones is what catches the 'adjacent but wrong chunk' case your weekly tests miss.",
-          "score": 1,
-          "created_utc": "2026-07-07 08:28:53",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ow1vx77",
-          "author": "skelfresearch",
-          "text": "we got bitten by almost exactly this. a reindex quietly shifted which chunks landed in top-k, the answers stayed confident, and nobody noticed for ~2 weeks until a support ticket. two things that actually helped:\n\nlog the retrieved chunk ids and scores for every single request, not dashboard aggregates. when someone complains you pull that one query and see it grabbed the neighbors of the right doc. cheap to add and it turned \"seems outdated\" into a 5 minute diagnosis instead of a day of guessing.\n\nand a canary set. ~30 queries where we already know the exact chunk ids that should come back, run on every ingest/reindex and diffed against last-known-good. drift shows up there before a user does.\n\nevals-on-known-failures never caught it for us because the bad retrieval was a little different every time. the per-request trace was the only thing that gave us a real shot at seeing it early.",
-          "score": 1,
-          "created_utc": "2026-07-07 09:27:57",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ow3lhlo",
-          "author": "Ok_Gas7672",
-          "text": "I do a silent prayer when I see the word silently in a thread.  Nevertheless - because you asked.\n\nAgentic RAG doesn’t fix the core problem though. Every extra step creates another place where bad context can enter the system, and the downstream components happily treat it as truth.\n\nWe’ve seen this pattern over and over - Retrieval drifts. Reranker picks the “best” option from a flawed candidate set. LLM does its thing. Validator agrees because it’s checking the same context.\n\nBy the time a user notices, you’re doing what feels like QA of failures across 4-5 heavy moving components. Off which LLM is probabalistic. \n\nThe most worrisome part here is - when people use an LLM to validate another LLM’s output. You’re effectively doing probabilistic evaluation of probabilistic retrieval. The scores look good until an entire category of mistakes slips through because both models share the same blind spot.\n\nI also don’t buy the “modern LLMs are too powerful to need RAG” argument from the top thread. In enterprise environments the issue isn’t raw model capability. It’s that the source material changes. Policies change. SOPs change. Product docs change. A model’s pretraining doesn’t help much when the answer depends on a PDF updated last Tuesday.\n\nIn the customer conversations I’ve had, retrieval drift from document updates is way more common than model failures. Teams spend weeks tuning prompts and model settings, then discover two source documents disagreed with each other or an ingestion change altered retrieval behavior.\n\nWhat are you using as your ground truth today? Actual human-reviewed test sets, deterministic checks, something else? Curious.",
-          "score": 1,
-          "created_utc": "2026-07-07 15:17:42",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ow43c6s",
-          "author": "Away-Tax1875",
-          "text": "per-request trace visibility pretty much means adding a correlation ID at retrieval time and logging the actual chunk IDs, scores, and distances alongside the query, not just the final output. that honestly lets you diff what changed between runs. for the embedding drift specifically, tracking cosine distance distributions per document collection over time will surface the shift way before a user does. i actually modeled entity relationships in a similar pipeline using HydraDB to keep chunk provenance queryable as a graph, though it adds some schema overhead you'd need to justify against your current stack tbh.\n",
-          "score": 1,
-          "created_utc": "2026-07-07 16:33:38",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "owcwlkm",
-          "author": "Odd_Huckleberry4363",
-          "text": "The trace answers in the comments are right - but I'd also add a class of break they don't cover: on a production RAG assistant I work on (dealer-facing, over vehicle service manuals), most of our silent breaks weren't retrieval math. They were deploy drift.  \n  \nSome war stories: a schema publish silently skipped one table in staging. A prompt seeder silently no-op'd about 19 templates, even after a restart. The deployed index was missing fields that local and dev had - so every local test ran green and blind. None of these threw an error; all of them read as \"answers got vaguer.\" What catches them now is a parity check that diffs schema, prompt content hashes, and index field coverage between environments - and the release isn't declared done until it exits clean. When output still looks confident but worse, first verify prod is running the config you think it is.  \n  \nThe other half is a replay suite tiered by cost so it actually gets run: real user conversations replayed through the pipeline with per-turn must-contain / must-not-contain assertions. A 5-scenario smoke on every commit, one canary per capability category before a release, the full set at release only. Two rules made it durable: every regression earns its category a permanent canary, and the flakiest multi-turn scenario gets run three times whenever retrieval or dialog state changes - nondeterministic breaks don't show up in a single pass.",
-          "score": 1,
-          "created_utc": "2026-07-08 20:16:20",
+          "created_utc": "2026-07-13 12:58:40",
           "is_submitter": false,
           "replies": []
         }
@@ -1491,9 +1297,9 @@
       "url": "https://www.reddit.com/r/Rag/comments/1upmmuh/some_resources_to_learn_rag/",
       "author": "__001___",
       "created_utc": "2026-07-07 06:17:49",
-      "score": 6,
+      "score": 7,
       "num_comments": 3,
-      "upvote_ratio": 0.88,
+      "upvote_ratio": 0.9,
       "text": "Tell me some free resources to learn RAG",
       "is_original_content": false,
       "link_flair_text": "Tools & Resources",
@@ -1526,108 +1332,6 @@
           "score": 1,
           "created_utc": "2026-07-07 07:40:57",
           "is_submitter": true,
-          "replies": []
-        }
-      ]
-    },
-    {
-      "id": "1uslexu",
-      "title": "Handling Real-Time Dynamic Data in LLM Chatbots?",
-      "subreddit": "Rag",
-      "url": "https://www.reddit.com/r/Rag/comments/1uslexu/handling_realtime_dynamic_data_in_llm_chatbots/",
-      "author": "Pure-Hawk-6165",
-      "created_utc": "2026-07-10 11:50:38",
-      "score": 6,
-      "num_comments": 11,
-      "upvote_ratio": 0.88,
-      "text": "I’m building a chatbot where the backend data is updated every 5 minutes via APIs. The dataset is quite large, so I can’t send it directly to the LLM in every request. Traditional RAG also doesn’t seem ideal since the knowledge changes every 5 minutes.\n\nHow would you architect this? Would you use a hybrid retrieval layer, SQL/vector search, caching, MCP, tool calling, query planning, or another approach? Looking for scalable enterprise-grade patterns for handling frequently changing data with LLMs. Any architecture suggestions or real-world implementations?",
-      "is_original_content": false,
-      "link_flair_text": "Discussion",
-      "permalink": "https://reddit.com/r/Rag/comments/1uslexu/handling_realtime_dynamic_data_in_llm_chatbots/",
-      "domain": "self.Rag",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "owoktne",
-          "author": "AsterionDB",
-          "text": "I'm sure the haters will be all over me for this but....I built a RAG server using the Oracle database. What you're looking to do would be simple for me. My content ingestion logic chunks and embeds each document as they arrive. No big deal.  \nEvery RAG request thusly retrieves the most current data based on ranking and the number of results.",
-          "score": 1,
-          "created_utc": "2026-07-10 12:02:28",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "owoowyo",
-          "author": "Badman_BobbyG",
-          "text": "MCP tools 100%. I assume this data is tabular/structured? If so that’s your index.",
-          "score": 1,
-          "created_utc": "2026-07-10 12:24:58",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "owou3cg",
-          "author": "Awesome_StaRRR",
-          "text": "Why not maintain a replica of the actual data, every 5 minutes, when the data arrives, you can update one db and then when write is completed, then you can replace this with that. Probably, this might require double to size, you are actually storing.\n\n  \nAlso what is the chatbot about? If it is general documents, have proper evalset. Then define the top k chunks required value. Again, everything depends on the usecase.",
-          "score": 1,
-          "created_utc": "2026-07-10 12:52:16",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "owq0el7",
-              "author": "Due_Midnight9580",
-              "text": "Instead of replica of whole db can't we perform operation in both realtime data (5min)  and db and combile the results?",
-              "score": 1,
-              "created_utc": "2026-07-10 16:02:12",
-              "is_submitter": false,
-              "replies": [
-                {
-                  "id": "owtpeyh",
-                  "author": "Awesome_StaRRR",
-                  "text": "Chances of inconsistency is higher, becoz of partial updates",
-                  "score": 1,
-                  "created_utc": "2026-07-11 02:48:49",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "owpwbi8",
-          "author": "iBornToWin",
-          "text": "Why cant you update the data independently and when llm asks, give it only the necessary data after querying ?",
-          "score": 1,
-          "created_utc": "2026-07-10 15:45:01",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "owubvy1",
-          "author": "Dry_Inspection_4583",
-          "text": "I would be genuinely interested in giving faultline a try, it's my own product, available open source.\n\nIt's quite cpu heavy to self host. But I will have the saas portion up, it's in the works.\n\nFaultline allows corrections, there's one other that allows them.\n\nOr, lazily, just delete the vector db at the start of the ingest script call via API. ",
-          "score": 1,
-          "created_utc": "2026-07-11 05:23:13",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "owupdpd",
-          "author": "hannune",
-          "text": "The fundamental problem is that your index freshness window needs to match your data change rate, which makes write-through indexing the right starting point: every API update that changes a document triggers an incremental re-embed and re-index of that document only, rather than a batch re-index of the full corpus. For the retrieval layer, pair that with a routing step that checks the update timestamp on each candidate chunk before reranking — if a chunk's indexed version is older than the last API pull cycle, the retrieval layer can flag it as stale and optionally re-fetch the live version before passing it to the LLM. SQL or a structured cache works better than vector search for anything with a well-defined schema and point-lookup access pattern (current price, current status), so the architecture that scales is usually a router that sends schema-driven queries to the structured store and semantic queries to the vector index. The five-minute window is actually generous enough for this to work cleanly — the hard cases are sub-second freshness requirements where you need streaming index updates, which is a different problem.",
-          "score": 1,
-          "created_utc": "2026-07-11 07:12:26",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "owuxk2v",
-          "author": "Odd-Literature-5302",
-          "text": "I'd probably keep the LLM stateless and let it fetch fresh data through tools instead of trying to keep everything in the context.",
-          "score": 1,
-          "created_utc": "2026-07-11 08:22:28",
-          "is_submitter": false,
           "replies": []
         }
       ]
@@ -1717,41 +1421,70 @@
       ]
     },
     {
-      "id": "1uqr4qn",
-      "title": "I built an open-source toolkit (Larkup-RAG) to create a RAG server in minutes",
+      "id": "1uvj51o",
+      "title": "Tested 5 web search APIs so you don't have to (full data + tables inside)",
       "subreddit": "Rag",
-      "url": "https://www.reddit.com/r/Rag/comments/1uqr4qn/i_built_an_opensource_toolkit_larkuprag_to_create/",
-      "author": "Mean-Height5494",
-      "created_utc": "2026-07-08 12:23:15",
-      "score": 5,
+      "url": "https://www.reddit.com/r/Rag/comments/1uvj51o/tested_5_web_search_apis_so_you_dont_have_to_full/",
+      "author": "destructoid1998",
+      "created_utc": "2026-07-13 18:03:43",
+      "score": 6,
       "num_comments": 4,
-      "upvote_ratio": 0.86,
-      "text": "Hey everyone,\n\nI've been working on an open-source project called Larkup-RAG. It's probably a bit niche, but I thought some of you might find it useful.\n\nThe idea came from repeatedly spending hours wiring together chunking, embeddings, vector databases, and deployment, api server every time I wanted to build a RAG application. There are plenty of libraries out there, but I wanted something that was more developer-friendly and could get from raw documents to a working RAG API in just a few minutes.\n\nWhat it does:\n\n* Pick your embedding model + vector store (local for privacy, or OpenAI, Pinecone, Qdrant, LanceDB, etc.)\n* Load your data from files, URLs, or scraping\n* Auto chunks + indexes everything\n* Spins up a RAG server you can hit via SDK or plug straight into LangChain/AI-SDK agents\n* Has a demo UI to test retrieval before you commit to anything\n* Deploy to Vercel/Azure/hertzner/etc when ready\n\nI would love to hear your feedbacks :)\n\nLink: [https://larkuprag.larkup.de/documentation](https://larkuprag.larkup.de/documentation)",
+      "upvote_ratio": 1.0,
+      "text": "so i work at a SOC 2 company and i've been building a Slackbot to help our customers debug issues in real time. needed a search API for it. went looking and realized nobody actually benchmarks these things properly, everyone just vibes off landing pages and twitter hype.\n\nso i built the test myself.\n\n252 queries. 17 categories. tested [Exa.ai](http://Exa.ai), [Tavily.com](http://Tavily.com), [Firecrawl.com](http://Firecrawl.com), [You.com](http://You.com), and [KeiroLabs.cloud](http://KeiroLabs.cloud) . had an LLM judge (Gemini 2.5 Flash) grade every response blind on relevance, accuracy, completeness. all the data is public, all the prompts are public, clone the repo and run it yourself .\n\nhere's the full breakdown.\n\n# Final composite ranking\n\nweighted 60% quality, 25% cost efficiency, 15% latency\n\n|Rank|Provider|Composite Score|Quality (0-5)|Total RAG Cost (1k)|Avg Tokens|Total Latency|\n|:-|:-|:-|:-|:-|:-|:-|\n|🥇 1|Exa|88.5 / 100|3.83|$13.97|4,489|12.7s|\n|🥈 2|KeiroLabs|84.2 / 100|3.65|$3.76|7,123|11.6s|\n|🥉 3|[You.com](http://You.com)|78.1 / 100|3.47|$6.01|1,273|8.5s|\n|4|Tavily|56.4 / 100|3.54|$19.94|37,729|10.4s|\n|5|Firecrawl|51.2 / 100|3.62|$18.83|41,325|14.6s|\n\n# Quality metrics (graded by LLM judge)\n\n|Metric|🥇 1st|🥈 2nd|🥉 3rd|4th|5th|\n|:-|:-|:-|:-|:-|:-|\n|Relevance|Exa (3.88)|[You.com](http://You.com) (3.74)|KeiroLabs (3.56)|Firecrawl (3.15)|Tavily (3.03)|\n|Accuracy|Firecrawl (3.94)|Tavily (3.89)|Exa (3.85)|KeiroLabs (3.78)|[You.com](http://You.com) (3.51)|\n|Completeness|Firecrawl (3.77)|Exa (3.74)|Tavily (3.70)|KeiroLabs (3.63)|[You.com](http://You.com) (3.16)|\n|Overall Quality|Exa (3.83)|KeiroLabs (3.65)|Firecrawl (3.62)|Tavily (3.54)|[You.com](http://You.com) (3.47)|\n\n# Data efficiency (lower noise = better)\n\n|Metric|🥇 1st|🥈 2nd|🥉 3rd|4th|5th|\n|:-|:-|:-|:-|:-|:-|\n|Noise Ratio|Exa (0.02)|[You.com](http://You.com) (0.02)|Tavily (0.03)|KeiroLabs (0.06)|Firecrawl (0.19)|\n|Token Efficiency|[You.com](http://You.com) (.0028)|Exa (.0011)|KeiroLabs (.0009)|Firecrawl (.0002)|Tavily (.0001)|\n\n# Cost breakdown for the full 252 query run\n\nthis is the one that actually matters if you're shipping something real\n\n|Rank|Provider|Total Tokens Mined|Total API Cost|Total LLM Cost|Total Run Cost|\n|:-|:-|:-|:-|:-|:-|\n|🥇 1|KeiroLabs|1,794,996|$0.25|$0.27|**$0.52**|\n|🥈 2|[You.com](http://You.com)|320,796|$1.26|$0.05|$1.31|\n|🥉 3|Firecrawl|10,413,900|$1.46|$1.56|$3.02|\n|4|Exa|1,131,228|$3.02|$0.17|$3.19|\n|5|Tavily|9,507,708|$2.02|$1.43|$3.45|\n\nFirecrawl and Tavily mined over 9.5 million tokens combined to answer the same 252 questions the others handled in a fraction of that. that bloat directly hits your LLM inference bill on top of the API cost itself.\n\n# some categories, since results vary a lot by vertical\n\n|Vertical|🥇 1st|🥈 2nd|🥉 3rd|\n|:-|:-|:-|:-|\n|Coding & Developer Docs|KeiroLabs (3.94)|Exa (3.75)|Tavily (3.61)|\n|System / DevOps / OS|KeiroLabs (4.08)|Firecrawl (4.03)|Exa (4.00)|\n|Factual Precision|Exa (4.50)|Firecrawl (4.28)|KeiroLabs (4.27)|\n|Legal / Policy|Exa (4.14)|Firecrawl (3.95)|KeiroLabs (3.79)|\n|Health / Medical|Exa (4.03)|Tavily (4.00)|KeiroLabs (3.92)|\n|Travel & Local Info|Tavily (3.67)|[You.com](http://You.com) (3.53)|Exa (3.50)|\n\nfull 17-vertical table is in the repo.\n\n# quick takeaways\n\n* **Exa** = best raw quality, wins facts/legal/medical, but pricier\n* **KeiroLabs** = cheapest by a mile, actually wins coding/devops docs specifically, best overall value\n* [**You.com**](http://You.com) = fastest, tightest token usage\n* **Tavily / Firecrawl** = both got wrecked on token bloat, made them the most expensive despite decent quality scores\n\neverything's here if you want to dig in yourself or poke holes in the methodology: [https://github.com/viraj43/RAG\\_benchmark](https://github.com/viraj43/RAG_benchmark)\n\nlmk if you find issues, genuinely want to make this better.",
       "is_original_content": false,
-      "link_flair_text": "Showcase",
-      "permalink": "https://reddit.com/r/Rag/comments/1uqr4qn/i_built_an_opensource_toolkit_larkuprag_to_create/",
+      "link_flair_text": "Discussion",
+      "permalink": "https://reddit.com/r/Rag/comments/1uvj51o/tested_5_web_search_apis_so_you_dont_have_to_full/",
       "domain": "self.Rag",
       "is_self": true,
       "comments": [
         {
-          "id": "owadwye",
-          "author": "CMPUTX486",
-          "text": "I would like to try.. Can I do it locally from mac via docker desktop?",
-          "score": 2,
-          "created_utc": "2026-07-08 13:43:07",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "owcsjav",
-          "author": "bcell4u",
-          "text": "Looks promising. What is the chatbot based off?",
+          "id": "oxbmazo",
+          "author": "binarymax",
+          "text": "Nice data! My only critique is that having a small LLM judge blind is a very grey area. One change to the prompt and you might get a completely different result. I outlined a more thorough approach in a blog post last year.  Summary: use interleaving with multiple retrievers and credit assignment in the same context, judge with citation count.  Also, try multiple models to have a better understanding of general relevance and not just what one model+prompt prefers.  https://maxirwin.com/articles/interleaving-rag/",
           "score": 1,
-          "created_utc": "2026-07-08 19:58:19",
+          "created_utc": "2026-07-13 18:23:10",
           "is_submitter": false,
-          "replies": []
+          "replies": [
+            {
+              "id": "oxbngpq",
+              "author": "destructoid1998",
+              "text": "Awesome. Is there any more recommendations for the v2 of the benchmark I shall be releasing?",
+              "score": 1,
+              "created_utc": "2026-07-13 18:28:03",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "oxbq3dz",
+                  "author": "binarymax",
+                  "text": "The post is rather thorough but if you have questions I'm happy to answer - the only addition is I would try 2 or 3 prompt variations which something I didn't do in that experiment.  You might also find the part 2 post useful too, which can help you choose a model to use.",
+                  "score": 1,
+                  "created_utc": "2026-07-13 18:39:17",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
         }
       ]
+    },
+    {
+      "id": "1uv8pp1",
+      "title": "Colibri streaming for Hy3 (Run Hy3 on 10GB (V)RAM)",
+      "subreddit": "Rag",
+      "url": "https://www.reddit.com/r/Rag/comments/1uv8pp1/colibri_streaming_for_hy3_run_hy3_on_10gb_vram/",
+      "author": "FutureClubNL",
+      "created_utc": "2026-07-13 11:20:10",
+      "score": 6,
+      "num_comments": 0,
+      "upvote_ratio": 0.88,
+      "text": "Standing on the shoulders of giants, I vibe-coded a port of Colibri to work with Hy3 so you can run it on even smaller hardware specs (Colibri originally works with GLM 5.2 on 25GB, now you need no more than 10GB (even less actually)).\n\nHave a look and enjoy [https://github.com/ErikTromp/colibri-hy3](https://github.com/ErikTromp/colibri-hy3)\n\nPS. Use RAM instead of VRAM unless you have a lot of it. More means faster here.",
+      "is_original_content": false,
+      "link_flair_text": "Tools & Resources",
+      "permalink": "https://reddit.com/r/Rag/comments/1uv8pp1/colibri_streaming_for_hy3_run_hy3_on_10gb_vram/",
+      "domain": "self.Rag",
+      "is_self": true,
+      "comments": []
     }
   ]
 }
