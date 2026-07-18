@@ -1,11 +1,11 @@
 {
   "metadata": {
-    "last_updated": "2026-07-17 17:29:57",
+    "last_updated": "2026-07-18 09:49:57",
     "time_filter": "week",
     "subreddit": "n8n",
     "total_items": 20,
-    "total_comments": 175,
-    "file_size_bytes": 194042
+    "total_comments": 169,
+    "file_size_bytes": 188983
   },
   "items": [
     {
@@ -15,7 +15,7 @@
       "url": "https://www.reddit.com/r/n8n/comments/1uvk2ca/5_things_i_wish_id_known_before_hosting_n8n_for/",
       "author": "ryuk_builds",
       "created_utc": "2026-07-13 18:36:09",
-      "score": 77,
+      "score": 76,
       "num_comments": 17,
       "upvote_ratio": 0.98,
       "text": "I’ve been running self-hosted n8n in production for a while now, across a couple of clients. Every one of these lessons cost me either a bad on-call night or a customer email that started with \"hey, is it down?\"\n\nSharing what actually cost time. All of this is default n8n + Postgres + Redis; nothing exotic.\n\nCompanion snippets (Code node + importable workflow JSON): https://github.com/ryuk-builds/n8n-at-scale-snippets\n\n---\n\n**1. Turn on queue mode before you think you need it.**\n\nBy default n8n runs executions inside the main process. That’s fine for 5 workflows. Once you have one slow AI-agent workflow, it will block webhook responses on unrelated flows and your senders start timing out — and you’ll swear \"n8n is randomly slow\" for a week before you figure out why.\n\nFix:\n\n    EXECUTIONS_MODE=queue\n    QUEUE_BULL_REDIS_HOST=your-redis\n    N8N_CONCURRENCY_PRODUCTION_LIMIT=10   # per worker\n\nRun 2+ worker containers pointed at the same Postgres + Redis. Main process only handles UI/triggers/webhook ingress; workers do actual execution. Concurrency stops being \"whatever the box does\" and becomes something you set.\n\n---\n\n**2. Prune your executions table or it will strangle the UI.**\n\nThe executions table grows unbounded by default. Every workflow run, every retry, every node output — stored forever. At around 500k rows the executions list UI starts crawling; at 5M rows it’s unusable.\n\n    EXECUTIONS_DATA_PRUNE=true\n    EXECUTIONS_DATA_MAX_AGE=168          # 1 week\n    EXECUTIONS_DATA_PRUNE_MAX_COUNT=50000\n\nIf you need long-term audit, don’t rely on n8n’s executions table — write structured events (workflow_id, run_id, key inputs, key outputs, success/fail) to your own Postgres table from inside the workflow. Purpose-built, cheap to query.\n\n---\n\n**3. Dead-letter your webhooks. Don’t accept-and-hope.**\n\nWhen webhook ingress exceeds drain rate, senders start timing out. Stripe will disable your endpoint after enough failures. Twilio will retry with exponential backoff that hides the real problem.\n\nPattern that fixed it for me:\n\n- Webhook node responds 200 *immediately* with `{ok: true}`\n- Same node pushes the raw payload to a Redis stream (or a Postgres queue table with a `processed_at` column)\n- A separate scheduled workflow (or a webhook-triggered sub-workflow with `Split In Batches`) drains the stream at a rate the downstream can handle\n- Failed drains push to a dead-letter stream you alert on (Discord/Slack/email)\n\nSender never times out. Downstream bug never wedges ingress. You can replay from the dead-letter stream after a fix.\n\nImportable workflow (matches this pattern) is in the repo above: `dead-letter-webhook.n8n.json`.\n\n---\n\n**4. \"Poll to discover, event to react\" — plus a rate-limiter for the discover part.**\n\nPolling nodes are fine for sources that literally don’t support webhooks. The trap is that once you have 20+ polling flows, they all fire on the same minute boundary and stampede whatever they’re polling.\n\n- Add jitter (offset each poller’s schedule by a different ~0-59s) — cheap, immediate win.\n- Better: collapse pollers that hit the same source into one *ingest* workflow. It polls once, writes to a Redis key (or a Postgres table with a TTL), and every downstream flow reads from the cache. Airtable’s 5 req/sec/base ceiling stops mattering. Same trick works for HubSpot, Notion, any rate-limited third party.\n- Whenever the source supports it, migrate: webhook > queue subscription > polling. In that order.\n\n---\n\n**5. Make tool-response persistence atomic with the tool call (this bites Gemini agents hard).**\n\nIf you’re using n8n’s AI Agent + Postgres Chat Memory, and your workflow ever crashes mid-tool-call (network hiccup, provider 500, whatever), you can end up with a `function_call` row in memory that never got its `function_response`. Gemini’s API validator requires those two turns to be adjacent — the next request 400s with:\n\n> `Please ensure that function response turn comes immediately after a function call turn.`\n\nOpenAI is more forgiving of gappy histories, so if you’re using OpenAI as fallback it silently masks the problem. Then one day you switch primary to Gemini and everything breaks.\n\nTwo fixes, use both:\n\n- **Sanitize on read.** Between the memory-fetch and the AI Agent node, drop a Code node that walks the history and removes any `function_call` not followed by a matching `function_response`. Drop-in code is `sanitize-chat-history.js` in the repo above.\n- **Atomic writes.** Either use n8n’s built-in Chat Memory node’s post-execution write (which handles this) instead of writing to the table manually between tool call and response, or wrap the pair in a single transaction if you’re custom-writing.\n\nAlso: if you’re `Split In Batches`-ing over sessions in parallel, force `batchSize: 1` on any branch that touches the same `session_id`, or you’ll re-introduce the ordering violation.\n\n---\n\nEvery one of these turned into a real incident before I fixed it. Curious what’s bitten other people — anything I should be doing before I hit it the hard way?",
@@ -29,7 +29,7 @@
           "id": "oxbs9fg",
           "author": "BP041",
           "text": "Solid list. One thing I'd add: set up a dead-letter handler on your Redis queues early — by the time a misconfigured workflow fills the main execution queue you're already scrambling. Also, if you're running on a single machine like me, pin n8n to 1-2 CPUs and let everything else idle; the default worker count can thrash your system with AI nodes.",
-          "score": 3,
+          "score": 5,
           "created_utc": "2026-07-13 18:48:24",
           "is_submitter": false,
           "replies": [
@@ -174,7 +174,7 @@
       "url": "https://www.reddit.com/r/n8n/comments/1uujz11/so_after_building_a_16agent_ai_swarm_system_i/",
       "author": "EngJosephYossry",
       "created_utc": "2026-07-12 16:22:38",
-      "score": 46,
+      "score": 47,
       "num_comments": 16,
       "upvote_ratio": 0.93,
       "text": "https://preview.redd.it/s46a9m1xptch1.png?width=1868&format=png&auto=webp&s=9193ea05f7d18b0057c7545b338da10942ebdac1\n\nEllo!\n\n  \nA while back, I was deep in the AI orchestration weeds as most of you know, building massive systems with a dozen-plus AI agents talking to each other, handling LLM mesh routing, and managing autonomous tasks. It was an incredibly fun experiment, but after staring at prompt windows for weeks, I hit a point where I just went:\n\n*\"Hmm Okay.. enough AI hype for a second. Let's look at fundamental software engineering. Can we build something purely deterministic, incredibly resilient, and highly important that solves a massive infrastructure problem, without using a single AI agent node? 👀🤔\"*\n\nWhen you handle high-throughput ingress webhooks (like matchmaking queues, payment gateways, or intensive analytic triggers), relying on a basic stateless workflow is a recipe for disaster. If your downstream API or backend crashes, a standard loop will either fail instantly and drop data, or it will retry aggressively alongside thousands of other concurrent runs, creating a massive \"thundering herd\" effect that completely suffocates your recovering server.\n\nTo solve this, I built a production-grade, stateful **Three-State Circuit Breaker Engine** directly inside n8n. No black boxes, no prompt engineering, just PURE, bulletproof distributed systems architecture expressed visually 💯\n\n# What it actually does (The Technical Breakdown)\n\nInstead of just retrying a failing node forever, the engine implements a real state machine using n8n's long-term static memory (`$getWorkflowStaticData('global')`). This allows thousands of isolated, separate workflow runs to share a collective memory of your infrastructure's health\n\nIt handles traffic through three distinct phases:\n\n* **CLOSED (System Healthy):** All incoming webhooks clear the gate instantly and deliver their payloads directly to your backend\n* **OPEN (System Outage):** If your backend drops and causes 5 consecutive failures, the engine instantly trips the circuit to `OPEN`. Now, any new inbound request is intercepted at step one and diverted straight to a **Dead-Letter Queue (DLQ)** to preserve the data. The workflow doesn't even attempt to touch your backend, shielding your server completely so it has space to recover\n* **HALF\\_OPEN (The Canary Test):** An out-of-band background heartbeat loop pings your server's health check endpoint every 2 minutes. The moment it gets a `200 OK`, it doesn't just wide-open the floodgates. It transitions to `HALF_OPEN` and lets **exactly one single canary request** through. If that single request succeeds, the circuit cleanly closes and normal traffic resumes. If it fails, it instantly hard-trips back to `OPEN` without wasting system resources\n\n# The Details That Matter\n\n1. **Stateful Memory across Runs:** Workflows are usually treated as isolated events. By tapping into the global static data buffer, the engine maintains persistent state across completely different executions\n2. **Exponential Backoff with Full Jitter:** Most basic automation retries use fixed delays, meaning all failed requests wake up and smash the server at the exact same millisecond. I wrote a raw JavaScript node that runs a proper exponential calculation mixed with randomized full jitter (`Math.random()`). This symmetrically flattens the retry curve across time\n3. **Zero Data Loss (DLQ):** Terminal failures are never dropped or ignored. They are safely structured and preserved inside a Dead-Letter Queue lane for manual replay or audit logging later\n\n# Why I built it this way\n\nAI tools are incredible 🔥, but classic backend resilience patterns never go out of style. Building this forced me to think about visual automation not just as a sequence of integrations, but as an architectural topology. The tool simply becomes the vehicle; the engineering logic comes first\n\nIt is **100% free, open-source under the MIT license, and uses completely vanilla out-of-the-box n8n core capabilities,** no commercial paywalls or third-party paid nodes required\n\nIf you are running self-hosted setups or handling critical webhooks that you absolutely cannot afford to lose during a server crash, you can copy the entire workflow JSON directly from the GitHub repository via this [link](https://github.com/engyossefyossry-crypto/n8n-sentinel-circuit-breaker-or-resilient-webhook-queue-engine)\n\nLet me know what you think, or if you've implemented similar resilient backend patterns inside your own automation stacks!",
@@ -307,9 +307,9 @@
       "url": "https://www.reddit.com/r/n8n/comments/1uv3o2g/any_beginners_interested_in_forming_an_ai/",
       "author": "Wide_Tumbleweed9961",
       "created_utc": "2026-07-13 06:34:58",
-      "score": 41,
+      "score": 42,
       "num_comments": 86,
-      "upvote_ratio": 0.92,
+      "upvote_ratio": 0.94,
       "text": "Are there beginners interested in learning together and forming a study group?",
       "is_original_content": false,
       "link_flair_text": "Help",
@@ -878,13 +878,86 @@
       ]
     },
     {
+      "id": "1uyvn91",
+      "title": "[Workflow Included] SEO Automation in n8n - find your quick-win pages and get the rewrites ready to paste",
+      "subreddit": "n8n",
+      "url": "https://v.redd.it/efoab065mrdh1",
+      "author": "easybits_ai",
+      "created_utc": "2026-07-17 10:16:56",
+      "score": 33,
+      "num_comments": 8,
+      "upvote_ratio": 0.94,
+      "text": "[External Link]",
+      "is_original_content": false,
+      "link_flair_text": "Workflow - Github Included",
+      "permalink": "https://reddit.com/r/n8n/comments/1uyvn91/workflow_included_seo_automation_in_n8n_find_your/",
+      "domain": "v.redd.it",
+      "is_self": false,
+      "comments": [
+        {
+          "id": "oy2co2b",
+          "author": "AutoModerator",
+          "text": "Heads up: video posts must link to the workflow code per **Rule 6** (GitHub, Gist, or n8n.io/workflows/). Yours does -- thanks. This sticky is here so commenters can find the code.\n\n\n*I am a bot, and this action was performed automatically. Please [contact the moderators of this subreddit](/message/compose/?to=/r/n8n) if you have any questions or concerns.*",
+          "score": 1,
+          "created_utc": "2026-07-17 10:18:28",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oy2co11",
+          "author": "AutoModerator",
+          "text": "Heads up: posts under this flair must link to the workflow code per **Rule 6** (GitHub, Gist, or n8n.io/workflows/). Yours does -- thanks for sharing it properly. This sticky is here so commenters know where to find the code.\n\n\n*I am a bot, and this action was performed automatically. Please [contact the moderators of this subreddit](/message/compose/?to=/r/n8n) if you have any questions or concerns.*",
+          "score": 1,
+          "created_utc": "2026-07-17 10:18:28",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oy2ppo8",
+          "author": "Desperate-Whole1931",
+          "text": "Notion's API in n8n is powerful but the data model takes time to learn. Pages and databases are both 'pages' in the API — the difference is whether the parent is a database. When reading from a database, use the 'Get Many' operation with a filter instead of 'Get All' — fetching all records without a filter is slow and hits the API limit fast for large databases. Build your filter in the Notion Query Builder first, then copy the filter JSON into n8n.",
+          "score": 1,
+          "created_utc": "2026-07-17 11:44:59",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oy2xeir",
+          "author": "thehummingsuburb",
+          "text": "That deterministic scoring before the LLM touches anything is so smart, I'm borrowing that one today!",
+          "score": 1,
+          "created_utc": "2026-07-17 12:27:50",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oy46aia",
+          "author": "jake_that_dude",
+          "text": "two signals I'd add: query/page mismatch and stale winners.\n\nFor mismatch, compare the top GSC queries to the H1/title/body terms and flag pages where impressions are coming from terms the page barely supports. That catches pages ranking by accident.\n\nFor stale winners, score pages where position is stable but CTR dropped more than 30% vs the prior 28-day window. Usually means the SERP changed, a competitor title got better, or intent shifted.\n\nI'd keep both deterministic too. LLM only gets {query_gap_terms, ctr_delta, current_title, h1} and writes variants.",
+          "score": 1,
+          "created_utc": "2026-07-17 15:54:04",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oy5m464",
+          "author": "last_butnotleast",
+          "text": "Really nice workflow! I'm dont have a lot of knowledge in SEO to judge the quality of it but LGTM! :D How are you creating the JS for the code nodes and how do you test it? Any Tipps & Tricks about that?",
+          "score": 1,
+          "created_utc": "2026-07-17 19:34:19",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
       "id": "1uvz1f9",
       "title": "Made a workflow that generates invoice PDFs without paying per document (code included)",
       "subreddit": "n8n",
       "url": "https://github.com/andyshrx/pdfpost",
       "author": "andyshrx",
       "created_utc": "2026-07-14 05:01:16",
-      "score": 31,
+      "score": 32,
       "num_comments": 16,
       "upvote_ratio": 1.0,
       "text": "[External Link]",
@@ -1054,9 +1127,9 @@
       "url": "https://www.reddit.com/gallery/1uy23eb",
       "author": "easybits_ai",
       "created_utc": "2026-07-16 12:55:28",
-      "score": 26,
+      "score": 28,
       "num_comments": 6,
-      "upvote_ratio": 0.97,
+      "upvote_ratio": 1.0,
       "text": "[External Link]",
       "is_original_content": false,
       "link_flair_text": "Workflow - Github Included",
@@ -1114,15 +1187,61 @@
       ]
     },
     {
+      "id": "1uy1ok6",
+      "title": "I built this workflow that generates & remind Invoices via email by slack messages",
+      "subreddit": "n8n",
+      "url": "https://i.redd.it/igxyan6j6ldh1.png",
+      "author": "Charming_You_8285",
+      "created_utc": "2026-07-16 12:38:07",
+      "score": 24,
+      "num_comments": 3,
+      "upvote_ratio": 0.97,
+      "text": "[External Link]",
+      "is_original_content": false,
+      "link_flair_text": "Workflow - Github Included",
+      "permalink": "https://reddit.com/r/n8n/comments/1uy1ok6/i_built_this_workflow_that_generates_remind/",
+      "domain": "i.redd.it",
+      "is_self": false,
+      "comments": [
+        {
+          "id": "oxvl12o",
+          "author": "AutoModerator",
+          "text": "Heads up: video posts must link to the workflow code per **Rule 6** (GitHub, Gist, or n8n.io/workflows/). Yours does -- thanks. This sticky is here so commenters can find the code.\n\n\n*I am a bot, and this action was performed automatically. Please [contact the moderators of this subreddit](/message/compose/?to=/r/n8n) if you have any questions or concerns.*",
+          "score": 1,
+          "created_utc": "2026-07-16 12:38:09",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oxvl10x",
+          "author": "AutoModerator",
+          "text": "Heads up: posts under this flair must link to the workflow code per **Rule 6** (GitHub, Gist, or n8n.io/workflows/). Yours does -- thanks for sharing it properly. This sticky is here so commenters know where to find the code.\n\n\n*I am a bot, and this action was performed automatically. Please [contact the moderators of this subreddit](/message/compose/?to=/r/n8n) if you have any questions or concerns.*",
+          "score": 1,
+          "created_utc": "2026-07-16 12:38:09",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oxvnly2",
+          "author": "Admirable-Future-633",
+          "text": "This is a strong teaching project because the result exists outside the workflow canvas. Before using it with real billing data, I would test three things hard: an idempotency key so a Slack retry cannot create a duplicate invoice, a real source of truth for invoice status rather than chat context, and a stop condition so reminders end immediately after payment. I would also keep a human approval step before the first send. Those pieces turn a clever demo into something people can trust.",
+          "score": 1,
+          "created_utc": "2026-07-16 12:51:25",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
       "id": "1uu8014",
       "title": "I'm a beginner, and I need help.",
       "subreddit": "n8n",
       "url": "https://www.reddit.com/r/n8n/comments/1uu8014/im_a_beginner_and_i_need_help/",
       "author": "Flimsy-Issue-6576",
       "created_utc": "2026-07-12 06:52:29",
-      "score": 21,
+      "score": 20,
       "num_comments": 14,
-      "upvote_ratio": 0.96,
+      "upvote_ratio": 0.92,
       "text": "I've been studying n8n for some time and have gathered a few insights. The purpose of learning n8n is for me to become a freelancer providing automation services to companies and clients. The problem is that I don't know what the level of the project served to clients looks like. I haven't worked on any client projects yet, so I'm not familiar with the standard. If you've completed projects for clients in the past, could you send an image, a JSON file detailing the project, a description, or anything else you think would be helpful?",
       "is_original_content": false,
       "link_flair_text": "Help",
@@ -1143,7 +1262,7 @@
           "id": "ox2f6np",
           "author": "SirCircumstantial",
           "text": "Most n8n workflows in production dont look fundamentally different than the thousands on workflows u can see over the web. \n\n“Production grade” means different things for different teams. \n\nEveryone has different requirements and fault tolerance and thresholds. \n\n*You will have to figure it out as you go.* \n\n**However some non negotiables for a production workflow are**  \n\\- workflow backups  \n\\- database backups  \n\\- error workflows for error monitoring and stakeholder notifications  \n\\- dont leave credentials in nodes and commit them to github. Use the credentials manager to manage credentials.   \n\\- dependable documentation. Document everything. How u set it up? How to deploy this again? How to deploy for other clients? Common Gotchas",
-          "score": 4,
+          "score": 5,
           "created_utc": "2026-07-12 11:40:44",
           "is_submitter": false,
           "replies": [
@@ -1246,60 +1365,14 @@
       ]
     },
     {
-      "id": "1uy1ok6",
-      "title": "I built this workflow that generates & remind Invoices via email by slack messages",
-      "subreddit": "n8n",
-      "url": "https://i.redd.it/igxyan6j6ldh1.png",
-      "author": "Charming_You_8285",
-      "created_utc": "2026-07-16 12:38:07",
-      "score": 21,
-      "num_comments": 3,
-      "upvote_ratio": 1.0,
-      "text": "[External Link]",
-      "is_original_content": false,
-      "link_flair_text": "Workflow - Github Included",
-      "permalink": "https://reddit.com/r/n8n/comments/1uy1ok6/i_built_this_workflow_that_generates_remind/",
-      "domain": "i.redd.it",
-      "is_self": false,
-      "comments": [
-        {
-          "id": "oxvl12o",
-          "author": "AutoModerator",
-          "text": "Heads up: video posts must link to the workflow code per **Rule 6** (GitHub, Gist, or n8n.io/workflows/). Yours does -- thanks. This sticky is here so commenters can find the code.\n\n\n*I am a bot, and this action was performed automatically. Please [contact the moderators of this subreddit](/message/compose/?to=/r/n8n) if you have any questions or concerns.*",
-          "score": 1,
-          "created_utc": "2026-07-16 12:38:09",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oxvl10x",
-          "author": "AutoModerator",
-          "text": "Heads up: posts under this flair must link to the workflow code per **Rule 6** (GitHub, Gist, or n8n.io/workflows/). Yours does -- thanks for sharing it properly. This sticky is here so commenters know where to find the code.\n\n\n*I am a bot, and this action was performed automatically. Please [contact the moderators of this subreddit](/message/compose/?to=/r/n8n) if you have any questions or concerns.*",
-          "score": 1,
-          "created_utc": "2026-07-16 12:38:09",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oxvnly2",
-          "author": "Admirable-Future-633",
-          "text": "This is a strong teaching project because the result exists outside the workflow canvas. Before using it with real billing data, I would test three things hard: an idempotency key so a Slack retry cannot create a duplicate invoice, a real source of truth for invoice status rather than chat context, and a stop condition so reminders end immediately after payment. I would also keep a human approval step before the first send. Those pieces turn a clever demo into something people can trust.",
-          "score": 1,
-          "created_utc": "2026-07-16 12:51:25",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
       "id": "1uv5os6",
       "title": "Learning N8N from absolute scratch",
       "subreddit": "n8n",
       "url": "https://www.reddit.com/r/n8n/comments/1uv5os6/learning_n8n_from_absolute_scratch/",
       "author": "Plenty_Dimension6395",
       "created_utc": "2026-07-13 08:33:17",
-      "score": 18,
-      "num_comments": 18,
+      "score": 17,
+      "num_comments": 19,
       "upvote_ratio": 1.0,
       "text": "Hii guys,Am graduated in 2023 present working in non technical department, trying to quit this and learn n8n from scratch to earn some money cause my organisation is paying too low is this correct decision? Can anyone help me through this?\n\nLooking for any kind of answers please help me out of this ",
       "is_original_content": false,
@@ -1449,77 +1522,13 @@
               "replies": []
             }
           ]
-        }
-      ]
-    },
-    {
-      "id": "1uyvn91",
-      "title": "[Workflow Included] SEO Automation in n8n - find your quick-win pages and get the rewrites ready to paste",
-      "subreddit": "n8n",
-      "url": "https://v.redd.it/efoab065mrdh1",
-      "author": "easybits_ai",
-      "created_utc": "2026-07-17 10:16:56",
-      "score": 18,
-      "num_comments": 7,
-      "upvote_ratio": 0.95,
-      "text": "[External Link]",
-      "is_original_content": false,
-      "link_flair_text": "Workflow - Github Included",
-      "permalink": "https://reddit.com/r/n8n/comments/1uyvn91/workflow_included_seo_automation_in_n8n_find_your/",
-      "domain": "v.redd.it",
-      "is_self": false,
-      "comments": [
-        {
-          "id": "oy2co2b",
-          "author": "AutoModerator",
-          "text": "Heads up: video posts must link to the workflow code per **Rule 6** (GitHub, Gist, or n8n.io/workflows/). Yours does -- thanks. This sticky is here so commenters can find the code.\n\n\n*I am a bot, and this action was performed automatically. Please [contact the moderators of this subreddit](/message/compose/?to=/r/n8n) if you have any questions or concerns.*",
-          "score": 1,
-          "created_utc": "2026-07-17 10:18:28",
-          "is_submitter": false,
-          "replies": []
         },
         {
-          "id": "oy2co11",
-          "author": "AutoModerator",
-          "text": "Heads up: posts under this flair must link to the workflow code per **Rule 6** (GitHub, Gist, or n8n.io/workflows/). Yours does -- thanks for sharing it properly. This sticky is here so commenters know where to find the code.\n\n\n*I am a bot, and this action was performed automatically. Please [contact the moderators of this subreddit](/message/compose/?to=/r/n8n) if you have any questions or concerns.*",
+          "id": "oy88fgb",
+          "author": "shajid-dev",
+          "text": "Yes it is, but that's not straightforward as it seems. You have to learn the basics of n8n, and keep working on workflows that feels repetitive, and once you understand the concepts better, then focus on solving business problems. That's how you could make money with especially in automation field regardless of what tools you use.  I have given you some resources that helpful for you to learn n8n. \n\n\\- How to install n8n locally (2026 - Docker and NPM) - [https://theowllogic.com/installing-n8n-setup-locally](https://theowllogic.com/installing-n8n-setup-locally)  \n\\- Your first Hello World Workflow - [https://theowllogic.com/first-hello-world-n8n-workflow](https://theowllogic.com/first-hello-world-n8n-workflow)  \n\\- n8n Workflows, Nodes and Data-flow - [https://theowllogic.com/n8n-workflow-nodes-data-flow](https://theowllogic.com/n8n-workflow-nodes-data-flow)  \n\\- Webhooks in n8n for Beginners - [https://theowllogic.com/webhook-in-n8n-explained](https://theowllogic.com/webhook-in-n8n-explained)  \n\\- How to Handle API Rate Limits in n8n - [https://theowllogic.com/how-to-handle-api-rate-limits-in-n8n](https://theowllogic.com/how-to-handle-api-rate-limits-in-n8n)  \n\\- How to Handle Errors Like a Pro in n8n - [https://theowllogic.com/how-to-handle-api-rate-limits-in-n8n](https://theowllogic.com/how-to-handle-api-rate-limits-in-n8n)  \n\\- n8n Expressions Complete Guide - [https://theowllogic.com/how-to-handle-api-rate-limits-in-n8n](https://theowllogic.com/how-to-handle-api-rate-limits-in-n8n)  \n\\- How to Build Condition Logics in n8n (IF/Switch) - [https://theowllogic.com/conditional-logic-in-n8n](https://theowllogic.com/conditional-logic-in-n8n)  \n\\- How to Plan a n8n Workflow: [https://theowllogic.com/plan-n8n-workflow](https://theowllogic.com/plan-n8n-workflow)  \n\\- How to Use n8n Loop Over Items - [https://theowllogic.com/how-to-use-loop-in-n8n](https://theowllogic.com/how-to-use-loop-in-n8n)  \n\\- How to Use Sub-Workflows in n8n - [https://theowllogic.com/n8n-sub-workflows](https://theowllogic.com/n8n-sub-workflows)  \n\\- How to Use Simple Memory Node - [https://theowllogic.com/simple-memory-in-n8n](https://theowllogic.com/simple-memory-in-n8n)  \n\\- How to Build an n8n AI Agent \\[Updated\\] - [https://theowllogic.com/n8n-ai-agent-workflow](https://theowllogic.com/n8n-ai-agent-workflow)  \n\\- How to use Telegram in n8n \\[Bot Creation\\] - [https://theowllogic.com/n8n-telegram-bot](https://theowllogic.com/n8n-telegram-bot)  \n\\- How to use Summarization Chain in n8n \\[Advanced\\]- [https://theowllogic.com/summarization-chain-n8n](https://theowllogic.com/summarization-chain-n8n)\n\nWorkflows Based\n\n\\- 50 Boring Tasks You Can Automate With n8n - [https://theowllogic.com/automate-boring-tasks-n8n](https://theowllogic.com/automate-boring-tasks-n8n)  \n\\- How to Build a Follow-up Email Sequence - [https://theowllogic.com/n8n-followup-email](https://theowllogic.com/n8n-followup-email)  \n\\- How to Build an n8n AI Agent (Step by Step) - [https://theowllogic.com/n8n-ai-agent-workflow](https://theowllogic.com/n8n-ai-agent-workflow)  \n\\- n8n Airtable integration - [https://theowllogic.com/n8n-airtable](https://theowllogic.com/n8n-airtable)  \n\\- How to Use Slack in n8n - [https://theowllogic.com/n8n-slack](https://theowllogic.com/n8n-slack)  \n\\- How to Back up n8n Workflows to GitHub W/Commit History - [https://theowllogic.com/backup-n8n-github](https://theowllogic.com/backup-n8n-github)",
           "score": 1,
-          "created_utc": "2026-07-17 10:18:28",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oy2ppo8",
-          "author": "Desperate-Whole1931",
-          "text": "Notion's API in n8n is powerful but the data model takes time to learn. Pages and databases are both 'pages' in the API — the difference is whether the parent is a database. When reading from a database, use the 'Get Many' operation with a filter instead of 'Get All' — fetching all records without a filter is slow and hits the API limit fast for large databases. Build your filter in the Notion Query Builder first, then copy the filter JSON into n8n.",
-          "score": 1,
-          "created_utc": "2026-07-17 11:44:59",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oy2xeir",
-          "author": "thehummingsuburb",
-          "text": "That deterministic scoring before the LLM touches anything is so smart, I'm borrowing that one today!",
-          "score": 1,
-          "created_utc": "2026-07-17 12:27:50",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oy46aia",
-          "author": "jake_that_dude",
-          "text": "two signals I'd add: query/page mismatch and stale winners.\n\nFor mismatch, compare the top GSC queries to the H1/title/body terms and flag pages where impressions are coming from terms the page barely supports. That catches pages ranking by accident.\n\nFor stale winners, score pages where position is stable but CTR dropped more than 30% vs the prior 28-day window. Usually means the SERP changed, a competitor title got better, or intent shifted.\n\nI'd keep both deterministic too. LLM only gets {query_gap_terms, ctr_delta, current_title, h1} and writes variants.",
-          "score": 1,
-          "created_utc": "2026-07-17 15:54:04",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oy4k0wx",
-          "author": "scubastevey4",
-          "text": "Interested to try this. Where's the video explanation? Thanks!",
-          "score": 1,
-          "created_utc": "2026-07-17 16:51:56",
+          "created_utc": "2026-07-18 04:05:02",
           "is_submitter": false,
           "replies": []
         }
@@ -1532,9 +1541,9 @@
       "url": "https://www.reddit.com/r/n8n/comments/1uwd7ls/how_i_get_claude_to_write_n8n_workflows_id/",
       "author": "ryuk_builds",
       "created_utc": "2026-07-14 16:14:16",
-      "score": 17,
+      "score": 16,
       "num_comments": 11,
-      "upvote_ratio": 0.9,
+      "upvote_ratio": 0.87,
       "text": "Follow-up to yesterday's hosting-at-scale post. A few comments there and a couple of threads this week (u/Asleep_Pomegranate18's \"Using AI to plan automations\", u/Recent-Ball543's \"what actions are you still uncomfortable letting an agent do?\") landed on the same core problem: **most AI-generated n8n workflows are demo-shaped, not production-shaped.**\n\nThree nodes, no error handling, no dedup, no approval gate. One runaway API bill and one wrong-refund-to-customer away from a bad Monday.\n\nThe fix isn't a smarter model. It's telling the model, up front, what \"workflow\" means when the workflow is going to run unattended in production.\n\nI've been iterating on the scaffolding I paste into every new Claude project / Cursor rules file / ChatGPT custom GPT for this. It's now stable enough that I get a workflow I'd deploy after one review pass instead of five. Publishing it in case it's useful.\n\n**Repo:** https://github.com/ryuk-builds/n8n-at-scale-snippets/tree/main/ai-generated-workflows\n\nThree files:\n\n**1. `SYSTEM_PROMPT.md`** — the full behavioral spec. Enforces:\n\n- **Failure map first, workflow second.** No JSON until the model has produced a plain-text failure map (trigger, each step, what can fail, retryable vs human-review, state, alert path).\n- **No irreversible action without a human-approval node in front of it.** Customer emails, refunds, DELETEs, CRM stage changes, file deletion — all gated. The pattern is always: agent prepares → workflow validates → human approves → workflow executes → append-only audit log.\n- **Every external call specifies retry behavior.** `retryOnFail: true, maxTries: 3, waitBetweenTries: 5000`, unless there's a written reason not to.\n- **Every AI Agent node caps `max_iterations`.** Default is 10, in production I use 5. A runaway agent hitting 10 tool calls in a loop is real money in seconds.\n- **The model has to ask before writing** — trigger type, volume, blast radius if it fires wrong, latency requirement, state requirements, who gets paged. If the user answers \"I don't know\" to more than two, the model stops and helps them decide.\n\n**2. `RULES.md`** — the concentrated \"don't do this\" list. Paste at the top of every session as a reminder. Also usable as a code-review checklist for human-written workflows. Sample:\n\n> - Never dedupe on `execution.id`. It's assigned before the payload is validated. Dedupe on `(source, external_id, payload_hash)`.\n> - Never JSON.stringify without sorting keys if you're going to hash it. n8n item outputs have different key orders across node types; unstable hashes = double replays.\n> - Do NOT chain 5 AI Agent nodes together to \"let the AI figure it out.\" That's a $50 debug session waiting to happen.\n> - Do NOT rely on `continueOnFail` to hide errors. It's a footgun. Handle the error branch explicitly.\n> - Do NOT deploy a workflow you haven't tested with a failure-injection payload (bad JSON, 500 response, timeout, empty array).\n\n**3. `EXAMPLE_PROMPTS.md`** — three worked prompts that produce deployable workflows, plus an anti-example showing what breaks. The pattern is: **describe the trigger, the write-side blast radius, and the failure envelope. Don't describe the nodes.** If you're picking nodes in the prompt, you've already made the architecture decision — let the model justify its choices instead.\n\n**Prompt template that ships with the repo:**\n\n    Build me a workflow that <one-sentence goal>.\n\n    Trigger: <webhook | cron | manual | form>, expected input shape: <sample JSON>\n    Volume: <events/day, spikes>\n    Blast radius if it fires wrong: <what specifically goes bad>\n    Latency requirement: <acceptable delay>\n    State: <what to remember across runs, and where>\n    Alerts: <who gets paged, how>\n\n    Constraints:\n    - <e.g. must use existing credential \"stripe-live\">\n    - <e.g. must be behind human approval for any refund>\n\n    Give me the failure map first, then the node list, then the JSON, then the post-import checklist.\n\nFill in the blanks, paste the system prompt and rules at the top, hit send. What comes back needs one round of edits, not five.\n\n**What this doesn't fix**\n\n- LLMs still make up node names occasionally. You still review the JSON.\n- `typeVersion` values drift as n8n releases. If import fails, check the version field.\n- Nothing here saves a bad architecture. A good prompt won't compensate for the wrong plan.\n\n**Why publish it**\n\nBecause the same LLM-writes-a-broken-workflow story is going to play out 1000 more times this year, and every time it's someone learning production the hard way. Might as well share the scaffolding.\n\nInterested in what people have found works or doesn't — especially anyone running MCP tools or agentic workflows where the tool selection itself is model-driven. That's the class of workflow where I'm least sure my rules are strict enough.",
       "is_original_content": false,
       "link_flair_text": "Workflow - Github Included",
@@ -1736,9 +1745,9 @@
       "url": "https://www.reddit.com/r/n8n/comments/1uxl9qf/what_email_service_are_you_using_with_n8n_in/",
       "author": "ReasonableCabinet372",
       "created_utc": "2026-07-15 22:55:42",
-      "score": 14,
+      "score": 15,
       "num_comments": 15,
-      "upvote_ratio": 0.9,
+      "upvote_ratio": 0.94,
       "text": "I’m getting ready to move one of my n8n workflows from testing into production, and I’m trying to decide on the email service before everything goes live.\n\nFor those using n8n in production, what are you using for sending and receiving emails?\n\nI’m mainly looking for something that’s reliable, easy to integrate, and doesn’t become a headache as workflows grow.\n\nHas anything worked particularly well for you, or is there a provider you’d recommend avoiding?",
       "is_original_content": false,
       "link_flair_text": "Help",
@@ -1857,178 +1866,186 @@
       ]
     },
     {
-      "id": "1ut44ii",
-      "title": "After-sales problems",
+      "id": "1uymg2o",
+      "title": "I built an n8n workflow that turns a logo + a product photo into a product ad (fal.ai + FFmpeg Micro)",
       "subreddit": "n8n",
-      "url": "https://www.reddit.com/r/n8n/comments/1ut44ii/aftersales_problems/",
-      "author": "_QATAYEF_",
-      "created_utc": "2026-07-10 23:43:45",
+      "url": "https://v.redd.it/6vx6n9v13pdh1",
+      "author": "javidjamae",
+      "created_utc": "2026-07-17 02:04:04",
+      "score": 14,
+      "num_comments": 9,
+      "upvote_ratio": 0.94,
+      "text": "[External Link]",
+      "is_original_content": false,
+      "link_flair_text": "Workflow - Github Included",
+      "permalink": "https://reddit.com/r/n8n/comments/1uymg2o/i_built_an_n8n_workflow_that_turns_a_logo_a/",
+      "domain": "v.redd.it",
+      "is_self": false,
+      "comments": [
+        {
+          "id": "oy0gock",
+          "author": "AutoModerator",
+          "text": "Heads up: video posts must link to the workflow code per **Rule 6** (GitHub, Gist, or n8n.io/workflows/). Yours does -- thanks. This sticky is here so commenters can find the code.\n\n\n*I am a bot, and this action was performed automatically. Please [contact the moderators of this subreddit](/message/compose/?to=/r/n8n) if you have any questions or concerns.*",
+          "score": 1,
+          "created_utc": "2026-07-17 02:04:09",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oy0tsrs",
+          "author": "tribak",
+          "text": "Love the taste of lead in my coke ",
+          "score": 2,
+          "created_utc": "2026-07-17 03:22:50",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oy3vgtx",
+          "author": "newked",
+          "text": "We’ve circled back to morphing which I did on my Amiga 30 years ago 🤣",
+          "score": 2,
+          "created_utc": "2026-07-17 15:07:32",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "oy5reza",
+              "author": "javidjamae",
+              "text": "Loved the Amiga! Ya, I did a lot of animation like this on the 4000T back in the 90s. Funny enough, I did a similar project \\~30 years ago that was (a bit subconsciously perhaps) inspiration for this one.",
+              "score": 1,
+              "created_utc": "2026-07-17 19:58:08",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "oy0goaa",
+          "author": "AutoModerator",
+          "text": "Heads up: posts under this flair must link to the workflow code per **Rule 6** (GitHub, Gist, or n8n.io/workflows/). Yours does -- thanks for sharing it properly. This sticky is here so commenters know where to find the code.\n\n\n*I am a bot, and this action was performed automatically. Please [contact the moderators of this subreddit](/message/compose/?to=/r/n8n) if you have any questions or concerns.*",
+          "score": 1,
+          "created_utc": "2026-07-17 02:04:08",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oy163nq",
+          "author": "ExObscura",
+          "text": "Why on earth did you use FFmpeg micro. There’s literally no need, install it on the host it’s running on and pipe it out. ",
+          "score": -1,
+          "created_utc": "2026-07-17 04:44:42",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "oy1qg7p",
+              "author": "javidjamae",
+              "text": "1. My client is running n8n Cloud, there is no \"host it's running on\", this isn't self-hosted  \n2. FFmpeg Micro has an approved community node that can be used in Cloud and local  \n3. The client already was paying for an FFmpeg Micro's Scale plan that they use for several other automations  \n4. They don't want to deal with managing servers, they only have a few contract developers and don't want to deal with setting and managing/monitoring a VPS  \n5. It's free for anybody else who wants to use it, up to 100 minutes a month (which covers 99% of people who just want to play around with it to create 5-10 second shorts)  \n6. Better to not colocate ffmpeg on a backend server if you're running heavy transcoding jobs. Better for overall system design, reliability, and performance to move it to another server and manage it with a job queue. ",
+              "score": 2,
+              "created_utc": "2026-07-17 07:19:27",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "1uyzdef",
+      "title": "What personal or work automations actually gives you value? Looking for real examples",
+      "subreddit": "n8n",
+      "url": "https://www.reddit.com/r/n8n/comments/1uyzdef/what_personal_or_work_automations_actually_gives/",
+      "author": "ImperaVox",
+      "created_utc": "2026-07-17 13:13:14",
       "score": 13,
-      "num_comments": 21,
+      "num_comments": 11,
       "upvote_ratio": 1.0,
-      "text": "I am currently learning n8n I can build simple projects Currently, I'm trying to develop and create complex projects, but I have a problem: how will I be able to sell it to the client? How will they be able to operate it, and what other alternatives are available for operating it? and if I do sell it, what problems will the client face, and how I'll be able to solve it, and what do I need to learn to solve these problems? Why is maintenance necessary? What will happen if I don't do monthly maintenance? How can I ensure that no problems occur? What skill, if I learn it, will enable me to solve these problems easily ? If any one has experience in this field please summarize to me ",
+      "text": "I’m exploring automation for both my personal life and work, but I don’t want to build complicated or general workflows.\n\n**For example business opportunity finder:** Searches complaints, job postings, product reviews, regulatory changes, search trends, and underserved customer groups.\n\nI’m interested in automations that makes a real difference. Could you  share your best workflow ideas for both personal and work life?",
       "is_original_content": false,
       "link_flair_text": "Help",
-      "permalink": "https://reddit.com/r/n8n/comments/1ut44ii/aftersales_problems/",
+      "permalink": "https://reddit.com/r/n8n/comments/1uyzdef/what_personal_or_work_automations_actually_gives/",
       "domain": "self.n8n",
       "is_self": true,
       "comments": [
         {
-          "id": "owstxb9",
+          "id": "oy36b2p",
           "author": "AutoModerator",
           "text": "Want faster, better help? Share your workflow JSON.\n\nA GitHub Gist is the easiest way -- paste your JSON, save as public, drop the link in your post. Folks can import it directly into n8n and reproduce the issue, which gets you real answers instead of guesses.\n\n\n*I am a bot, and this action was performed automatically. Please [contact the moderators of this subreddit](/message/compose/?to=/r/n8n) if you have any questions or concerns.*",
           "score": 1,
-          "created_utc": "2026-07-10 23:43:45",
+          "created_utc": "2026-07-17 13:13:15",
           "is_submitter": false,
           "replies": []
         },
         {
-          "id": "owul3mk",
-          "author": "SirCircumstantial",
-          "text": "# How will you be able to sell it to the client?\n\nReach out to businesses and create content about it. People will find you. First create a sales process for yourself. \n\n# How will they be able to operate it?\n\nA few things to unpack here.   \n**What triggers your automations?**  \n\\- if its trigerred on a schedule *they dont need to operate it*\n\n*-* if its triggered by a webhook *give them an airtable/nocodb/lovable app that they can use to click a button that triggers the webhook with a payload*\n\n\\- alternatives for operating it *read previous point*\n\n*-* if you sell, what problems can the client face *&* why is maintenance necessary: *some apis may update. Some softwares will go out of business. Your servers might crash. For this u should have a list of alternatives, data backups and the patience to go back and repair a workflow. Always inform the client about the third part softwares being used in a workflow. That way they know* *its* *not your fault if an api or a vendor goes down and breaks your workflow.* \n\n*-* what will happen if u dont do monthly maintenance   \n*Something might break. Your clients workflows wont work anymore. I mean lol youll figure this out yourself eventually*\n\n\\- how can u ensure no problems occur and what skills u need to solve them  \n*Its not a perfect world man. Problems will occur. Softwares will update. Your workflows will break. This is why u need error workflows and system notifications. U need to stay informed on whats happening.* \n\n*Skills required: patience. Resilience. Problem solving. Ability to read through api docs. And be good at documenting. Ability to communicate and present problems and how it can be fixed.* \n\n*-* ",
-          "score": 3,
-          "created_utc": "2026-07-11 06:37:20",
+          "id": "oy3aeiv",
+          "author": "jacaug",
+          "text": "Get flight deals from google flights api, then check the weather in the area on those dates. I store them in a database, which has a view for top 5 prices from last 90 days. I don't remember exactly what condition I created in the view, but there were some other things calculated. When something good pops up, I get notified and go on vacation. \n\nJust last week booked a 7 hour roundtrip flights for 300€ per person. Pretty happy with it. ",
+          "score": 4,
+          "created_utc": "2026-07-17 13:32:43",
           "is_submitter": false,
           "replies": [
             {
-              "id": "oww3q58",
-              "author": "_QATAYEF_",
-              "text": "For example, I want to do ai outomation for restaurant for customer service for Automatic reply and make it able to look at virable google sheet change daily for add new offers if the price increased data will be changed and after he take all orders and customer confirms it with him print it directly inside the nearest restaurant....\n What the problema will occur in it if I use best free ai models only or ai include a lot of ai .....\nam I now obligated to review the project daily, or what's the best way to identify potential problems Would it be helpful if I, for example, build ai outomation check daily on all my ai outomations and fixe it directly or I need to be there \nWhat options are available to ensure the best outcome? And if I design the project, what should I do to prevent any problems and guarantee its success?",
+              "id": "oy7t3ar",
+              "author": "702Pilgrim",
+              "text": "That's awesome. Can you share some more about it? I'd like to build my own. ",
               "score": 1,
-              "created_utc": "2026-07-11 13:31:13",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "owvcp3o",
-          "author": "[deleted]",
-          "text": "[removed]",
-          "score": 2,
-          "created_utc": "2026-07-11 10:33:10",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "oww7hzt",
-              "author": "_QATAYEF_",
-              "text": "The client only interested in the ai outomation work he wants it to work and didn't stop because if it stop all his work will stop should i looks at project daily or 3 times weekly ? What I should focus on when I am learning ai outomation for data to understand all mistake to fix it directly \nWhat a tools should I use it to make it easily \n I'm interested in your self-hosted and I want to understand how it work and how I fit it on my projects ",
-              "score": 1,
-              "created_utc": "2026-07-11 13:51:32",
-              "is_submitter": true,
-              "replies": []
-            },
-            {
-              "id": "ox8qunz",
-              "author": "Asleep_Pomegranate18",
-              "text": "i wanna see the json recovery logic. Sent you a message ",
-              "score": 1,
-              "created_utc": "2026-07-13 09:41:50",
+              "created_utc": "2026-07-18 02:25:25",
               "is_submitter": false,
-              "replies": []
+              "replies": [
+                {
+                  "id": "oy9124t",
+                  "author": "jacaug",
+                  "text": "Flights come from rapidapi, has a nice free tier. I have supabase, so using that as database. Weather services all have an api available, i just use openweather. I haven't implemented any hotel or lodging price checks. \n\nFor supabase i have two nodes: one stores raw data, the other retrieves from the view. A small delay node in between. ",
+                  "score": 1,
+                  "created_utc": "2026-07-18 07:47:23",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
             }
           ]
         },
         {
-          "id": "owt1pc1",
-          "author": "jordanc26",
-          "text": "What have you researched yourself so far?",
+          "id": "oy3pkii",
+          "author": "Calm-Dimension3422",
+          "text": "The useful ones are usually small boring loops with a decision at the end, not giant autonomous workflows.\n\nWork examples: new lead/order/ticket comes in, missing context gets enriched, owner gets assigned, and a review item is created only when something is off. Personal examples: subscription renewal reminders, receipt/doc capture into folders with tags, travel price + weather shortlists, maintenance reminders.\n\nFor your business opportunity finder idea, I’d make it an inbox, not a hunter. Collect complaints, job posts, reviews, and regulatory changes into a table, cluster them by problem, then force a weekly human review with the source links and “why this might be real.”\n\nThe value is reducing scan time. The risky part is letting the workflow decide that an opportunity is good without a human sanity check.",
           "score": 1,
-          "created_utc": "2026-07-11 00:28:28",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "owt8lo4",
-              "author": "_QATAYEF_",
-              "text": "The people I listen to in the courses talk about hostinger (cloud server ) to make the workflow work smoothly but I don't know problem will occur after I but it in hostinger and start customer use it !",
-              "score": 1,
-              "created_utc": "2026-07-11 01:08:26",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "owtmo7r",
-          "author": "Low_Acanthisitta_918",
-          "text": "What’s the project?  Will you be automating things on an existing system?  Did you create something AI related? What’s the general use case?",
-          "score": 1,
-          "created_utc": "2026-07-11 02:31:47",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "oww8vue",
-              "author": "_QATAYEF_",
-              "text": "Customer service for a restaurant \nI think I will do it at hostinger \nUntil now didn't \nUse it do solve problem of  customer service \n ",
-              "score": 1,
-              "created_utc": "2026-07-11 13:58:54",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "owvmb4f",
-          "author": "Desperate-Whole1931",
-          "text": "For debugging n8n workflows that fail silently: go to Settings → Log Level and set it to Debug temporarily. Also, the Error Trigger node is underused — wire it up to a Slack or email node so you get notified when a workflow fails instead of discovering it hours later. The error output includes the full execution data so you can trace exactly which node broke and why.",
-          "score": 1,
-          "created_utc": "2026-07-11 11:45:08",
+          "created_utc": "2026-07-17 14:41:56",
           "is_submitter": false,
           "replies": []
         },
         {
-          "id": "oww8j3l",
-          "author": "Thomas_Oplia",
-          "text": "Could you share more about what specifically broke after deployment? I've run into a few common patterns with n8n workflows that fail post-sale — usually either an API rate limit that wasn't tested during development, or a credential refresh that wasn't scheduled. If you're using HTTP nodes with third-party APIs, check whether the endpoints have usage caps that only kick in past a certain threshold. Also worth checking whether your error handles actually log failures instead of just silently dropping them. What's the main symptom you're seeing?",
+          "id": "oy3yoe9",
+          "author": "dev_zohaib",
+          "text": "let me be very brief for  \n**Personal**\n\n1. **Subscription watcher** – scans email, flags price hikes/duplicates\n2. **Receipt logger** – photo → auto-logged expense in a sheet\n3. **Renewal tracker** – pings you 30 days before passport/insurance/warranty deadlines\n4. **Sunday digest** – calendar + tasks + key emails, one summary before the week starts\n\n**Work**\n\n1. **Meeting notes → action items** – transcript in, owner+deadline list out\n2. **Narrow competitor watch** – track 3-5 competitors' pricing/job posts, alert only on real changes\n3. **Review/ticket triage** – clusters feedback by theme (bug, pricing, feature)\n4. **Lead pre-brief** – new lead in → 1-paragraph company snapshot before your call\n\nRule of thumb: **one trigger → one output → one destination.** Skip anything that needs a dashboard.",
           "score": 1,
-          "created_utc": "2026-07-11 13:57:01",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "owx0ou7",
-              "author": "_QATAYEF_",
-              "text": "I think that's the kind of problems anyone would face. Potential Problems \n(Initial/Design Risks):\n\n· Third-party API downtime\n· Unexpected conversation errors\n· Loss of conversation context\n· Rate limit exhaustion\n· Self-hosting n8n issues\n· Token expiration\n· Security vulnerabilities\n\n---\n\nProblems Prevented by Regular Maintenance:\n\n· Outdated n8n version\n· Expired credentials\n· Database bloat from old execution logs\n· SSL certificate expiry\n· Unmonitored server resource exhaustion\n· API response structure changes\n· Stale or inaccurate AI responses\n· Unreviewed conversation quality\n· Missed security patches\n· Accumulated workflow errors\n· No backup or disaster recovery\n· Webhook abuse (missing auth)\n· Missing downtime alerting\n\n   ---\n\nHonestly, I don't know the best way to deal with it, but I've realized that it needs professional monthly maintenance so you don't lose your customers.",
-              "score": 1,
-              "created_utc": "2026-07-11 16:15:54",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "ox68175",
-          "author": "Timely_Cranberry6474",
-          "text": "The biggest thing to learn is debugging in production, not more nodes. Most client pain is boring stuff: creds expire, APIs change, one weird edge case jams the whole flow, nobody knows what failed until 3 days later. So build every workflow like future-you is tired: good error handling, retries where they make sense, alerts, logs, clear naming, and a dead simple handoff doc with what it does and what to do when it breaks. Monthly maintenance is basically checking that all those outside dependencies still behave. If you skip it, maybe nothing happens for a while, then one vendor changes a field name and the client thinks “automation is unreliable”",
-          "score": 1,
-          "created_utc": "2026-07-12 23:10:02",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "ox6d7zk",
-              "author": "_QATAYEF_",
-              "text": "I don't know any way to prevent these recurring problems from happening in the first place. I know there are problems anyway, but I want the best way to deal with them like a professional engineer ",
-              "score": 1,
-              "created_utc": "2026-07-12 23:39:22",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "ox8qgr3",
-          "author": "Asleep_Pomegranate18",
-          "text": "I have the same issues and questions right now\n\n",
-          "score": 1,
-          "created_utc": "2026-07-13 09:38:36",
+          "created_utc": "2026-07-17 15:21:31",
           "is_submitter": false,
           "replies": []
         },
         {
-          "id": "ox94eys",
-          "author": "pvdyck",
-          "text": "Treat delivery and operation as separate products. Ship with client-owned credentials, logging, alerts, backups, rollback notes and a support boundary. \n\nMaintenance exists because APIs, tokens and data shapes change.\n\nYou cannot promise zero failures. Promise detection, recovery time and clear ownership.",
+          "id": "oy425t7",
+          "author": "box4537",
+          "text": "Just talk to your friends and relatives who are using Excels and doing manual work a lot in their job (preferably talk to self employed people), ask them what kind of tool (software) they'd want if they could have a tailor made one just for them.",
           "score": 1,
-          "created_utc": "2026-07-13 11:21:46",
+          "created_utc": "2026-07-17 15:36:30",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oy7uak8",
+          "author": "702Pilgrim",
+          "text": "For personal. The one I use the most is to check an auction site. The auction site doesn't have an easy way to have a favorite list. My flow searches the items from a Google Appsheet app. It's basically one place where I can see what I'm looking for. I'll add more features in the future. ",
+          "score": 1,
+          "created_utc": "2026-07-18 02:32:47",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oy8z8lf",
+          "author": "PresentAssistant3399",
+          "text": "The trick that made automations actually useful for me was to stop building \"systems\" and start automating one annoying decision at a time. If a workflow doesn't end in *me doing something differently*, it's just moving data around.\n\nThat opportunity-finder idea is solid, but it gets useful when you narrow it. Instead of scanning everything, I'd point it at one niche you already understand and one signal — like new complaints in a specific subreddit or G2/Trustpilot reviews for a competitor — dump the raw ones into a sheet, and once a week have an LLM cluster them into \"here are the 3 things people keep complaining about.\" The value isn't the scraping, it's the weekly summary landing where you'll actually read it.\n\nA few that pull real weight for me:\n\nWork:\n\n* Lead/mention watcher: RSS or search feeds for your keywords → filter with an LLM for \"is this a real buying question?\" → ping Slack. Kills hours of manual scrolling.\n* Inbox triage: incoming email → LLM tags it (reply / FYI / invoice / junk) and drafts a reply for the ones that need one. You just approve.\n* Meeting-to-action: transcript → LLM pulls out only the tasks with owners → straight into your task tool.\n\nPersonal:\n\n* Bill/subscription watcher: forward receipts to one address → parsed into a sheet → nudge before renewals so nothing auto-charges you.\n* \"Did I actually do it\" check: pull yesterday's calendar + a habit and send one honest morning line about where the time went.\n* Appointment/price watcher for the specific thing you're waiting on (a slot, a restock, a fare) → alert only when the condition is true.\n\nOne rule that saved me a lot of grief: keep a human in the loop on anything that sends or posts. Let the automation gather and draft; you press the button. It's the difference between a helper and a thing you have to babysit.\n\nWhat niche are you in? Easier to give you a sharp one than a generic list.",
+          "score": 1,
+          "created_utc": "2026-07-18 07:32:07",
           "is_submitter": false,
           "replies": []
         }
@@ -2041,9 +2058,9 @@
       "url": "https://www.reddit.com/r/n8n/comments/1uysor5/ai_automation/",
       "author": "BriefTadpole2963",
       "created_utc": "2026-07-17 07:24:38",
-      "score": 11,
+      "score": 12,
       "num_comments": 26,
-      "upvote_ratio": 0.87,
+      "upvote_ratio": 0.83,
       "text": "recently i found out that my dad is been handling all his employees records manually. i want to help him in his real estate businesss but i dont know how to. im open to suggestions and would love to know about you guys opinions about how to tackle todays problems in real estate\n\n",
       "is_original_content": false,
       "link_flair_text": "Help",
@@ -2224,6 +2241,115 @@
       ]
     },
     {
+      "id": "1uuziiz",
+      "title": "n8n worth it?",
+      "subreddit": "n8n",
+      "url": "https://www.reddit.com/r/n8n/comments/1uuziiz/n8n_worth_it/",
+      "author": "thatguy_adil",
+      "created_utc": "2026-07-13 02:57:59",
+      "score": 11,
+      "num_comments": 13,
+      "upvote_ratio": 0.87,
+      "text": "Hi everyone,\n\nI'm a complete non-tech person with zero coding knowledge, but I want to learn n8n as a valuable skill and eventually earn some income through freelancing.\n\nThe problem is I have no idea where to start or what roadmap to follow.\n\nIf you started from zero, what roadmap would you recommend?\n\nDo I need to learn programming as well? JSON?",
+      "is_original_content": false,
+      "link_flair_text": "Help",
+      "permalink": "https://reddit.com/r/n8n/comments/1uuziiz/n8n_worth_it/",
+      "domain": "self.n8n",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "ox7aut8",
+          "author": "AutoModerator",
+          "text": "Want faster, better help? Share your workflow JSON.\n\nA GitHub Gist is the easiest way -- paste your JSON, save as public, drop the link in your post. Folks can import it directly into n8n and reproduce the issue, which gets you real answers instead of guesses.\n\n\n*I am a bot, and this action was performed automatically. Please [contact the moderators of this subreddit](/message/compose/?to=/r/n8n) if you have any questions or concerns.*",
+          "score": 1,
+          "created_utc": "2026-07-13 02:58:00",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "ox7f4kc",
+          "author": "Flimsy-Budget872",
+          "text": "Don't overthink it, just install it and follow a youtube tutorial to build something you actually need. The JSON stuff will click once you see it in action.",
+          "score": 3,
+          "created_utc": "2026-07-13 03:25:34",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "ox8rsre",
+          "author": "KobiSmalls",
+          "text": "The realistic way of learning something you're completely new to is to actually learn by practicing, like building an actual product/project with it, thats how I learnt n8n and even GoHighLevel. Maybe you should visit Nate Herk's YouTube. He's the 'realest' n8n guy out there, in my opinion. ",
+          "score": 2,
+          "created_utc": "2026-07-13 09:49:35",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oxbykpm",
+          "author": "Popular_War8405",
+          "text": "Wtf is n8n",
+          "score": 2,
+          "created_utc": "2026-07-13 19:15:15",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oxc78ei",
+          "author": "Admirable-Future-633",
+          "text": "n8n can be worth learning, but I would separate “learning n8n” from “earning from n8n.” The first is very doable. The second depends on whether you can solve real problems for people.\n\nYou do not need to become a full programmer first, but you should learn a few basics:\n\n- how JSON works\n- what APIs are\n- how webhooks work\n- how to read error messages\n- how credentials and environment variables work\n\nStart with one workflow that helps you personally. Do not start with “freelancing automation agency.” Build something small, explain what it does, explain what happens if it fails, then build another.\n\nThe skill becomes valuable when you can make boring business work more reliable.",
+          "score": 2,
+          "created_utc": "2026-07-13 19:53:02",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "ox9mljj",
+          "author": "shajid-dev",
+          "text": "Well, I'd say that stop overthink. First you try yourself and get help from AI whenever you get stuck in between. Make sure to understand the basics of nodes first, and how does the node pass down it's payload. I totally get it, you will meet some tech jargons that you never heard of it before, but you can learn it. I prefer these resources as your stepping stones, and if you'd any problem - you can reach it out the community to get real help. \n\n\\- How to install n8n locally (2026 - Docker and NPM) - [https://theowllogic.com/installing-n8n-setup-locally](https://theowllogic.com/installing-n8n-setup-locally)  \n\\- Your first Hello World Workflow - [https://theowllogic.com/first-hello-world-n8n-workflow](https://theowllogic.com/first-hello-world-n8n-workflow)  \n\\- n8n Workflows, Nodes and Data-flow - [https://theowllogic.com/n8n-workflow-nodes-data-flow](https://theowllogic.com/n8n-workflow-nodes-data-flow)  \n\\- Webhooks in n8n for Beginners - [https://theowllogic.com/webhook-in-n8n-explained](https://theowllogic.com/webhook-in-n8n-explained)  \n\\- How to Handle API Rate Limits in n8n - [https://theowllogic.com/how-to-handle-api-rate-limits-in-n8n](https://theowllogic.com/how-to-handle-api-rate-limits-in-n8n)  \n\\- How to Handle Errors Like a Pro in n8n - [https://theowllogic.com/how-to-handle-api-rate-limits-in-n8n](https://theowllogic.com/how-to-handle-api-rate-limits-in-n8n)  \n\\- n8n Expressions Complete Guide - [https://theowllogic.com/how-to-handle-api-rate-limits-in-n8n](https://theowllogic.com/how-to-handle-api-rate-limits-in-n8n)  \n\\- How to Build Condition Logics in n8n (IF/Switch) - [https://theowllogic.com/conditional-logic-in-n8n](https://theowllogic.com/conditional-logic-in-n8n)  \n\\- How to Plan a n8n Workflow: [https://theowllogic.com/plan-n8n-workflow](https://theowllogic.com/plan-n8n-workflow)  \n\\- How to Use n8n Loop Over Items - [https://theowllogic.com/how-to-use-loop-in-n8n](https://theowllogic.com/how-to-use-loop-in-n8n)  \n\\- How to Use Sub-Workflows in n8n - [https://theowllogic.com/n8n-sub-workflows](https://theowllogic.com/n8n-sub-workflows)  \n\\- How to Use Simple Memory Node - [https://theowllogic.com/simple-memory-in-n8n](https://theowllogic.com/simple-memory-in-n8n)  \n\\- How to Build an n8n AI Agent \\[Updated\\] - [https://theowllogic.com/n8n-ai-agent-workflow](https://theowllogic.com/n8n-ai-agent-workflow)  \n\\- How to use Telegram in n8n \\[Bot Creation\\] - [https://theowllogic.com/n8n-telegram-bot](https://theowllogic.com/n8n-telegram-bot)  \n\\- How to use Summarization Chain in n8n \\[Advanced\\]- [https://theowllogic.com/summarization-chain-n8n](https://theowllogic.com/summarization-chain-n8n)\n\nWorkflows Based\n\n\\- 50 Boring Tasks You Can Automate With n8n - [https://theowllogic.com/automate-boring-tasks-n8n](https://theowllogic.com/automate-boring-tasks-n8n)  \n\\- How to Build a Follow-up Email Sequence - [https://theowllogic.com/n8n-followup-email](https://theowllogic.com/n8n-followup-email)  \n\\- How to Build an n8n AI Agent (Step by Step) - [https://theowllogic.com/n8n-ai-agent-workflow](https://theowllogic.com/n8n-ai-agent-workflow)  \n\\- n8n Airtable integration - [https://theowllogic.com/n8n-airtable](https://theowllogic.com/n8n-airtable)  \n\\- How to Use Slack in n8n - [https://theowllogic.com/n8n-slack](https://theowllogic.com/n8n-slack)  \n\\- How to Back up n8n Workflows to GitHub W/Commit History - [https://theowllogic.com/backup-n8n-github](https://theowllogic.com/backup-n8n-github)\n\n",
+          "score": 2,
+          "created_utc": "2026-07-13 13:07:54",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oxalhv1",
+          "author": "FuShiLu",
+          "text": "A search would have shown 200 such threads….",
+          "score": 1,
+          "created_utc": "2026-07-13 15:48:02",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oxen8ub",
+          "author": "One_Beginning2199",
+          "text": "Seems like it, since i started using it my work has become easier.",
+          "score": 1,
+          "created_utc": "2026-07-14 03:26:42",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oxhcvbf",
+          "author": "nahid-in",
+          "text": "first it seems pretty promising when you learn for the first time.... but as you grow you will realize most of the crms and other business tools already have necessary automation inside the platform so n8n becomes unnecessary here... this is what i realized in the last year..",
+          "score": 1,
+          "created_utc": "2026-07-14 14:28:32",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "oxoxk1y",
+          "author": "gusdecool",
+          "text": "For non-tech, N8N is great. Another alternative is Make.\n\nN8N is a tool, your earn income by giving solution, an automation.\n\nRoadmap to learn is easy, think about what is something you keep repeating doing, try automate that.\n\nYou didn't need to learn programming, but know programming will help you unblock the roadblock. For example: there is an integration that N8N didn't provide the node? Easy, make one yourself.",
+          "score": 1,
+          "created_utc": "2026-07-15 14:56:14",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
       "id": "1uu4x2f",
       "title": "The 24-hour window forces a state machine: designing a payment-promise detector for WhatsApp collections (n8n + Gemini)",
       "subreddit": "n8n",
@@ -2396,115 +2522,6 @@
       ]
     },
     {
-      "id": "1uuziiz",
-      "title": "n8n worth it?",
-      "subreddit": "n8n",
-      "url": "https://www.reddit.com/r/n8n/comments/1uuziiz/n8n_worth_it/",
-      "author": "thatguy_adil",
-      "created_utc": "2026-07-13 02:57:59",
-      "score": 10,
-      "num_comments": 13,
-      "upvote_ratio": 0.92,
-      "text": "Hi everyone,\n\nI'm a complete non-tech person with zero coding knowledge, but I want to learn n8n as a valuable skill and eventually earn some income through freelancing.\n\nThe problem is I have no idea where to start or what roadmap to follow.\n\nIf you started from zero, what roadmap would you recommend?\n\nDo I need to learn programming as well? JSON?",
-      "is_original_content": false,
-      "link_flair_text": "Help",
-      "permalink": "https://reddit.com/r/n8n/comments/1uuziiz/n8n_worth_it/",
-      "domain": "self.n8n",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "ox7aut8",
-          "author": "AutoModerator",
-          "text": "Want faster, better help? Share your workflow JSON.\n\nA GitHub Gist is the easiest way -- paste your JSON, save as public, drop the link in your post. Folks can import it directly into n8n and reproduce the issue, which gets you real answers instead of guesses.\n\n\n*I am a bot, and this action was performed automatically. Please [contact the moderators of this subreddit](/message/compose/?to=/r/n8n) if you have any questions or concerns.*",
-          "score": 1,
-          "created_utc": "2026-07-13 02:58:00",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ox7f4kc",
-          "author": "Flimsy-Budget872",
-          "text": "Don't overthink it, just install it and follow a youtube tutorial to build something you actually need. The JSON stuff will click once you see it in action.",
-          "score": 5,
-          "created_utc": "2026-07-13 03:25:34",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ox8rsre",
-          "author": "KobiSmalls",
-          "text": "The realistic way of learning something you're completely new to is to actually learn by practicing, like building an actual product/project with it, thats how I learnt n8n and even GoHighLevel. Maybe you should visit Nate Herk's YouTube. He's the 'realest' n8n guy out there, in my opinion. ",
-          "score": 2,
-          "created_utc": "2026-07-13 09:49:35",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oxbykpm",
-          "author": "Popular_War8405",
-          "text": "Wtf is n8n",
-          "score": 2,
-          "created_utc": "2026-07-13 19:15:15",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oxc78ei",
-          "author": "Admirable-Future-633",
-          "text": "n8n can be worth learning, but I would separate “learning n8n” from “earning from n8n.” The first is very doable. The second depends on whether you can solve real problems for people.\n\nYou do not need to become a full programmer first, but you should learn a few basics:\n\n- how JSON works\n- what APIs are\n- how webhooks work\n- how to read error messages\n- how credentials and environment variables work\n\nStart with one workflow that helps you personally. Do not start with “freelancing automation agency.” Build something small, explain what it does, explain what happens if it fails, then build another.\n\nThe skill becomes valuable when you can make boring business work more reliable.",
-          "score": 2,
-          "created_utc": "2026-07-13 19:53:02",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "ox9mljj",
-          "author": "shajid-dev",
-          "text": "Well, I'd say that stop overthink. First you try yourself and get help from AI whenever you get stuck in between. Make sure to understand the basics of nodes first, and how does the node pass down it's payload. I totally get it, you will meet some tech jargons that you never heard of it before, but you can learn it. I prefer these resources as your stepping stones, and if you'd any problem - you can reach it out the community to get real help. \n\n\\- How to install n8n locally (2026 - Docker and NPM) - [https://theowllogic.com/installing-n8n-setup-locally](https://theowllogic.com/installing-n8n-setup-locally)  \n\\- Your first Hello World Workflow - [https://theowllogic.com/first-hello-world-n8n-workflow](https://theowllogic.com/first-hello-world-n8n-workflow)  \n\\- n8n Workflows, Nodes and Data-flow - [https://theowllogic.com/n8n-workflow-nodes-data-flow](https://theowllogic.com/n8n-workflow-nodes-data-flow)  \n\\- Webhooks in n8n for Beginners - [https://theowllogic.com/webhook-in-n8n-explained](https://theowllogic.com/webhook-in-n8n-explained)  \n\\- How to Handle API Rate Limits in n8n - [https://theowllogic.com/how-to-handle-api-rate-limits-in-n8n](https://theowllogic.com/how-to-handle-api-rate-limits-in-n8n)  \n\\- How to Handle Errors Like a Pro in n8n - [https://theowllogic.com/how-to-handle-api-rate-limits-in-n8n](https://theowllogic.com/how-to-handle-api-rate-limits-in-n8n)  \n\\- n8n Expressions Complete Guide - [https://theowllogic.com/how-to-handle-api-rate-limits-in-n8n](https://theowllogic.com/how-to-handle-api-rate-limits-in-n8n)  \n\\- How to Build Condition Logics in n8n (IF/Switch) - [https://theowllogic.com/conditional-logic-in-n8n](https://theowllogic.com/conditional-logic-in-n8n)  \n\\- How to Plan a n8n Workflow: [https://theowllogic.com/plan-n8n-workflow](https://theowllogic.com/plan-n8n-workflow)  \n\\- How to Use n8n Loop Over Items - [https://theowllogic.com/how-to-use-loop-in-n8n](https://theowllogic.com/how-to-use-loop-in-n8n)  \n\\- How to Use Sub-Workflows in n8n - [https://theowllogic.com/n8n-sub-workflows](https://theowllogic.com/n8n-sub-workflows)  \n\\- How to Use Simple Memory Node - [https://theowllogic.com/simple-memory-in-n8n](https://theowllogic.com/simple-memory-in-n8n)  \n\\- How to Build an n8n AI Agent \\[Updated\\] - [https://theowllogic.com/n8n-ai-agent-workflow](https://theowllogic.com/n8n-ai-agent-workflow)  \n\\- How to use Telegram in n8n \\[Bot Creation\\] - [https://theowllogic.com/n8n-telegram-bot](https://theowllogic.com/n8n-telegram-bot)  \n\\- How to use Summarization Chain in n8n \\[Advanced\\]- [https://theowllogic.com/summarization-chain-n8n](https://theowllogic.com/summarization-chain-n8n)\n\nWorkflows Based\n\n\\- 50 Boring Tasks You Can Automate With n8n - [https://theowllogic.com/automate-boring-tasks-n8n](https://theowllogic.com/automate-boring-tasks-n8n)  \n\\- How to Build a Follow-up Email Sequence - [https://theowllogic.com/n8n-followup-email](https://theowllogic.com/n8n-followup-email)  \n\\- How to Build an n8n AI Agent (Step by Step) - [https://theowllogic.com/n8n-ai-agent-workflow](https://theowllogic.com/n8n-ai-agent-workflow)  \n\\- n8n Airtable integration - [https://theowllogic.com/n8n-airtable](https://theowllogic.com/n8n-airtable)  \n\\- How to Use Slack in n8n - [https://theowllogic.com/n8n-slack](https://theowllogic.com/n8n-slack)  \n\\- How to Back up n8n Workflows to GitHub W/Commit History - [https://theowllogic.com/backup-n8n-github](https://theowllogic.com/backup-n8n-github)\n\n",
-          "score": 2,
-          "created_utc": "2026-07-13 13:07:54",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oxalhv1",
-          "author": "FuShiLu",
-          "text": "A search would have shown 200 such threads….",
-          "score": 1,
-          "created_utc": "2026-07-13 15:48:02",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oxen8ub",
-          "author": "One_Beginning2199",
-          "text": "Seems like it, since i started using it my work has become easier.",
-          "score": 1,
-          "created_utc": "2026-07-14 03:26:42",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oxhcvbf",
-          "author": "nahid-in",
-          "text": "first it seems pretty promising when you learn for the first time.... but as you grow you will realize most of the crms and other business tools already have necessary automation inside the platform so n8n becomes unnecessary here... this is what i realized in the last year..",
-          "score": 1,
-          "created_utc": "2026-07-14 14:28:32",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oxoxk1y",
-          "author": "gusdecool",
-          "text": "For non-tech, N8N is great. Another alternative is Make.\n\nN8N is a tool, your earn income by giving solution, an automation.\n\nRoadmap to learn is easy, think about what is something you keep repeating doing, try automate that.\n\nYou didn't need to learn programming, but know programming will help you unblock the roadblock. For example: there is an integration that N8N didn't provide the node? Easy, make one yourself.",
-          "score": 1,
-          "created_utc": "2026-07-15 14:56:14",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
       "id": "1utjiab",
       "title": "I have a questionable question that needs a reasonable reason for the Code Node 🧠",
       "subreddit": "n8n",
@@ -2513,7 +2530,7 @@
       "created_utc": "2026-07-11 13:00:15",
       "score": 10,
       "num_comments": 16,
-      "upvote_ratio": 0.92,
+      "upvote_ratio": 0.86,
       "text": "Ello! \n\n​so i've been diving deep into n8n and building some wild multi-agent workflows as most of you know from my previous posts, but a random thought has been stuck in my head.. ​Why does the Code Node only support JavaScript and Python?\n\n​I mean, I totally get JavaScript, n8n is literally built on Node.js, and everything passing through the nodes is basically a giant JSON object anyway\n\nIt just makes sense, And Python is the undisputed king of AI and data handling as we all know\n\n​But as someone who absolutely loves C# (and hey, Rust or C++ fans, insert your favorite language here too 🔥), I can't help but wonder... why stop there? It would be epic to write backend automation logic or clean up data using C# 🔥🔥💯 \n\n​Is there a technical limitation keeping n8n from spinning up other runtimes inside that node, or has the team just focused on the two most common web/AI languages? Better yet.. is there a way to actually hack this together and support it myself, or am I about to accidentally burn my self-hosted instance to the ground xdddd? 💀🔥🔥🔥 \n\n​Would love to hear the technical reasoning behind this or if anyone else has desperately wanted to use a different language in their workflows!",
       "is_original_content": false,
       "link_flair_text": "Help",
@@ -2534,7 +2551,7 @@
           "id": "owwdj2y",
           "author": "SirCircumstantial",
           "text": "Neither of those are interpreted languages. \n\nAre u planning to build a compiler node 😂",
-          "score": 3,
+          "score": 4,
           "created_utc": "2026-07-11 14:23:03",
           "is_submitter": false,
           "replies": [
@@ -2624,156 +2641,6 @@
               ]
             }
           ]
-        }
-      ]
-    },
-    {
-      "id": "1uy068r",
-      "title": "How to setup client credentials",
-      "subreddit": "n8n",
-      "url": "https://www.reddit.com/r/n8n/comments/1uy068r/how_to_setup_client_credentials/",
-      "author": "Asleep_Pomegranate18",
-      "created_utc": "2026-07-16 11:30:06",
-      "score": 9,
-      "num_comments": 17,
-      "upvote_ratio": 1.0,
-      "text": "I was wondering that when we are working with clients how do we access the credientals like OAuth token for google apps. Credentials setting up is needed in every node. The first time i did it felt so tideous and time consuming. Do we make the clients go through it over the call?  \nWhat's the best practice for this",
-      "is_original_content": false,
-      "link_flair_text": "Help",
-      "permalink": "https://reddit.com/r/n8n/comments/1uy068r/how_to_setup_client_credentials/",
-      "domain": "self.n8n",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "oxv8yqi",
-          "author": "AutoModerator",
-          "text": "Want faster, better help? Share your workflow JSON.\n\nA GitHub Gist is the easiest way -- paste your JSON, save as public, drop the link in your post. Folks can import it directly into n8n and reproduce the issue, which gets you real answers instead of guesses.\n\n\n*I am a bot, and this action was performed automatically. Please [contact the moderators of this subreddit](/message/compose/?to=/r/n8n) if you have any questions or concerns.*",
-          "score": 1,
-          "created_utc": "2026-07-16 11:30:09",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oxvdfuc",
-          "author": "zunjae",
-          "text": "To be fair, the N8N license disallows running code for clients which is exactly what you’re doing\n\nSet up an environment for them, and let them enter their credentials themselves",
-          "score": 5,
-          "created_utc": "2026-07-16 11:56:47",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "oy2q1e3",
-              "author": "Asleep_Pomegranate18",
-              "text": "How do i set up a seperate environment for them",
-              "score": 1,
-              "created_utc": "2026-07-17 11:46:52",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "oxw6lww",
-          "author": "cyber5234",
-          "text": "I host on a separate infrastructure which they own and over call, I will show them how to login/add their credentials.",
-          "score": 4,
-          "created_utc": "2026-07-16 14:20:53",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "oy2q51x",
-              "author": "Asleep_Pomegranate18",
-              "text": "How to setup the seperate infrastructure. Can you please elaborate",
-              "score": 1,
-              "created_utc": "2026-07-17 11:47:27",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "oxvnf1i",
-          "author": "Admirable-Future-633",
-          "text": "One useful clarification: you normally create the credential once, then select that same saved credential in every node that needs it. You should not rebuild OAuth for each node. For client work, I would have the client authenticate their own account during a short setup call, keep the credential inside their n8n instance when possible, document the scopes, and test a reconnect procedure. Never ask them to send passwords or tokens through chat. Service accounts can help for supported Google services, but Gmail often still needs user OAuth depending on the use case.",
-          "score": 2,
-          "created_utc": "2026-07-16 12:50:27",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oxwgzrp",
-          "author": "jake_that_dude",
-          "text": "don't put client Google tokens in `.env` unless this is your own internal workflow. for client work, the cleanest pattern is their n8n instance, their Google account, and one saved n8n credential reused across every Google node.\n\nfor Gmail expiring every few days, check the Google OAuth app first. if the app is still in testing, refresh tokens can die fast. switch it to production, request offline access, and confirm n8n is using Postgres so the refresh token survives restarts. service accounts only help for Workspace/domain delegation, not a random personal Gmail inbox.",
-          "score": 2,
-          "created_utc": "2026-07-16 15:05:51",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "oy2qe81",
-              "author": "Asleep_Pomegranate18",
-              "text": "Damn such a good method, i will check this out",
-              "score": 1,
-              "created_utc": "2026-07-17 11:48:53",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "oxw8t0s",
-          "author": "Medium_Ad7765",
-          "text": "Put keys in .env and use  postgre for db  and still you want to provide a good service make a workflow that will backup  daily and save it in GDrive ,  by this you will never lost the credentials the refresh token will be stored in db ",
-          "score": 1,
-          "created_utc": "2026-07-16 14:30:33",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oxwm33h",
-          "author": "LukasAnvil",
-          "text": "Pas besoin de les faire poireauter en appel dans la plupart des cas. Pour tout ce qui passe par OAuth2 (Google, etc.), n8n a un bouton \"Sign in with \\[service\\]\" dans le credential — tu crées le credential, tu leur envoies juste le lien de connexion (ou tu partages ton écran 2 min), ils cliquent, ils autorisent sur LEUR compte Google directement, et le token revient dans n8n sans que tu voies leur mot de passe. Zéro fastidieux une fois que tu as fait le setup une première fois.\n\nPour les API keys (pas OAuth) : le client génère sa propre clé depuis son compte et te l'envoie via un canal sécurisé (jamais par chat/email en clair — un gestionnaire de mots de passe partagé type Bitwarden si possible). Toi tu la colles dans le credential, point.\n\nSi tu gères plusieurs clients, un credential séparé par client par service, nommé clairement (ex. \"Google Sheets — Client X\"), ça évite toute confusion plus tard. Le vrai piège c'est de réutiliser un credential entre deux clients — à éviter absolument.",
-          "score": 1,
-          "created_utc": "2026-07-16 15:27:22",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "oxv9qe8",
-          "author": "evanmac42",
-          "text": "The workflow is usually the easy part. Credential management is where automation starts becoming a product instead of a personal project.\n\nPersonally, I wouldn't own the client's accounts or tokens. The client should authenticate their own Google account, and the credentials should stay in their n8n instance whenever possible.\n\nIf I'm hosting the automation, I normally schedule a short onboarding session, connect all the required services once, test everything, and document what was connected. After that, it's mostly maintenance.\n\nIt's a bit tedious the first time, but it's much better than being responsible for someone else's credentials long-term.",
-          "score": 0,
-          "created_utc": "2026-07-16 11:34:53",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "oxva2uk",
-              "author": "black_wadada",
-              "text": "for google accounts, how do you work with the oauth especially for gmail which seems to expire after a couple of days?\n\ni wonder if using a service account deters this",
-              "score": 1,
-              "created_utc": "2026-07-16 11:37:01",
-              "is_submitter": false,
-              "replies": [
-                {
-                  "id": "oxvahha",
-                  "author": "evanmac42",
-                  "text": "That's a good question, and honestly it's one of the reasons I prefer the client to own their credentials.\n\nIn theory, a properly configured OAuth flow with offline access and refresh tokens shouldn't require re-authentication every couple of days. If it does, I'd first look at how the Google OAuth app is configured before changing the architecture.\n\nI haven't had to solve that specific Gmail case yet, so I'm curious to hear what people running this at scale are doing.",
-                  "score": 1,
-                  "created_utc": "2026-07-16 11:39:31",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "oxvbf1c",
-          "author": "Desperate-Whole1931",
-          "text": "For managing credentials in n8n, use the credential sharing feature instead of hardcoding tokens in nodes. Set up credentials once under Settings → Credentials, then reference them across workflows. When a token expires, you update it in one place instead of hunting through 20 workflows. Also: credentials are excluded from n8n exports by default, so you can safely share workflow JSON without leaking secrets.",
-          "score": 0,
-          "created_utc": "2026-07-16 11:45:03",
-          "is_submitter": false,
-          "replies": []
         }
       ]
     }
