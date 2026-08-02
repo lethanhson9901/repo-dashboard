@@ -1,11 +1,11 @@
 {
   "metadata": {
-    "last_updated": "2026-08-02 03:47:06",
+    "last_updated": "2026-08-02 10:19:58",
     "time_filter": "week",
     "subreddit": "machinelearningnews",
     "total_items": 17,
-    "total_comments": 24,
-    "file_size_bytes": 54663
+    "total_comments": 25,
+    "file_size_bytes": 55217
   },
   "items": [
     {
@@ -80,9 +80,9 @@
       "url": "https://www.reddit.com/r/machinelearningnews/comments/1v747xu/pr_native_205x_lossless_f32_compression_just/",
       "author": "Federal_Wafer7598",
       "created_utc": "2026-07-26 13:40:55",
-      "score": 23,
+      "score": 24,
       "num_comments": 14,
-      "upvote_ratio": 0.9,
+      "upvote_ratio": 0.93,
       "text": "Hey everyone,\n\nJust submitted PR #26136 to `llama.cpp` which introduces a completely new way to store and run unquantized models.\n\n**TL;DR:** We found a way to compress Float32 models by 2.05x (down to 15.64 bpw) and BFloat16 models by 1.14x (14.07 bpw) **losslessly**. Your perplexity is exactly the same as the f32 baseline because the weights reconstruct bit-for-bit identical.\n\n**Link to PR:** [https://github.com/ggml-org/llama.cpp/pull/26136](https://github.com/ggml-org/llama.cpp/pull/26136)\n\n**How is this possible?** NN weights aren't random. If you separate the bytes of a float32 tensor into 4 distinct planes (all sign/exponents together, all low-mantissas together), you expose massive correlation. The lowest 16 bits of adjacent weights in a tensor are identical 88% of the time due to how gradient descent works. We apply a predict-only Haar lifting bijection `L(a,b) = (a, (b-a) mod 256)` followed by Z-RLE to squish the zeros.\n\n**What's in the PR for users:** We added two new GGUF types:\n\n1. **QFX32 (for F32 models):** Shrinks a 4.7GB 1B model to 2.3GB. It has two runtime modes:\n   * *Streaming Mode (default):* Keeps the model compressed in RAM. You run a 1B f32 model in 2.3GB RAM. Generation is a bit slower (Z-RLE bottleneck).\n   * *Dequant Mode (*`GGML_QFX32_DEQUANT=1`*):* Decodes to full f32 in RAM on load (takes \\~2 seconds). Inference is actually **faster** than native f32 because the smaller GGUF loads off your SSD faster, leaving the cache warm.\n2. **QFX16 (for BF16 models):** Shrinks BF16 to 14.07 bpw. Uses a 256KB LUT during the inner `vec_dot` loop so there is ZERO math overhead for decoding.\n\nTo use it once merged: `llama-quantize model-f32.gguf output-qfx32.gguf QFX32`\n\nIt's completely mathematically reversible (works perfectly with ±∞, NaN, denormals). Happy to answer any questions about the math or the C implementation!",
       "is_original_content": false,
       "link_flair_text": "Research",
@@ -94,7 +94,7 @@
           "id": "p00j9m1",
           "author": "Complete_Committee_9",
           "text": "https://preview.redd.it/5djb9cqe5qfh1.png?width=714&format=png&auto=webp&s=72eb38ffc81124a96179df6e5041f9c538e780fd\n\nthis is pretty terrible.  \nIt seems you just upcast a bf16 model to f32 by adding zeros, removed the zeros and called it 2x compression?  \nA LUT on the exponent does better, and still is GPU compatible.  \n[https://gisthost.github.io/?5ddf430048393a384b5408a1931a57d9](https://gisthost.github.io/?5ddf430048393a384b5408a1931a57d9)",
-          "score": 4,
+          "score": 3,
           "created_utc": "2026-07-27 07:07:32",
           "is_submitter": false,
           "replies": [
@@ -259,9 +259,9 @@
       "url": "https://www.reddit.com/r/machinelearningnews/comments/1vazfw6/i_built_wisp_a_cuda_engine_for_streaming_744b/",
       "author": "zero_planck",
       "created_utc": "2026-07-30 17:00:55",
-      "score": 19,
+      "score": 18,
       "num_comments": 12,
-      "upvote_ratio": 0.91,
+      "upvote_ratio": 0.88,
       "text": "**I built WISP — a CUDA engine for streaming 744B+ parameter MoE models on consumer hardware**\n\nLast week I found **Colibrì by JustVugg**, a \\~2,400-line pure-C engine exploring a crazy idea:\n\n**What if you don't load the entire model into RAM?**\n\nMoE models only activate a fraction of their parameters for each token. So instead of trying to fit hundreds of billions of parameters in memory, you can stream the experts the model actually needs.\n\nThat idea sent me down a rabbit hole.\n\nI built **WISP — Stream What Shouldn't Run.**\n\nThe architecture is basically:\n\n    Token\n      ↓\n    Model router selects experts\n      ↓\n    VRAM cache → hit? use it\n      ↓\n    RAM cache → hit? transfer it\n      ↓\n    NVMe → stream cold expert\n      ↓\n    LRU promotes frequently used experts\n    \n\nThe goal is to turn **VRAM + RAM + NVMe into one memory hierarchy** for MoE inference.\n\nWISP adds a few things on top of the original streaming concept:\n\n**CUDA acceleration** for attention/FFN compute, a C hot path for expert loading and caching, and Python for orchestration.\n\n**Absorbed MLA** for architectures like DeepSeek, keeping the compressed latent representation instead of storing fully expanded K/V tensors.\n\n**Double-buffered async streaming**, so CPU/I/O can prepare expert data while the GPU is working instead of making the GPU sit around waiting for storage.\n\n**Speculative decoding**, using a smaller same-family model to draft tokens while the target model verifies them.\n\n**Hardware auto-configuration**, which profiles VRAM, RAM, storage throughput, etc. and calculates the cache split automatically.\n\nI tested the current engine with **Mixtral-8x7B** on:\n\n    Ryzen 7 9800X3D\n    RTX 5070 12GB\n    32GB DDR5-6000\n    PCIe 4.0 NVMe (~4.34 GB/s)\n    \n\nCurrent measured result:\n\n**0.75 tok/s cold**\n\nAfter only 80 tokens, the expert cache reached a **68.8% hit rate**.\n\nMixtral does 64 expert activations/token (2 experts × 32 layers), and all 256 experts in my tested representation occupy \\~14.3GB, so once they're warm in RAM the engine can stop doing cold SSD expert reads.\n\nThe biggest thing I learned building this:\n\n**The bottleneck isn't necessarily CUDA. It's bytes moved per token.**\n\nI spent time thinking GPU kernels would be the main optimization target.\n\nThen you realize shaving milliseconds off a matmul doesn't matter much when your runtime is waiting for a giant expert to come off NVMe.\n\nCache locality, expert size, storage bandwidth and I/O overlap become insanely important.\n\nAnd that's why I'm particularly interested in testing this architecture on much larger MoE models with smaller individual experts.\n\nThe project currently targets:\n\n    GLM-5.2       744B\n    DeepSeek-V3   671B\n    DeepSeek-R1   671B\n    Mixtral-8x7B   47B\n    Mixtral-8x22B 141B\n    \n    Future targets:\n    Kimi K3\n    Qwen3.8\n    \n\nAnd yes, huge credit to **JustVugg / Colibrì**.\n\nColibrì demonstrated the core streaming concept. WISP is my attempt to generalize it into a multi-model runtime with CUDA, hierarchical caching, MLA support, async streaming and speculation.\n\nColibrì:  \n[github.com/JustVugg/colibri](http://github.com/JustVugg/colibri)\n\nWISP:  \n[github.com/zeroextub-collab/wisp](http://github.com/zeroextub-collab/wisp)\n\nMIT licensed. **73 tests passing.**\n\nStill experimental, and I'm deliberately separating measured numbers from projected ones.\n\nI'm especially interested in feedback from people working on **CUDA, inference runtimes, MoE routing, quantization, or storage/I/O optimization**.\n\nWhat would you optimize first: **expert prediction/prefetching, cache policy, quantization, or the I/O pipeline?**",
       "is_original_content": false,
       "link_flair_text": "ML/CV/DL News",
@@ -385,15 +385,33 @@
       "comments": []
     },
     {
+      "id": "1vc4xns",
+      "title": "DeepSeek Upgrades DeepSeek-V4-Flash-0731 with Major Agentic and Coding Gains",
+      "subreddit": "machinelearningnews",
+      "url": "https://www.reddit.com/r/machinelearningnews/comments/1vc4xns/deepseek_upgrades_deepseekv4flash0731_with_major/",
+      "author": "ai-lover",
+      "created_utc": "2026-07-31 22:09:23",
+      "score": 13,
+      "num_comments": 0,
+      "upvote_ratio": 0.89,
+      "text": "The architecture is identical to the April preview. Same 284B total parameters. Every gain came from re-post-training.\n\n**1. It beats the bigger model in its own family**\n\n→ Terminal Bench 2.1: 82.7 vs 72.1 for V4-Pro (Preview) → DeepSWE: 54.4 vs 12.8 → Toolathlon-Verified: 70.3 vs 55.9 → NL2Repo: 54.2 vs 38.5\n\nV4-Pro carries 1.6T parameters with 49B activated. The smaller model wins on every agentic benchmark DeepSeek published.\n\n**2. The pricing gap is the story**\n\n→ $0.14 per 1M input tokens on a cache miss \n\n→ $0.0028 on a cache hit, 50x cheaper \n\n→ $0.28 per 1M output tokens, roughly a third of V4-Pro → 2,500 concurrency limit vs 500 for Pro\n\n**3. Weights are MIT-licensed and ungated**\n\n→ Self-hosting is unblocked for commercial use \n\n→ DeepSeek's vLLM example runs on a single 4xGB300 node \n\n→ Unsloth's 3-bit build is 103GB, needs \\~110GB combined RAM and VRAM \n\n→ Every expert stays resident, so 284B must fit even though 13B fire\n\n**Full analysis:** [https://www.marktechpost.com/2026/07/31/deepseek-upgrades-deepseek-v4-flash-0731-with-major-agentic-and-coding-gains/](https://www.marktechpost.com/2026/07/31/deepseek-upgrades-deepseek-v4-flash-0731-with-major-agentic-and-coding-gains/)\n\n**Model on HF:** [https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731)\n\n**Performance:** [https://artificialanalysis.ai/models/deepseek-v4-flash](https://artificialanalysis.ai/models/deepseek-v4-flash)",
+      "is_original_content": false,
+      "link_flair_text": "Research",
+      "permalink": "https://reddit.com/r/machinelearningnews/comments/1vc4xns/deepseek_upgrades_deepseekv4flash0731_with_major/",
+      "domain": "self.machinelearningnews",
+      "is_self": true,
+      "comments": []
+    },
+    {
       "id": "1vanbok",
       "title": "Meet Token Saver: An Open-Source MCP Extension Using Local Hybrid RAG to Cut Claude PDF Token Costs 90-99%",
       "subreddit": "machinelearningnews",
       "url": "https://github.com/Marktechpost/Token-Saver",
       "author": "ai-lover",
       "created_utc": "2026-07-30 08:08:08",
-      "score": 13,
+      "score": 12,
       "num_comments": 2,
-      "upvote_ratio": 0.88,
+      "upvote_ratio": 0.84,
       "text": "[External Link]",
       "is_original_content": false,
       "link_flair_text": "Cool Stuff",
@@ -429,7 +447,7 @@
       "url": "https://www.reddit.com/r/machinelearningnews/comments/1v8dbob/kimi_ai_and_kvcacheai_open_sources_agentenv_a/",
       "author": "ai-lover",
       "created_utc": "2026-07-27 21:08:40",
-      "score": 12,
+      "score": 11,
       "num_comments": 0,
       "upvote_ratio": 1.0,
       "text": "Kimi AI and kvcache-ai Open Sources ‘AgentENV’: A Distributed System that Powers Agentic Reinforcement Learning (RL) Training for Kimi K3\n\nMost open infrastructure shipped alongside frontier models targets the GPU side of the stack. AgentENV targets the other half of agentic RL: environment throughput.\n\nThe Kimi team and kvcache-ai open-sourced it under MIT as part of Kimi K3 Open Day.\n\n**1. Each sandbox is a Firecracker microVM, not a container**\n\nKernel-level isolation per environment. That matters when the code running inside was generated by the model you are training.\n\n**2. The snapshot numbers are the whole point**\n\n→ Boot or resume: under 50 ms\n\n→ Pause: under 100 ms\n\n→ Incremental snapshot: under 100 ms, even under heavy disk modification\n\nThese are figures reported by the project. No independent benchmark has been published.\n\n**3. Fork is the primitive built for RL**\n\nA running sandbox clones into up to 16 independent children on the same node. Each child inherits the source filesystem, memory, and resource config.\n\nPractical effect: expensive setup runs once. Install dependencies, clone the repo, reach a task state, then branch that exact state into parallel rollouts.\n\n**4. The API is E2B-compatible**\n\nPoint E2B\\_API\\_URL at your server and the existing Python or TypeScript SDK runs unchanged. That is a deliberate distribution choice, and probably the reason this gets adopted.\n\n**Full analysis:** [https://www.marktechpost.com/2026/07/27/kimi-ai-and-kvcache-ai-open-sources-agentenv/](https://www.marktechpost.com/2026/07/27/kimi-ai-and-kvcache-ai-open-sources-agentenv/)\n\n**GitHub Repo:** [https://github.com/kvcache-ai/AgentEnv](https://github.com/kvcache-ai/AgentEnv)\n\n**Documentation:** [https://kvcache-ai.github.io/AgentENV/](https://kvcache-ai.github.io/AgentENV/)",
@@ -441,40 +459,32 @@
       "comments": []
     },
     {
-      "id": "1v95feh",
-      "title": "🌎 How we run Earth-observation models across North America in 30.5 hours",
+      "id": "1vchvqb",
+      "title": "MiniMax Releases MiniMax H3: An Omni-Modal Video Model That Generates 15-Second 2K Clips With Native Stereo Audio",
       "subreddit": "machinelearningnews",
-      "url": "https://www.reddit.com/gallery/1v95doc",
-      "author": "ai2_official",
-      "created_utc": "2026-07-28 17:38:23",
-      "score": 11,
-      "num_comments": 0,
-      "upvote_ratio": 1.0,
-      "text": "[External Link]",
-      "is_original_content": false,
-      "link_flair_text": "Research",
-      "permalink": "https://reddit.com/r/machinelearningnews/comments/1v95feh/how_we_run_earthobservation_models_across_north/",
-      "domain": "reddit.com",
-      "is_self": false,
-      "comments": []
-    },
-    {
-      "id": "1vc4xns",
-      "title": "DeepSeek Upgrades DeepSeek-V4-Flash-0731 with Major Agentic and Coding Gains",
-      "subreddit": "machinelearningnews",
-      "url": "https://www.reddit.com/r/machinelearningnews/comments/1vc4xns/deepseek_upgrades_deepseekv4flash0731_with_major/",
+      "url": "https://www.reddit.com/r/machinelearningnews/comments/1vchvqb/minimax_releases_minimax_h3_an_omnimodal_video/",
       "author": "ai-lover",
-      "created_utc": "2026-07-31 22:09:23",
+      "created_utc": "2026-08-01 08:38:52",
       "score": 11,
-      "num_comments": 0,
-      "upvote_ratio": 0.84,
-      "text": "The architecture is identical to the April preview. Same 284B total parameters. Every gain came from re-post-training.\n\n**1. It beats the bigger model in its own family**\n\n→ Terminal Bench 2.1: 82.7 vs 72.1 for V4-Pro (Preview) → DeepSWE: 54.4 vs 12.8 → Toolathlon-Verified: 70.3 vs 55.9 → NL2Repo: 54.2 vs 38.5\n\nV4-Pro carries 1.6T parameters with 49B activated. The smaller model wins on every agentic benchmark DeepSeek published.\n\n**2. The pricing gap is the story**\n\n→ $0.14 per 1M input tokens on a cache miss \n\n→ $0.0028 on a cache hit, 50x cheaper \n\n→ $0.28 per 1M output tokens, roughly a third of V4-Pro → 2,500 concurrency limit vs 500 for Pro\n\n**3. Weights are MIT-licensed and ungated**\n\n→ Self-hosting is unblocked for commercial use \n\n→ DeepSeek's vLLM example runs on a single 4xGB300 node \n\n→ Unsloth's 3-bit build is 103GB, needs \\~110GB combined RAM and VRAM \n\n→ Every expert stays resident, so 284B must fit even though 13B fire\n\n**Full analysis:** [https://www.marktechpost.com/2026/07/31/deepseek-upgrades-deepseek-v4-flash-0731-with-major-agentic-and-coding-gains/](https://www.marktechpost.com/2026/07/31/deepseek-upgrades-deepseek-v4-flash-0731-with-major-agentic-and-coding-gains/)\n\n**Model on HF:** [https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731)\n\n**Performance:** [https://artificialanalysis.ai/models/deepseek-v4-flash](https://artificialanalysis.ai/models/deepseek-v4-flash)",
+      "num_comments": 2,
+      "upvote_ratio": 0.92,
+      "text": "MiniMax Releases MiniMax H3: An Omni-Modal Video Model That Generates 15-Second 2K Clips With Native Stereo Audio. It ranks **#1** in video editing on Artificial Analysis, at $0.13 per second of 2K output. \n\nHere are some important key takeaways:\n\n𝟭. 𝗧𝗵𝗲 𝘁𝗼𝗸𝗲𝗻𝗶𝘇𝗲𝗿 𝗶𝘀 𝘁𝗵𝗲 main 𝘀𝘁𝗼𝗿𝘆\n\nMiniMax rebuilt the H-series tokenizer from scratch as H3-VAE.\n\n→ 4× gain in effective sequence length\n\n→ That compression is what makes native 2K affordable, not an upscale of 1080p\n\n𝟮. 𝗖𝗮𝗽𝘁𝗶𝗼𝗻𝗶𝗻𝗴 𝗯𝗲𝗰𝗮𝗺𝗲 𝗮 𝗿𝗲𝗹𝗮𝘁𝗶𝗼𝗻𝘀𝗵𝗶𝗽 𝗽𝗿𝗼𝗯𝗹𝗲𝗺\n\nH3 does not just describe the target video. It describes how the input context relates to the target, and how elements inside that context relate to each other.\n\n→ \\~100K tokens of inference per source, distilled to \\~4K on average\n\n→ This is why one natural-language instruction replaces a fixed task list\n\n𝟯. 𝗧𝗵𝗲𝘆 𝘁𝗵𝗿𝗲𝘄 𝗮𝘄𝗮𝘆 𝘁𝗵𝗲𝗶𝗿 𝗼𝘄𝗻 𝗯𝗲𝘀𝘁 𝗮𝗿𝗰𝗵𝗶𝘁𝗲𝗰𝘁𝘂𝗿𝗲\n\nMultimodal context tripled the variance in sequence length. Understanding and generation became different compute shapes. So MiniMax set aside the Hailuo-02 architecture and separated the two workloads in training.\n\n→ \\~30% higher end-to-end training throughput\n\n𝟰. 𝗡𝗼 𝘀𝘂𝗽𝗲𝗿-𝗿𝗲𝘀𝗼𝗹𝘂𝘁𝗶𝗼𝗻 𝗺𝗼𝗱𝘂𝗹𝗲\n\nFor 2K, the base model regenerates its own low-res output in-context, re-reading the original multimodal context.\n\n→ Recovers small text and brand marks that an upscaler can only guess at\n\n→ For product labels and on-screen copy, that is the difference between usable and reshoot\n\n𝟱. 𝗪𝗵𝗮𝘁 𝘁𝗵𝗶𝘀 𝗰𝗼𝘀𝘁𝘀\n\n→ $7.80 per minute at 2K with audio\n\n→ Seedance 2.0 at 1080p: $22.45/min\n\n→ Kling 3.0 at 1080p: $20.16/min\n\n→ Gemini Omni Flash still undercuts it at $6.00/min\n\n**Full analysis**: [https://www.marktechpost.com/2026/08/01/minimax-releases-minimax-h3-an-omni-modal-video-model-that-generates-15-second-2k-clips-with-native-stereo-audio/](https://www.marktechpost.com/2026/08/01/minimax-releases-minimax-h3-an-omni-modal-video-model-that-generates-15-second-2k-clips-with-native-stereo-audio/)\n\n**Technical details:** [https://www.minimax.io/blog/minimax-h3](https://www.minimax.io/blog/minimax-h3)",
       "is_original_content": false,
-      "link_flair_text": "Research",
-      "permalink": "https://reddit.com/r/machinelearningnews/comments/1vc4xns/deepseek_upgrades_deepseekv4flash0731_with_major/",
+      "link_flair_text": "Cool Stuff",
+      "permalink": "https://reddit.com/r/machinelearningnews/comments/1vchvqb/minimax_releases_minimax_h3_an_omnimodal_video/",
       "domain": "self.machinelearningnews",
       "is_self": true,
-      "comments": []
+      "comments": [
+        {
+          "id": "p13aobz",
+          "author": "SanDiegoDude",
+          "text": "Been testing this model for about a week on an early access API - it's incredibly good. Not quite as high of a ceiling as SD2.0/2.5 or Flux 3 but way more affordable, and yeah, going to be released open weight, with early reports that it'll work on consumer hardware with as little as 12GB of VRAM (tho not particularly fast). Oh, and it kinda goes without saying, but this thing smokes Veo and MJ video generators. \n\nI'm so stoked. This is OSS video's Krea2 moment - open weights output that is as good as the closed source guys. Love it!",
+          "score": 2,
+          "created_utc": "2026-08-01 16:07:15",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
     },
     {
       "id": "1v9vv7q",
@@ -514,32 +524,22 @@
       ]
     },
     {
-      "id": "1vchvqb",
-      "title": "MiniMax Releases MiniMax H3: An Omni-Modal Video Model That Generates 15-Second 2K Clips With Native Stereo Audio",
+      "id": "1v95feh",
+      "title": "🌎 How we run Earth-observation models across North America in 30.5 hours",
       "subreddit": "machinelearningnews",
-      "url": "https://www.reddit.com/r/machinelearningnews/comments/1vchvqb/minimax_releases_minimax_h3_an_omnimodal_video/",
-      "author": "ai-lover",
-      "created_utc": "2026-08-01 08:38:52",
+      "url": "https://www.reddit.com/gallery/1v95doc",
+      "author": "ai2_official",
+      "created_utc": "2026-07-28 17:38:23",
       "score": 9,
-      "num_comments": 2,
-      "upvote_ratio": 0.91,
-      "text": "MiniMax Releases MiniMax H3: An Omni-Modal Video Model That Generates 15-Second 2K Clips With Native Stereo Audio. It ranks **#1** in video editing on Artificial Analysis, at $0.13 per second of 2K output. \n\nHere are some important key takeaways:\n\n𝟭. 𝗧𝗵𝗲 𝘁𝗼𝗸𝗲𝗻𝗶𝘇𝗲𝗿 𝗶𝘀 𝘁𝗵𝗲 main 𝘀𝘁𝗼𝗿𝘆\n\nMiniMax rebuilt the H-series tokenizer from scratch as H3-VAE.\n\n→ 4× gain in effective sequence length\n\n→ That compression is what makes native 2K affordable, not an upscale of 1080p\n\n𝟮. 𝗖𝗮𝗽𝘁𝗶𝗼𝗻𝗶𝗻𝗴 𝗯𝗲𝗰𝗮𝗺𝗲 𝗮 𝗿𝗲𝗹𝗮𝘁𝗶𝗼𝗻𝘀𝗵𝗶𝗽 𝗽𝗿𝗼𝗯𝗹𝗲𝗺\n\nH3 does not just describe the target video. It describes how the input context relates to the target, and how elements inside that context relate to each other.\n\n→ \\~100K tokens of inference per source, distilled to \\~4K on average\n\n→ This is why one natural-language instruction replaces a fixed task list\n\n𝟯. 𝗧𝗵𝗲𝘆 𝘁𝗵𝗿𝗲𝘄 𝗮𝘄𝗮𝘆 𝘁𝗵𝗲𝗶𝗿 𝗼𝘄𝗻 𝗯𝗲𝘀𝘁 𝗮𝗿𝗰𝗵𝗶𝘁𝗲𝗰𝘁𝘂𝗿𝗲\n\nMultimodal context tripled the variance in sequence length. Understanding and generation became different compute shapes. So MiniMax set aside the Hailuo-02 architecture and separated the two workloads in training.\n\n→ \\~30% higher end-to-end training throughput\n\n𝟰. 𝗡𝗼 𝘀𝘂𝗽𝗲𝗿-𝗿𝗲𝘀𝗼𝗹𝘂𝘁𝗶𝗼𝗻 𝗺𝗼𝗱𝘂𝗹𝗲\n\nFor 2K, the base model regenerates its own low-res output in-context, re-reading the original multimodal context.\n\n→ Recovers small text and brand marks that an upscaler can only guess at\n\n→ For product labels and on-screen copy, that is the difference between usable and reshoot\n\n𝟱. 𝗪𝗵𝗮𝘁 𝘁𝗵𝗶𝘀 𝗰𝗼𝘀𝘁𝘀\n\n→ $7.80 per minute at 2K with audio\n\n→ Seedance 2.0 at 1080p: $22.45/min\n\n→ Kling 3.0 at 1080p: $20.16/min\n\n→ Gemini Omni Flash still undercuts it at $6.00/min\n\n**Full analysis**: [https://www.marktechpost.com/2026/08/01/minimax-releases-minimax-h3-an-omni-modal-video-model-that-generates-15-second-2k-clips-with-native-stereo-audio/](https://www.marktechpost.com/2026/08/01/minimax-releases-minimax-h3-an-omni-modal-video-model-that-generates-15-second-2k-clips-with-native-stereo-audio/)\n\n**Technical details:** [https://www.minimax.io/blog/minimax-h3](https://www.minimax.io/blog/minimax-h3)",
+      "num_comments": 0,
+      "upvote_ratio": 0.92,
+      "text": "[External Link]",
       "is_original_content": false,
-      "link_flair_text": "Cool Stuff",
-      "permalink": "https://reddit.com/r/machinelearningnews/comments/1vchvqb/minimax_releases_minimax_h3_an_omnimodal_video/",
-      "domain": "self.machinelearningnews",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "p13aobz",
-          "author": "SanDiegoDude",
-          "text": "Been testing this model for about a week on an early access API - it's incredibly good. Not quite as high of a ceiling as SD2.0/2.5 or Flux 3 but way more affordable, and yeah, going to be released open weight, with early reports that it'll work on consumer hardware with as little as 12GB of VRAM (tho not particularly fast). Oh, and it kinda goes without saying, but this thing smokes Veo and MJ video generators. \n\nI'm so stoked. This is OSS video's Krea2 moment - open weights output that is as good as the closed source guys. Love it!",
-          "score": 1,
-          "created_utc": "2026-08-01 16:07:15",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
+      "link_flair_text": "Research",
+      "permalink": "https://reddit.com/r/machinelearningnews/comments/1v95feh/how_we_run_earthobservation_models_across_north/",
+      "domain": "reddit.com",
+      "is_self": false,
+      "comments": []
     },
     {
       "id": "1vc6pxb",
@@ -548,9 +548,9 @@
       "url": "https://www.reddit.com/gallery/1vc68hm",
       "author": "ai2_official",
       "created_utc": "2026-07-31 23:22:23",
-      "score": 8,
+      "score": 9,
       "num_comments": 0,
-      "upvote_ratio": 0.76,
+      "upvote_ratio": 0.81,
       "text": "[External Link]",
       "is_original_content": false,
       "link_flair_text": "Research",
@@ -566,9 +566,9 @@
       "url": "https://www.reddit.com/r/machinelearningnews/comments/1vayunu/what_is_the_status_of_amd_gpus_in_machine_learning/",
       "author": "GhastHast",
       "created_utc": "2026-07-30 16:40:05",
-      "score": 6,
+      "score": 7,
       "num_comments": 15,
-      "upvote_ratio": 0.88,
+      "upvote_ratio": 1.0,
       "text": "Hey guys, as a web dev i want to get into local llms, fine tuning etc. Going to build a new desktop for it but i am not sure about picking an nvidia or amd. Everyone says nvidia works way more seamless but in my country rx9070 and even 9080 worths same compared to 5060ti, while 5070ti's price is sky high. I searched about the current state of amd gpu's in llm dev area but couldn't find helpful results. thanks in advance.",
       "is_original_content": false,
       "link_flair_text": "Research",
@@ -666,6 +666,24 @@
       ]
     },
     {
+      "id": "1vdajbj",
+      "title": "NVIDIA AI Releases Molt: A PyTorch-Native Agentic Reinforcement Learning Framework",
+      "subreddit": "machinelearningnews",
+      "url": "https://i.redd.it/h8oj2x5vowgh1.png",
+      "author": "ai-lover",
+      "created_utc": "2026-08-02 06:32:03",
+      "score": 7,
+      "num_comments": 0,
+      "upvote_ratio": 0.9,
+      "text": "[External Link]",
+      "is_original_content": false,
+      "link_flair_text": "Research",
+      "permalink": "https://reddit.com/r/machinelearningnews/comments/1vdajbj/nvidia_ai_releases_molt_a_pytorchnative_agentic/",
+      "domain": "i.redd.it",
+      "is_self": false,
+      "comments": []
+    },
+    {
       "id": "1v71zwr",
       "title": "Open source AI systems for fintech: code, architecture, docs",
       "subreddit": "machinelearningnews",
@@ -684,24 +702,6 @@
       "comments": []
     },
     {
-      "id": "1v6zszw",
-      "title": "Genesis Mission Overview",
-      "subreddit": "machinelearningnews",
-      "url": "https://github.com/donutloop/donutloop-genesis/blob/main/README.md",
-      "author": "donutloop",
-      "created_utc": "2026-07-26 10:11:19",
-      "score": 3,
-      "num_comments": 0,
-      "upvote_ratio": 1.0,
-      "text": "[External Link]",
-      "is_original_content": false,
-      "link_flair_text": "Research",
-      "permalink": "https://reddit.com/r/machinelearningnews/comments/1v6zszw/genesis_mission_overview/",
-      "domain": "github.com",
-      "is_self": false,
-      "comments": []
-    },
-    {
       "id": "1vako67",
       "title": "Selection of small models suitable for fine-tuning",
       "subreddit": "machinelearningnews",
@@ -709,7 +709,7 @@
       "author": "KienShen",
       "created_utc": "2026-07-30 05:40:03",
       "score": 3,
-      "num_comments": 2,
+      "num_comments": 3,
       "upvote_ratio": 1.0,
       "text": "I am developing an AI agent software, and the agent currently runs well on glm5.2 and deepseekv4. I now want to train a small model that can complete a certain range of tasks when locally deployed. I can refine these training data from the large model, as the software will eventually be deployed on an edge AI gateway, so the feasible model size is about 2B and below. Do you have any good recommendations?\n\nCurrently, I am focusing on the following models, which I have not started training yet. I would like to know if the community has any recommended models for this scenario:\n\n* minicpm-5 1b\n* gemma4-e2b\n* qwen3.5-2b",
       "is_original_content": false,
@@ -736,6 +736,15 @@
               "replies": []
             }
           ]
+        },
+        {
+          "id": "p17lmzi",
+          "author": "ProposalOrganic1043",
+          "text": "It depends on compute available and also the task. But i woul prefer to use a smaller quant of a Qwen-4B instead of pushing a 1B and 2B model. The native capabilities of those models are too low for agentic stuff, like they struggle with json schema generation.\n\n",
+          "score": 1,
+          "created_utc": "2026-08-02 06:54:08",
+          "is_submitter": false,
+          "replies": []
         }
       ]
     },
