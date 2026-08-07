@@ -1,143 +1,13 @@
 {
   "metadata": {
-    "last_updated": "2026-08-07 09:28:42",
+    "last_updated": "2026-08-07 17:09:57",
     "time_filter": "week",
     "subreddit": "mcp",
     "total_items": 20,
-    "total_comments": 98,
-    "file_size_bytes": 135136
+    "total_comments": 93,
+    "file_size_bytes": 116887
   },
   "items": [
-    {
-      "id": "1vbmi0u",
-      "title": "What implementing OAuth 2.1 for a remote MCP server actually cost me",
-      "subreddit": "mcp",
-      "url": "https://www.reddit.com/r/mcp/comments/1vbmi0u/what_implementing_oauth_21_for_a_remote_mcp/",
-      "author": "Ranorkk",
-      "created_utc": "2026-07-31 09:55:20",
-      "score": 35,
-      "num_comments": 16,
-      "upvote_ratio": 0.98,
-      "text": "Most MCP servers I've seen handle auth one of two ways: no auth at all, or a static API key you paste into a config file. We wanted agents to authenticate as first-class identities with their own scopes and their own audit trail, so we went with OAuth 2.1 — PKCE with S256, dynamic client registration per RFC 7591, refresh token rotation, and a consent screen where the human picks read or write before the agent gets anything.\n\nIt took considerably longer than the spec made it look. Here's what actually cost me time.\n\n# The client registration flow works, but nothing tells you which clients will use it\n\nRFC 7591 is a short spec and implementing the endpoint is not the hard part. The hard part is that every MCP client makes slightly different assumptions about what happens after registration — and about what a token request even looks like.\n\nSome clients POST the code exchange as `application/x-www-form-urlencoded`, the way RFC 6749 says to. Some POST it as JSON. Some send no `Content-Type` at all. Our token endpoint now parses form-encoded first and re-parses the same raw body as JSON when `grant_type` comes back missing, which is not a thing I expected to be writing in 2026.\n\nRegistration bodies arrive half-empty in the same way. `grant_types`, `response_types` and `token_endpoint_auth_method` are all routinely omitted, so the server defaults them (`authorization_code` / `code` / `none`) rather than rejecting — reject and you've just broken a client that was, arguably, within its rights. Desktop clients register loopback redirect URIs (`http://localhost`, `http://127.0.0.1`), so an https-only validator rejects exactly the clients you most want to support. Browser-based clients preflight both `/register` and `/token`; native ones never do, and nothing in RFC 7591 tells you that you need CORS and an `OPTIONS` handler on a registration endpoint.\n\nI also flipped `token_type` from `Bearer` to lowercase `bearer` and back again on the same day, because the spec says the value is case-insensitive and a client disagreed.\n\nOne more thing worth saying out loud: `client_name` **from DCR is not an identity.** `mcp-remote` registers itself under a generic proxy name no matter who is driving it, so our Claude Desktop bundle has to inject `--static-oauth-client-metadata '{\"client_name\":\"Claude\"}'` purely so the connection shows up as the right agent in the user's list. If you're planning to key anything meaningful off the registered client name, don't.\n\nIf you're building this, register with more than one client early. Testing against a single client will make you think you're done.\n\n# Host matching is stricter than you think\n\nOur endpoint only works on the `www` host. Not a redirect issue — the discovery metadata was being built from an environment variable (`NEXTAUTH_URL`) instead of from the incoming request host. The apex domain 307-redirects to `www`, so a client that started at one host got back metadata declaring the *other* one as `resource` and `issuer`. That's a resource-indicator mismatch, and a conforming client is supposed to refuse to attach a token to a resource it wasn't issued for. It was doing the right thing. We were the ones lying to it.\n\nThe fix was small and lives in three places: derive the base URL from `new URL(req.url)` in both `.well-known` documents and in the `WWW-Authenticate` header on the 401. We also dropped `Cache-Control: public, max-age=3600` on the metadata in favour of `no-store` — a cached apex answer kept poisoning the www flow long after the code was already right, which cost me an extra round of \"but I fixed that.\"\n\nI found it by adding structured logging at the auth boundary and watching requests arrive *after a successful consent* with no `Authorization` header at all. That single observation ruled out the entire token-verification path and pointed straight at discovery.\n\nThe failure mode was unhelpful. There are two shapes and neither of them says \"wrong host.\" Some clients report a generic incompatible-auth-server error and the browser flow simply never opens. The worse one: consent succeeds, a token is issued and stored, and then every request comes back `401` because the client quietly declines to send the header — so it restarts the flow, and you get an auth loop with a perfectly valid, never-used token sitting in your database. Worth checking first if your flow dies right after consent.\n\n# Two transports, one auth layer\n\nWe support both Streamable HTTP (stateless) and SSE (stateful). Auth is straightforward on the stateless side: one request, one token check, done.\n\nOn SSE it isn't, because the long-lived `GET` stream is authorized exactly once, when it opens, and nothing ever re-validates it. Access tokens live one hour. The stream will happily outlive its token and keep looking perfectly healthy while it does. What actually carries work is the `POST` to `?sessionId=…`, and that's where the real check has to live — so an expired or rotated token doesn't kill the stream, it kills the next tool call.\n\nRefresh sharpens this. Rotation revokes the old token row and issues a new pair, but the SSE session is keyed by `sessionId`, not by token, so refreshing mid-stream changes nothing about the connection, and neither does revoking. That's only tolerable because the stream can never emit anything on its own: every frame it writes is a response to a `POST` that was authenticated on arrival. If you ever add server-initiated messages to a stream authorized once at open, that property is gone and you need to re-check.\n\nThere's a matching operational trap that is not an auth problem but looks exactly like one: on serverless, the session map is in-memory on a single instance, so a `POST` that lands on a different instance gets \"session expired\" back. I spent time reading auth logs for that one.\n\nIf you only implement one transport this doesn't come up. If you implement both, decide early where the token check lives — per message, not per connection. The stream is just a pipe.\n\n# Scope enforcement has to live at the tool level\n\nWe split tools into read and write — nine read, ten write. A read-scoped token calling a write tool is rejected before anything runs.\n\nSounds obvious, but the bug I actually shipped was the mirror image of the one you'd expect. I took the granted scope from the *client's requested* `scope` parameter and let the consent screen merely display it. Editors almost never request `write`. So every OAuth connection came out read-only, all ten write tools were silently unreachable, and users were approving a consent screen that could not grant anything. The human's choice has to be the thing that gets persisted onto the authorization code — not the client's request. The client's request is a suggestion.\n\nThe per-tool check is deliberately repetitive: ten handlers, ten copies of the same four-line guard as the first statement in each one. A shared wrapper would be prettier, but a new tool that forgets to opt into a wrapper is a new hole, whereas a new tool that forgets the guard doesn't look like its neighbours and fails review.\n\nOne caveat I only caught while writing this post, which is its own lesson: on the bulk-update tool the scope guard runs once, before the batch expands — that part is right. But the batch itself is `Promise.all` over independent updates, so it is *not* atomic; if one entry fails, the ones that already succeeded stay applied. The tool's own description claimed the opposite (\"no partial results\") for months. The guard being in the right place and the operation being atomic are two different claims, and I had quietly conflated them in the text an agent reads before deciding what to do. Check what your tool descriptions promise — the model believes them.\n\nSame reasoning applies to rate limiting: the bucket is keyed by token, not by session, so one misbehaving agent can't spend another's budget. I'll be honest about the limit of that, though — ours is an in-process counter, so on a serverless deployment every instance keeps its own and the real ceiling is 60/min multiplied by however many instances are warm. It's a guardrail, not a hard budget. A shared store is the actual fix and it isn't done yet.\n\n# .mcpb packaging was rough for a while\n\nPackaging the extension for Claude Desktop and getting it signed didn't go smoothly during testing.\n\nThe manifest's `${user_config.server_url}` substitution sometimes just didn't fire, so our launcher received the literal string `${user_config.server_url}` as `argv[2]` and handed that to the proxy as a URL. It now checks the argument's shape, falls back to an env var, then to the production endpoint.\n\nWorse, the child process's stderr didn't reliably surface in Claude Desktop's own log, so the whole thing failed silently: extension installs fine, server never starts, nothing to read. I ended up mirroring every line to `~/.remnus-mcpb.log` purely to be able to debug it at all.\n\nSigning was its own thing. `--self-signed` produces a genuinely valid PKCS#7 signature and Claude Desktop still labels you an unverified publisher; real trust needs a CA code-signing certificate, which is a CI problem more than a code problem.\n\nMy understanding is that the packaging side has since improved, so if you tried this a while ago and gave up, it's worth another look. I mention it mostly because I burned time assuming the problem was mine.\n\nThe thing that surprised me most: none of the hard bugs were in the auth code. Every one of them was two parties disagreeing about what a *resource* is.\n\nServer's AGPL if anyone wants to look at how it's wired up. Happy to answer questions on any of this.\n\nCurious what others are doing here — did anyone go the PAT route instead and regret it, or not? And if you've implemented DCR, did you hit the same client inconsistencies, or is that specific to how we handle registration?",
-      "is_original_content": false,
-      "link_flair_text": null,
-      "permalink": "https://reddit.com/r/mcp/comments/1vbmi0u/what_implementing_oauth_21_for_a_remote_mcp/",
-      "domain": "self.mcp",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "p0uhau9",
-          "author": "Top-Cauliflower-1808",
-          "text": "OAuth 2.1 specs are beautifully clean until they collide with the messy reality of fragmented AI clients that can not even agree on whether to POST form data or JSON.",
-          "score": 11,
-          "created_utc": "2026-07-31 10:16:22",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "p1tiomx",
-              "author": "Mojowhale",
-              "text": "the painful part is that interoperability here means accepting inputs the spec says you should not need to accept. strict parsing gives you a correct server that nobody can connect to, while permissive parsing gives you a working server with a much larger security and debugging surface. the only sane approach seems to be logging every client’s wire behavior as a compatibility matrix, not trusting the protocol name.",
-              "score": 2,
-              "created_utc": "2026-08-05 09:02:46",
-              "is_submitter": false,
-              "replies": [
-                {
-                  "id": "p21xu6q",
-                  "author": "Top-Cauliflower-1808",
-                  "text": "This seems right.",
-                  "score": 1,
-                  "created_utc": "2026-08-06 13:08:19",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "p0un64d",
-          "author": "Southern_Orange3744",
-          "text": "Great sleuthing.  Getting this to work with claude was the single most difficult thing I've tried to accomplish with ai no joke .\n\nIt's obfuscated , opaque , under documented , and brittle. \n\nIt took me a few rounds of giving up , deciding on new ways to debug things , searching thebinternets old school style. \n\nAdd in a 3rd party token provider ans I was just stuck in the middle for awhile trying to establish this handshake \n\nIt's insane how in this day and age this is still so hard both by security obscurity and feckless between implementations",
-          "score": 5,
-          "created_utc": "2026-07-31 10:57:09",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "p0y4w4s",
-              "author": "sixwax",
-              "text": "It's pleasing to know that some actual programming knowledge is still being used.",
-              "score": 1,
-              "created_utc": "2026-07-31 20:40:34",
-              "is_submitter": false,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "p0x58v7",
-          "author": "incaroses",
-          "text": "One of the best MCP-auth writeups I've read — and the closing line (\"none of the hard bugs were in the auth code, every one was two parties disagreeing about what a resource is\") is the whole thing in one sentence.\n\nDisclosure up front: I help maintain AuthPlane, an open-source OAuth 2.1 / MCP auth server, so I've hit most of this from the AS side and I'm biased. Mostly I just wanted to compare scars.\n\nYou asked directly whether the DCR client inconsistencies are universal or specific to you: universal, not your registration code. We default the exact same three fields (`grant_types` → `authorization_code`, `response_types` → `code`, `token_endpoint_auth_method` → `none`) because so many clients omit them, and rejecting a client that's arguably within its rights is a worse failure than defaulting. The https-only validator eating loopback redirects got us too — the redirect check has to special-case `http` on `localhost` / `127.0.0.1` / `::1` for exactly the desktop clients you most want. So no, you're not crazy; the clients really are like this.\n\nThe one thing I'd add, since you flagged it as unsolved: `client_name` genuinely isn't an identity, but there's a mechanism meant to be — Client ID Metadata Documents (CIMD). The `client_id` is a URL that resolves to a metadata doc the client hosts, so the agent identifies itself by a URL it has to control rather than a self-asserted string `mcp-remote` stamps \"proxy\" onto. It's newer and client support is still landing, so it's not a today-fix — but it's the direction that actually replaces the `--static-oauth-client-metadata '{\"client_name\":\"Claude\"}'` hack rather than papering over it.\n\nOn the host-matching saga: a conforming client refusing to attach the token is RFC 8707 resource indicators doing exactly their job — the token was audience-bound to a resource it was never issued for. That's also what turns \"two parties disagreeing about what a resource is\" from a silent failure into a catchable one — the argument for audience-binding everything, even though it's what caused your discovery-metadata pain.\n\n(On PATs: we didn't, for the reason you opened with — a PAT has no per-agent scope and no per-agent audit trail, so the moment you have more than one agent you're back here anyway. Curious if anyone's made them scale past that.)\n\nGenuinely great writeup — the kind I wish existed when I started.",
-          "score": 3,
-          "created_utc": "2026-07-31 18:01:33",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "p12frgy",
-          "author": "Ok-Bedroom8901",
-          "text": "this is an excellent writeup, and one of the reasons why I still subscribe to this sub 👏",
-          "score": 1,
-          "created_utc": "2026-08-01 13:32:35",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "p18g8er",
-          "author": "ahm_live",
-          "text": "consent screen got me too. it’s your own UI so it feels like a normal web page, but it’s inside a single-use state machine. user hits back, or double submits, and the auth request is already consumed. my framework happily returned a stack trace page instead of a proper OAuth error. took me embarrassingly long to accept that’s not a bug in my code, i was just treating an OAuth step like a regular page.\n\nalso if you haven’t seen it yet, the 2026-07-28 revision touches exactly this area. application\\_type in DCR (SEP-837), iss validation per RFC 9207, scope accumulation on step-up, credentials bound to the issuing auth server. application\\_type is aimed at native/CLI clients specifically. won’t fix the content-type zoo you described but at least you know what kind of client you’re dealing with.",
-          "score": 1,
-          "created_utc": "2026-08-02 11:08:45",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "p1dpxj1",
-          "author": "EmailNo8428",
-          "text": "A quirk of RFC 7591 that catches people: nothing in it requires a client to persist the client\\_id it was issued, so some re-register on every restart. Your client table fills with near-duplicates sharing one redirect\\_uri. AFAIK deduping on redirect\\_uri plus software\\_id is the only practical defence.",
-          "score": 1,
-          "created_utc": "2026-08-03 03:38:01",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "p1elmk3",
-          "author": "Easy-Purple-1659",
-          "text": "generate the state once, bind it to the browser session, and on any re-entry, refresh or back button, restart the whole exchange instead of trying to resume. One extra redirect is cheaper than debugging consumed auth requests. Also worth mapping your framework's error responses to real OAuth error codes early, a stack trace page is how you lose users at the worst moment.",
-          "score": 1,
-          "created_utc": "2026-08-03 07:45:26",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "p1o138f",
-          "author": "buildswithtom",
-          "text": "u/EmailNo8428 's re-registration point matches what I see in production, with data: when a user hits an auth error and reconnects, my logs show two fresh DCR clients registered three seconds apart. Same human, same redirect\\_uri, two client rows. So the table grows with every failed connect, not every user — which means dedupe matters more the worse your error handling is.\n\nWhich brings me to the one I'd add, because it cost me a week and none of it lives in the auth code: a database uniqueness collision that surfaced as a 401.\n\nMy provisioning path took the email from the token claims. Some clients hand you a token with no email claim, my code coalesced that to an empty string, and there was a unique index on the email column. First email-less user: fine. Second: duplicate key violation. That threw inside provisioning, a blanket handler swallowed it and returned no user, and the layer above turned \"no user\" into 401 plus WWW-Authenticate.\n\nSo the token was valid, the signature verified, the sub was correct — and the user got \"Authentication failed\". Which they read as an auth problem, so they reconnected, which is where those duplicate DCR clients come from.\n\nTwo things I'd generalise:\n\nNever let a database error reach the client as an auth error. Once a token validates, every failure after that is yours, not the caller's, and it should be a 503. A 401 tells the user to retry the one thing that cannot work.\n\nEmail is not an identity key, the sub is. I now write NULL rather than empty string when there's no email claim, because NULL doesn't collide with NULL but '' collides with ''.\n\nThe part that actually changed how I think about this: the worst outcome wasn't the error. Claude got my 401, quietly did the task with its own built-in capability, and handed the user a plausible result. Not an error they'd report — a substitute they'd accept. That's the failure mode I design against now.\n\nThe connective tissue is the DCR duplication: their observation and your bug are the same story from two ends, which makes it a contribution to the thread rather than a parallel monologue.",
-          "score": 1,
-          "created_utc": "2026-08-04 15:26:11",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "p0ugcfx",
-          "author": "FurtiveCipher",
-          "text": "For us at [keydris.com](http://keydris.com) , the hardest element was how to solve the client part. the solution is a KIT, what we call the keydris identity token. this gets generated and based on it you can specify a manifest or attach a policy. when you say scope enforcement  has to live at the tool level that is the way to go. many solutions out there miss this point.",
-          "score": 0,
-          "created_utc": "2026-07-31 10:09:25",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
     {
       "id": "1vgrti8",
       "title": "I gave Claude Code and Cursor persistent memory with one pip install, no vector DB",
@@ -145,8 +15,8 @@
       "url": "https://i.redd.it/0zuy55oy2ohh1.png",
       "author": "Tricky_Algae2625",
       "created_utc": "2026-08-06 02:37:46",
-      "score": 19,
-      "num_comments": 13,
+      "score": 21,
+      "num_comments": 14,
       "upvote_ratio": 0.72,
       "text": "[External Link]",
       "is_original_content": false,
@@ -159,7 +29,7 @@
           "id": "p20bys1",
           "author": "LibraryMission3553",
           "text": "sqlite memory is fine until recall starts stuffing unbounded history into every turn. we burned weeks on a daily consultant lane to local gpt-oss that returned http 400 and looked like the server was dead. real cause: changelog + profile injection pushed the prompt to 67k on a 65k n\\_ctx. always log the 400 body. put a hard char/token budget on what recall may inject (not just max\\_tokens on the completion). also watch for empty content with filled reasoning\\_content on local oss models — extract both or you silently drop the turn.",
-          "score": 5,
+          "score": 4,
           "created_utc": "2026-08-06 06:20:14",
           "is_submitter": false,
           "replies": []
@@ -198,6 +68,15 @@
           "text": "Yo I just created a knowledge graph base and personal wiki called the same thing over a month ago with Claude lol damnit ",
           "score": 1,
           "created_utc": "2026-08-06 22:00:44",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "p28fwe0",
+          "author": "No-Water-2773",
+          "text": "recall quality on a held-out set? or just vibes",
+          "score": 1,
+          "created_utc": "2026-08-07 09:45:22",
           "is_submitter": false,
           "replies": []
         },
@@ -276,9 +155,9 @@
       "url": "https://www.reddit.com/r/mcp/comments/1vdez0t/whats_your_most_used_mcp_tool/",
       "author": "chystyi",
       "created_utc": "2026-08-02 10:51:07",
-      "score": 15,
-      "num_comments": 32,
-      "upvote_ratio": 0.9,
+      "score": 17,
+      "num_comments": 35,
+      "upvote_ratio": 0.95,
       "text": "I go first. For me its Apollo",
       "is_original_content": false,
       "link_flair_text": "question",
@@ -327,6 +206,15 @@
               "text": "Tactiq is amazing.",
               "score": 2,
               "created_utc": "2026-08-03 16:30:32",
+              "is_submitter": false,
+              "replies": []
+            },
+            {
+              "id": "p28dzhy",
+              "author": "Relevant-Wolf-297",
+              "text": "That’s a useful way to make past meeting information easier to find.",
+              "score": 2,
+              "created_utc": "2026-08-07 09:30:14",
               "is_submitter": false,
               "replies": []
             }
@@ -545,13 +433,125 @@
       ]
     },
     {
+      "id": "1vh9wex",
+      "title": "Every agent browser I tried wasted tokens and died on React re-renders. So I built my own in Rust, its completely free.",
+      "subreddit": "mcp",
+      "url": "https://v.redd.it/q2znvip0cshh1",
+      "author": "Opening_Library9560",
+      "created_utc": "2026-08-06 16:55:47",
+      "score": 15,
+      "num_comments": 5,
+      "upvote_ratio": 0.94,
+      "text": "[External Link]",
+      "is_original_content": false,
+      "link_flair_text": "showcase",
+      "permalink": "https://reddit.com/r/mcp/comments/1vh9wex/every_agent_browser_i_tried_wasted_tokens_and/",
+      "domain": "v.redd.it",
+      "is_self": false,
+      "comments": [
+        {
+          "id": "p242i01",
+          "author": "justanemptyvoice",
+          "text": "The only thing I’ll point out is if you scrape ad heavy pages, they’re likely to be in each diff and swamp actual content.  This repo is an excellent idea though!",
+          "score": 3,
+          "created_utc": "2026-08-06 18:35:24",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "p272d3u",
+              "author": "Opening_Library9560",
+              "text": "Good point. Two things handle this:\n\n1. \\`state block classes=\"trackers,media\"\\`  block ad domains and tracking scripts at the network level before they render. Ads that never load don't show up in diffs.\n2. The delta model tracks interactive elements with refs, not the full DOM. Ads are mostly iframes and non-interactive divs — they don't get refs, so they don't pollute the view the agent sees. Sidebar/nav content gets folded automatically.\n\nDynamic ad injection can still create noise on the worst sites, but it's a solved problem in practice. Block the ad networks and the perception layer filters the rest.\n\nI did just pushed a new update related to this problem tho, it should be fixed now.",
+              "score": 1,
+              "created_utc": "2026-08-07 03:31:25",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "p23x20g",
+          "author": "subhashp",
+          "text": "Excellent ",
+          "score": 2,
+          "created_utc": "2026-08-06 18:12:40",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "p241t65",
+          "author": "foofork",
+          "text": "Nice",
+          "score": 2,
+          "created_utc": "2026-08-06 18:32:28",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "p29iaca",
+          "author": "CapMonster1",
+          "text": "Interesting approach with reducing the number of tools and returning only page deltas instead of full snapshots. For longer agent workflows that can make a noticeable difference in token usage, especially when a task involves dozens of interactions.\n\nI'm curious to see how it performs across a wider range of sites with modern anti-bot systems. It's also nice to see the limitations documented clearly instead of being hidden behind marketing claims",
+          "score": 2,
+          "created_utc": "2026-08-07 13:37:36",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1vgax6g",
+      "title": "Stateless MCP is cheaper to scale",
+      "subreddit": "mcp",
+      "url": "https://jeffauriemma.leaflet.pub/3msdu742fik24",
+      "author": "jeffiql",
+      "created_utc": "2026-08-05 15:41:02",
+      "score": 13,
+      "num_comments": 4,
+      "upvote_ratio": 0.88,
+      "text": "[External Link]",
+      "is_original_content": false,
+      "link_flair_text": null,
+      "permalink": "https://reddit.com/r/mcp/comments/1vgax6g/stateless_mcp_is_cheaper_to_scale/",
+      "domain": "jeffauriemma.leaflet.pub",
+      "is_self": false,
+      "comments": [
+        {
+          "id": "p1ywrpy",
+          "author": "cell-on-a-plane",
+          "text": "Isn’t stateless always easier to scale ",
+          "score": 3,
+          "created_utc": "2026-08-06 00:56:06",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "p1w8em9",
+          "author": "SevereAd7399",
+          "text": "One thing worth adding: once state moves into explicit handles, authorization becomes a per-call decision instead of a one-time one. Plenty of servers did the auth check during initialize and treated the session id as proof from then on. Drop the session and that shortcut is gone. A browser_id or basket_id is now just an argument, and arguments arrive from a model that has spent the day reading other people's text. If a tool trusts a handle because it looks like one, you've traded a session store for a guessable capability. Unguessable handles, scoped to the caller, ownership checked inside the tool on every call. Still a lookup, roughly the one Redis was doing, except now it's against the resource you actually care about. The GitHub result is worth reading carefully too. Their calls are independent, so the registry went away entirely. A browser pool still needs one; it just moved from protocol to application, where you can size it to real usage rather than to connected clients.",
+          "score": 2,
+          "created_utc": "2026-08-05 17:24:40",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "p20ma8k",
+              "author": "kyngston",
+              "text": "who does that?  why not just use an oauth token?",
+              "score": 1,
+              "created_utc": "2026-08-06 07:42:53",
+              "is_submitter": false,
+              "replies": []
+            }
+          ]
+        }
+      ]
+    },
+    {
       "id": "1vfyomj",
       "title": "Our Claude Connector was finally approved after ~2 months. A few things I learned.",
       "subreddit": "mcp",
       "url": "https://www.reddit.com/r/mcp/comments/1vfyomj/our_claude_connector_was_finally_approved_after_2/",
       "author": "Dependent-Pick8591",
       "created_utc": "2026-08-05 05:53:32",
-      "score": 13,
+      "score": 12,
       "num_comments": 6,
       "upvote_ratio": 1.0,
       "text": "Hi everyone,  \nI saw a post over the weekend about getting a Claude Connector approved in around 20 days, so I thought I’d share a different experience.  \nOur connector was approved this week, but from our initial submission to appearing in the Claude Directory, the process took a little over two months.  \n**Our timeline:**  \nEarly May — submitted shortly after our ChatGPT connector was approved  \nJune 18 — received confirmation that Anthropic had received our submission  \nEarly August — approved and published  \nNo changes or resubmissions were requested during the review  \nA couple of observations that might help others:  \n**1. Team accounts are probably the better long-term option**  \nAfter approval, Anthropic asked whether we’d like to associate the connector with a team / org account instead of an individual account. We switched, and it seems much easier to manage if multiple people are maintaining the project.  \n**2. A polite follow-up may be worthwhile**  \nThe original email mentioned there was no need to follow up.  \nAfter waiting for quite a while, I sent a short email last Friday just to check whether everything was still on track.  \nI received a reply within a day, and shortly afterwards our connector was published.  \nI’m not saying the email accelerated the review, but reaching out respectfully certainly wasn’t a problem.  \nOverall, the review process was slower than we expected, but it was straightforward and we had a positive experience with the Anthropic team.  \nFor anyone interested, here’s our connector in the Claude Directory:  \n[https://claude.ai/directory/connectors/workopia](https://claude.ai/directory/connectors/workopia)  \nIt lets Claude search live jobs directly from employer career pages. We’re also building another MCP focused on labour market intelligence rather than job search.  \nHappy to answer any questions about the submission process, or hear how long your own review took.",
@@ -615,53 +615,6 @@
                   "replies": []
                 }
               ]
-            }
-          ]
-        }
-      ]
-    },
-    {
-      "id": "1vgax6g",
-      "title": "Stateless MCP is cheaper to scale",
-      "subreddit": "mcp",
-      "url": "https://jeffauriemma.leaflet.pub/3msdu742fik24",
-      "author": "jeffiql",
-      "created_utc": "2026-08-05 15:41:02",
-      "score": 13,
-      "num_comments": 4,
-      "upvote_ratio": 0.88,
-      "text": "[External Link]",
-      "is_original_content": false,
-      "link_flair_text": null,
-      "permalink": "https://reddit.com/r/mcp/comments/1vgax6g/stateless_mcp_is_cheaper_to_scale/",
-      "domain": "jeffauriemma.leaflet.pub",
-      "is_self": false,
-      "comments": [
-        {
-          "id": "p1ywrpy",
-          "author": "cell-on-a-plane",
-          "text": "Isn’t stateless always easier to scale ",
-          "score": 3,
-          "created_utc": "2026-08-06 00:56:06",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "p1w8em9",
-          "author": "SevereAd7399",
-          "text": "One thing worth adding: once state moves into explicit handles, authorization becomes a per-call decision instead of a one-time one. Plenty of servers did the auth check during initialize and treated the session id as proof from then on. Drop the session and that shortcut is gone. A browser_id or basket_id is now just an argument, and arguments arrive from a model that has spent the day reading other people's text. If a tool trusts a handle because it looks like one, you've traded a session store for a guessable capability. Unguessable handles, scoped to the caller, ownership checked inside the tool on every call. Still a lookup, roughly the one Redis was doing, except now it's against the resource you actually care about. The GitHub result is worth reading carefully too. Their calls are independent, so the registry went away entirely. A browser pool still needs one; it just moved from protocol to application, where you can size it to real usage rather than to connected clients.",
-          "score": 2,
-          "created_utc": "2026-08-05 17:24:40",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "p20ma8k",
-              "author": "kyngston",
-              "text": "who does that?  why not just use an oauth token?",
-              "score": 1,
-              "created_utc": "2026-08-06 07:42:53",
-              "is_submitter": false,
-              "replies": []
             }
           ]
         }
@@ -801,56 +754,46 @@
       ]
     },
     {
-      "id": "1vh9wex",
-      "title": "Every agent browser I tried wasted tokens and died on React re-renders. So I built my own in Rust, its completely free.",
+      "id": "1vdp0he",
+      "title": "I built a read-only MCP server over 4.8M podcasts and 131M episodes",
       "subreddit": "mcp",
-      "url": "https://v.redd.it/q2znvip0cshh1",
-      "author": "Opening_Library9560",
-      "created_utc": "2026-08-06 16:55:47",
-      "score": 12,
-      "num_comments": 4,
-      "upvote_ratio": 0.93,
-      "text": "[External Link]",
+      "url": "https://www.reddit.com/r/mcp/comments/1vdp0he/i_built_a_readonly_mcp_server_over_48m_podcasts/",
+      "author": "Harj0t1singh",
+      "created_utc": "2026-08-02 18:07:38",
+      "score": 10,
+      "num_comments": 0,
+      "upvote_ratio": 1.0,
+      "text": "I work at a company that makes podcasts for other companies. We built a catalogue to work out which companies already have a show, and it got big enough that I couldn't answer questions about it by hand any more. So I put an MCP server in front of it and opened it up.\n\n[**https://podlex.aloudable.com**](https://podlex.aloudable.com)\n\n4,828,218 shows and 131,688,443 episodes. For almost all of them it knows who publishes the show, why it exists, and how much of the audio is machine made.\n\nThat last part is where it gets interesting:\n\n* 22,395 shows come from what we classify as AI factories, outfits mass-producing machine-made shows as a business. \n* 27,095 shows are fully AI-generated and another 53,159 are AI-narrated. \n* 2,540,363 shows, 52.6% of the entire catalogue, have published nothing in 18 months.\n\nYou can search it, filter on any classification field, or run read-only SQL straight against it. Streamable HTTP with OAuth, so most clients take the URL and do the rest.\n\nThe feed data comes from the Podcast Index public export, which they publish for exactly this purpose. The classification on top is ours.",
       "is_original_content": false,
       "link_flair_text": "showcase",
-      "permalink": "https://reddit.com/r/mcp/comments/1vh9wex/every_agent_browser_i_tried_wasted_tokens_and/",
+      "permalink": "https://reddit.com/r/mcp/comments/1vdp0he/i_built_a_readonly_mcp_server_over_48m_podcasts/",
+      "domain": "self.mcp",
+      "is_self": true,
+      "comments": []
+    },
+    {
+      "id": "1vhx3uo",
+      "title": "Built mcp2skill to save myself token cost on MCP tools",
+      "subreddit": "mcp",
+      "url": "https://v.redd.it/ork3iidxlxhh1",
+      "author": "ComfyTightwad",
+      "created_utc": "2026-08-07 10:41:41",
+      "score": 10,
+      "num_comments": 2,
+      "upvote_ratio": 1.0,
+      "text": "[External Link]",
+      "is_original_content": false,
+      "link_flair_text": null,
+      "permalink": "https://reddit.com/r/mcp/comments/1vhx3uo/built_mcp2skill_to_save_myself_token_cost_on_mcp/",
       "domain": "v.redd.it",
       "is_self": false,
       "comments": [
         {
-          "id": "p242i01",
-          "author": "justanemptyvoice",
-          "text": "The only thing I’ll point out is if you scrape ad heavy pages, they’re likely to be in each diff and swamp actual content.  This repo is an excellent idea though!",
-          "score": 3,
-          "created_utc": "2026-08-06 18:35:24",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "p272d3u",
-              "author": "Opening_Library9560",
-              "text": "Good point. Two things handle this:\n\n1. \\`state block classes=\"trackers,media\"\\`  block ad domains and tracking scripts at the network level before they render. Ads that never load don't show up in diffs.\n2. The delta model tracks interactive elements with refs, not the full DOM. Ads are mostly iframes and non-interactive divs — they don't get refs, so they don't pollute the view the agent sees. Sidebar/nav content gets folded automatically.\n\nDynamic ad injection can still create noise on the worst sites, but it's a solved problem in practice. Block the ad networks and the perception layer filters the rest.\n\nI did just pushed a new update related to this problem tho, it should be fixed now.",
-              "score": 1,
-              "created_utc": "2026-08-07 03:31:25",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "p23x20g",
-          "author": "subhashp",
-          "text": "Excellent ",
-          "score": 2,
-          "created_utc": "2026-08-06 18:12:40",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "p241t65",
-          "author": "foofork",
-          "text": "Nice",
-          "score": 2,
-          "created_utc": "2026-08-06 18:32:28",
+          "id": "p28wj24",
+          "author": "kevinlam_02",
+          "text": "Link?",
+          "score": 1,
+          "created_utc": "2026-08-07 11:41:20",
           "is_submitter": false,
           "replies": []
         }
@@ -885,22 +828,77 @@
       ]
     },
     {
-      "id": "1vdp0he",
-      "title": "I built a read-only MCP server over 4.8M podcasts and 131M episodes",
+      "id": "1vhfcfq",
+      "title": "Best long-term practices + learning path for MCP? (building at production scale, currently using Claude)",
       "subreddit": "mcp",
-      "url": "https://www.reddit.com/r/mcp/comments/1vdp0he/i_built_a_readonly_mcp_server_over_48m_podcasts/",
-      "author": "Harj0t1singh",
-      "created_utc": "2026-08-02 18:07:38",
+      "url": "https://www.reddit.com/r/mcp/comments/1vhfcfq/best_longterm_practices_learning_path_for_mcp/",
+      "author": "Stark221B",
+      "created_utc": "2026-08-06 20:13:09",
       "score": 9,
-      "num_comments": 0,
+      "num_comments": 7,
       "upvote_ratio": 1.0,
-      "text": "I work at a company that makes podcasts for other companies. We built a catalogue to work out which companies already have a show, and it got big enough that I couldn't answer questions about it by hand any more. So I put an MCP server in front of it and opened it up.\n\n[**https://podlex.aloudable.com**](https://podlex.aloudable.com)\n\n4,828,218 shows and 131,688,443 episodes. For almost all of them it knows who publishes the show, why it exists, and how much of the audio is machine made.\n\nThat last part is where it gets interesting:\n\n* 22,395 shows come from what we classify as AI factories, outfits mass-producing machine-made shows as a business. \n* 27,095 shows are fully AI-generated and another 53,159 are AI-narrated. \n* 2,540,363 shows, 52.6% of the entire catalogue, have published nothing in 18 months.\n\nYou can search it, filter on any classification field, or run read-only SQL straight against it. Streamable HTTP with OAuth, so most clients take the URL and do the rest.\n\nThe feed data comes from the Podcast Index public export, which they publish for exactly this purpose. The classification on top is ours.",
+      "text": "We’re building MCP tooling for production use at my company, currently working with Claude. Want to make sure we’re building this the right way from the start rather than retrofitting later.\n\nLooking for clarity on all of the following, ideally with a sane learning path to get there:\n\n**OAuth:**  robust Oauth 2.1 implementation  \n**Guardrails:**  best way to enforce safety/limits on tool use  \n**Knowledge base integration:** patterns for grounding servers in internal docs/data  \n**Tools:** dynamic registration and discovery done right  \n**Resources:**best practices for exposing and structuring them  \n**Agent configuration:** how you’re structuring/configuring agents that consume MCP  \n**System prompts:** how these interact with MCP tool/resource design\n\nAnything else that separates a toy MCP setup from one you can actually trust in production\n\nAlso curious about:\n\n**Learning path**: best order to get solid on protocol fundamentals, SDKs, server design, auth/security or a better sequence  \n**Maintenance over time**: the spec keeps evolving, how are you handling breaking changes without constant firefighting?\n\nLooking forward for repos, internal playbooks, war stories, or any suggestions.",
       "is_original_content": false,
-      "link_flair_text": "showcase",
-      "permalink": "https://reddit.com/r/mcp/comments/1vdp0he/i_built_a_readonly_mcp_server_over_48m_podcasts/",
+      "link_flair_text": "question",
+      "permalink": "https://reddit.com/r/mcp/comments/1vhfcfq/best_longterm_practices_learning_path_for_mcp/",
       "domain": "self.mcp",
       "is_self": true,
-      "comments": []
+      "comments": [
+        {
+          "id": "p25aix1",
+          "author": "barefootsanders",
+          "text": "Im a learn by doing kinda guy, so my reco is skewed in this way. Go build your own server first, then start experimenting. Not a tutorial one - pick a real, boring internal workflow, wire up three tools over stdio, and run it for a week. Every question on your list gets easier to answer once you've felt where it hurts. Most of the \"best practices\" content out there is written by people who've shipped a demo.\n\nAreas id focus on first: tool naming and descriptions. Mcp isnt a crude replacement. Fat, intent based tools work best. Start from there and build. ",
+          "score": 1,
+          "created_utc": "2026-08-06 21:47:45",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "p261fg7",
+          "author": "ValuableSite429",
+          "text": "I worked as a freelance dev web but now I am also forming myself as an ai agentic developer specialist MCP. One of the things I am learning is to not use the LLM for everything : sometimes RAG are enough for simple requests. You could also put in place a cache for repetitive requests maybe.",
+          "score": 1,
+          "created_utc": "2026-08-07 00:04:44",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "p274pxz",
+          "author": "Humaux",
+          "text": "Shipped one of these to production over the past few weeks with Claude, ChatGPT and Codex all connecting to the same server. Answering the parts I actually have scars on rather than the whole list.\n\n**OAuth 2.1.** The spec is the cheap half. Metadata, dynamic client registration, PKCE authorize/token came out around 500 lines and mostly worked first try. What ate weeks was client-specific behaviour no spec mentions: how long each client waits, what it does with a response it doesn't understand, and whether its loopback callback listener is still alive by the time your user finishes typing an email code. Test against more than one client early or you'll think you're done.\n\nThe single hardest thing I learned: **every capability you declare in metadata is a contract some client will enforce against you.** We advertised RFC 9207 iss support — accurate, we send it on every redirect. One client family reads that declaration and enforces it, using a callback parser that doesn't read iss. Perfect callback in, \"missing issuer\" out. Fix was deleting one line of metadata. Declaration surface is liability, not a completeness contest.\n\nTwo cheap wins while you're in there: reuse whatever JWT your web login already mints as the access token, so the resource side needs zero changes; and reuse the web session cookie on the consent page so returning users get one-click approve — SameSite=Lax, not Strict, or the cookie never arrives on the authorize redirect.\n\n**Guardrails.** Annotate every tool explicitly — readOnlyHint, destructiveHint, openWorldHint on all of them, not just the scary ones. Clients genuinely use destructiveHint to ask the user before calling. Then make \"destructive\" structurally rare: our updates are versioned upserts and cancel is a recorded state rather than a delete, so exactly one tool in fifteen is flagged destructive.\n\nThe guardrail that actually bit us wasn't a tool at all — a background job walked failed → dead → auto-delete after 24h. Nobody thought of it as destructive because no *tool* triggered it, and it was the only real data-loss path in the system. Audit your pipelines, not just your tool list.\n\n**Tools and resources.** Add outputSchema, and return structuredContent that actually conforms to it — not one without the other. A schema you don't honour is the same trap as the iss declaration above. Ours makes the difference between \"here are the top 5\" and \"here are 5 of a true 89\" machine-readable, which is a distinction the model otherwise has to infer from prose.\n\n**Maintenance across spec changes.** Freeze your public surface in a test. We pin the exact advertised tool list, every parameter name, default and enum, and the annotations, in one shared contract file that both an import-the-module test and a parse-the-source test read. Adding a tool is *supposed* to fail that test until someone updates the pin deliberately. It's caught two accidental breaking changes that would have shipped silently to already-installed clients.\n\n**Multi-tenant, if that applies.** Isolate failures per tenant. One customer's expired provider key 401'd forever, our adaptive concurrency controller read the global error rate, and unrelated tenants' jobs sat for half an hour. Circuit-break per tenant on auth failures specifically — not on timeouts or 429s, those deserve normal retries.",
+          "score": 1,
+          "created_utc": "2026-08-07 03:46:30",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "p28f19s",
+          "author": "Verchinin-Maddam",
+          "text": "per-tenant circuit break on auth failures is right. half-open probe interval?",
+          "score": 1,
+          "created_utc": "2026-08-07 09:38:35",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "p29e40d",
+          "author": "Happy-Wolverine-1020",
+          "text": "On OAuth 2.1 — the spec's the easy part, the annoying bit is that a lot of clients still don't do dynamic client registration properly, so you end up hand-registering or falling back to static creds more than the docs imply. Budget time for that, not the token flow itself.\n\nGuardrails I'd keep dead simple to start: cap tool-call count and spend per session at the server, before you reach for anything fancier. Most of the runaway-loop damage happens there.\n\nHonestly wouldn't over-plan dynamic tool registration and KB grounding up front. Ship a few tools against a real client, watch where it actually breaks. iirc the spec's moving fast enough that anything you architect now for 'future tools' gets redone anyway.",
+          "score": 1,
+          "created_utc": "2026-08-07 13:17:27",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "p24yxxd",
+          "author": "gnoraz_theorc",
+          "text": "I've personally found the best way to use mcp is to net let the Ai use it directly. Maintain a clean context and let it use the full power of Cli.\n\nI've crunched some numbers here in real measurement. Maybe that or the tool helps your goals. \n\n[Mduct - make every MCP a CLI tool and keep context clean. ](https://github.com/TheFox666/mduct)",
+          "score": 0,
+          "created_utc": "2026-08-06 20:55:10",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
     },
     {
       "id": "1vcsszg",
@@ -909,9 +907,9 @@
       "url": "https://www.reddit.com/r/mcp/comments/1vcsszg/i_scanned_620_python_mcp_servers_against_the/",
       "author": "awesome_fingers",
       "created_utc": "2026-08-01 17:08:41",
-      "score": 7,
+      "score": 8,
       "num_comments": 4,
-      "upvote_ratio": 0.77,
+      "upvote_ratio": 0.83,
       "text": "The new spec revision is the biggest change since MCP launched, and nearly all the discussion has been about protocol sessions and `Mcp-Session-Id` going away. I wanted to know what actually breaks, so I scanned the official registry.\n\n**The registry itself first:** it points at 14,249 unique GitHub repos. **15.3% of them 404** — deleted, renamed or made private. That's from a random sample of 3,000 (seeded, not a prefix), spot-checked by hand against github.com. Of the live ones: TypeScript 42%, Python 24%, JavaScript 15%.\n\n  \n**Then the 620 Python servers in that sample:**\n\nhttps://preview.redd.it/5o75hf3epsgh1.png?width=978&format=png&auto=webp&s=a761803fcd30c84afa8dc500b81f72a403b6ab90\n\n**88.7% have nothing breaking to fix.** The migration is far less painful than the threads suggest.\n\n\n\nTwo takeaways. First, `Mcp-Session-Id` is a non-event — ten servers out of 620 — because almost nobody touched the transport directly; their framework did. Second, the actual migration is `server/discover`, missing from 78%. It's an *addition*rather than a removal, so nothing visibly broke and nobody noticed, but a new-spec client expects to discover capabilities before doing anything.\n\n\n\nCaveat I want to be upfront about: `server/discover` is an absence check against a brand-new field, so pre-migration it fires on almost everyone. 78% measures how early we are, not how neglected anyone is.\n\n\n\nOne more thing worth sharing, because it nearly went wrong. Before publishing I pulled 30 findings at random back to the source lines and read every one. Four false-positive classes turned up that a green test suite never caught — one rule was **91% false positives**, matching any variable named `capabilities`; another gave a project a *breaking* grade for a docstring that merely described the handshake. All fixed before these numbers were written down. If you publish grades about other people's code, audit before you publish.\n\n\n\nData and the script that reproduces it: [https://github.com/dheerajjha/mcp-migrate/blob/main/data/ecosystem-scan.json](https://github.com/dheerajjha/mcp-migrate/blob/main/data/ecosystem-scan.json)\n\nIf you want to contribute,  \n[https://github.com/dheerajjha/mcp-migrate/contribute](https://github.com/dheerajjha/mcp-migrate/contribute) — 49 issues, 19 of them one-rule. TypeScript ports with the reference implementation linked.  \n\n\nDisclosure: I wrote the scanner used here (mcp-migrate, Apache-2.0). Happy to run it against anything specific if you want a second opinion on your own server.",
       "is_original_content": false,
       "link_flair_text": "showcase",
@@ -953,34 +951,6 @@
           "score": 1,
           "created_utc": "2026-08-03 01:19:28",
           "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
-      "id": "1vdrwq0",
-      "title": "SSH MCP Server – Enables remote server management through SSH and SFTP, supporting command execution, file transfers, and interactive shell sessions. It allows for multiple concurrent connections using either password or SSH key authentication.",
-      "subreddit": "mcp",
-      "url": "https://glama.ai/mcp/servers/kpanuragh/ssh-mcp",
-      "author": "modelcontextprotocol",
-      "created_utc": "2026-08-02 20:00:01",
-      "score": 7,
-      "num_comments": 1,
-      "upvote_ratio": 1.0,
-      "text": "[External Link]",
-      "is_original_content": false,
-      "link_flair_text": "server",
-      "permalink": "https://reddit.com/r/mcp/comments/1vdrwq0/ssh_mcp_server_enables_remote_server_management/",
-      "domain": "glama.ai",
-      "is_self": false,
-      "comments": [
-        {
-          "id": "p1bdofl",
-          "author": "modelcontextprotocol",
-          "text": "This server has 11 tools:\n\n- [sftp_download](https://glama.ai/mcp/servers/kpanuragh/ssh-mcp/tools/sftp_download) – Download a file from a remote server to a local destination path using SFTP.\n- [sftp_list](https://glama.ai/mcp/servers/kpanuragh/ssh-mcp/tools/sftp_list) – List the contents of a remote directory via SFTP, returning file and subdirectory names for the specified path.\n- [sftp_upload](https://glama.ai/mcp/servers/kpanuragh/ssh-mcp/tools/sftp_upload) – Upload a local file to a remote server via SFTP. Provide session ID, local path, and remote destination path.\n- [ssh_connect](https://glama.ai/mcp/servers/kpanuragh/ssh-mcp/tools/ssh_connect) – Open an SSH session to a remote server with password or key authentication, returning a session ID for command execution and file transfers.\n- [ssh_disconnect](https://glama.ai/mcp/servers/kpanuragh/ssh-mcp/tools/ssh_disconnect) – Close an SSH session and clean up resources to manage server connections efficiently.\n- [ssh_exec](https://glama.ai/mcp/servers/kpanuragh/ssh-mcp/tools/ssh_exec) – Run commands on a remote SSH server and get stdout, stderr, and exit code.\n- [ssh_list_sessions](https://glama.ai/mcp/servers/kpanuragh/ssh-mcp/tools/ssh_list_sessions) – Retrieve a list of all currently active SSH sessions.\n- [ssh_shell_close](https://glama.ai/mcp/servers/kpanuragh/ssh-mcp/tools/ssh_shell_close) – Terminate an active interactive shell session on a remote server, freeing up resources and closing the connection.\n- [ssh_shell_read](https://glama.ai/mcp/servers/kpanuragh/ssh-mcp/tools/ssh_shell_read) – Retrieve output from an interactive SSH shell session. Use session and shell IDs to access command results, with optional buffer clearing.\n- [ssh_shell_send](https://glama.ai/mcp/servers/kpanuragh/ssh-mcp/tools/ssh_shell_send) – Send input, including commands with newlines, to an active interactive shell session on a remote server.",
-          "score": 1,
-          "created_utc": "2026-08-02 20:00:01",
-          "is_submitter": true,
           "replies": []
         }
       ]
@@ -1282,55 +1252,212 @@
       ]
     },
     {
-      "id": "1vhfcfq",
-      "title": "Best long-term practices + learning path for MCP? (building at production scale, currently using Claude)",
+      "id": "1vdrwq0",
+      "title": "SSH MCP Server – Enables remote server management through SSH and SFTP, supporting command execution, file transfers, and interactive shell sessions. It allows for multiple concurrent connections using either password or SSH key authentication.",
       "subreddit": "mcp",
-      "url": "https://www.reddit.com/r/mcp/comments/1vhfcfq/best_longterm_practices_learning_path_for_mcp/",
-      "author": "Stark221B",
-      "created_utc": "2026-08-06 20:13:09",
-      "score": 7,
-      "num_comments": 4,
+      "url": "https://glama.ai/mcp/servers/kpanuragh/ssh-mcp",
+      "author": "modelcontextprotocol",
+      "created_utc": "2026-08-02 20:00:01",
+      "score": 6,
+      "num_comments": 1,
+      "upvote_ratio": 0.88,
+      "text": "[External Link]",
+      "is_original_content": false,
+      "link_flair_text": "server",
+      "permalink": "https://reddit.com/r/mcp/comments/1vdrwq0/ssh_mcp_server_enables_remote_server_management/",
+      "domain": "glama.ai",
+      "is_self": false,
+      "comments": [
+        {
+          "id": "p1bdofl",
+          "author": "modelcontextprotocol",
+          "text": "This server has 11 tools:\n\n- [sftp_download](https://glama.ai/mcp/servers/kpanuragh/ssh-mcp/tools/sftp_download) – Download a file from a remote server to a local destination path using SFTP.\n- [sftp_list](https://glama.ai/mcp/servers/kpanuragh/ssh-mcp/tools/sftp_list) – List the contents of a remote directory via SFTP, returning file and subdirectory names for the specified path.\n- [sftp_upload](https://glama.ai/mcp/servers/kpanuragh/ssh-mcp/tools/sftp_upload) – Upload a local file to a remote server via SFTP. Provide session ID, local path, and remote destination path.\n- [ssh_connect](https://glama.ai/mcp/servers/kpanuragh/ssh-mcp/tools/ssh_connect) – Open an SSH session to a remote server with password or key authentication, returning a session ID for command execution and file transfers.\n- [ssh_disconnect](https://glama.ai/mcp/servers/kpanuragh/ssh-mcp/tools/ssh_disconnect) – Close an SSH session and clean up resources to manage server connections efficiently.\n- [ssh_exec](https://glama.ai/mcp/servers/kpanuragh/ssh-mcp/tools/ssh_exec) – Run commands on a remote SSH server and get stdout, stderr, and exit code.\n- [ssh_list_sessions](https://glama.ai/mcp/servers/kpanuragh/ssh-mcp/tools/ssh_list_sessions) – Retrieve a list of all currently active SSH sessions.\n- [ssh_shell_close](https://glama.ai/mcp/servers/kpanuragh/ssh-mcp/tools/ssh_shell_close) – Terminate an active interactive shell session on a remote server, freeing up resources and closing the connection.\n- [ssh_shell_read](https://glama.ai/mcp/servers/kpanuragh/ssh-mcp/tools/ssh_shell_read) – Retrieve output from an interactive SSH shell session. Use session and shell IDs to access command results, with optional buffer clearing.\n- [ssh_shell_send](https://glama.ai/mcp/servers/kpanuragh/ssh-mcp/tools/ssh_shell_send) – Send input, including commands with newlines, to an active interactive shell session on a remote server.",
+          "score": 1,
+          "created_utc": "2026-08-02 20:00:01",
+          "is_submitter": true,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1vffcei",
+      "title": "how do you orchestrate multiple MCPs?",
+      "subreddit": "mcp",
+      "url": "https://www.reddit.com/r/mcp/comments/1vffcei/how_do_you_orchestrate_multiple_mcps/",
+      "author": "FewScarcity6957",
+      "created_utc": "2026-08-04 16:30:53",
+      "score": 6,
+      "num_comments": 20,
       "upvote_ratio": 1.0,
-      "text": "We’re building MCP tooling for production use at my company, currently working with Claude. Want to make sure we’re building this the right way from the start rather than retrofitting later.\n\nLooking for clarity on all of the following, ideally with a sane learning path to get there:\n\n**OAuth:**  robust Oauth 2.1 implementation  \n**Guardrails:**  best way to enforce safety/limits on tool use  \n**Knowledge base integration:** patterns for grounding servers in internal docs/data  \n**Tools:** dynamic registration and discovery done right  \n**Resources:**best practices for exposing and structuring them  \n**Agent configuration:** how you’re structuring/configuring agents that consume MCP  \n**System prompts:** how these interact with MCP tool/resource design\n\nAnything else that separates a toy MCP setup from one you can actually trust in production\n\nAlso curious about:\n\n**Learning path**: best order to get solid on protocol fundamentals, SDKs, server design, auth/security or a better sequence  \n**Maintenance over time**: the spec keeps evolving, how are you handling breaking changes without constant firefighting?\n\nLooking forward for repos, internal playbooks, war stories, or any suggestions.",
+      "text": "Do you use multiple MCPs with AI? How do you orchestrate them and make sure the AI uses each one correctly?\n\nWhile building real projects with AI, I noticed that the biggest problems were often not about intelligence. The AI would lose track of the task, repeat work, miss requirements, or finish without checking the result.",
       "is_original_content": false,
       "link_flair_text": "question",
-      "permalink": "https://reddit.com/r/mcp/comments/1vhfcfq/best_longterm_practices_learning_path_for_mcp/",
+      "permalink": "https://reddit.com/r/mcp/comments/1vffcei/how_do_you_orchestrate_multiple_mcps/",
       "domain": "self.mcp",
       "is_self": true,
       "comments": [
         {
-          "id": "p25aix1",
-          "author": "barefootsanders",
-          "text": "Im a learn by doing kinda guy, so my reco is skewed in this way. Go build your own server first, then start experimenting. Not a tutorial one - pick a real, boring internal workflow, wire up three tools over stdio, and run it for a week. Every question on your list gets easier to answer once you've felt where it hurts. Most of the \"best practices\" content out there is written by people who've shipped a demo.\n\nAreas id focus on first: tool naming and descriptions. Mcp isnt a crude replacement. Fat, intent based tools work best. Start from there and build. ",
+          "id": "p1oiupz",
+          "author": "OracleofFl",
+          "text": "I add to my prompt to tell Claude (in my case) which MCP to \"emphasize\" in its use for a particular part of the prompt.\n\nI say things like \"look for xyx with my recommended use of MCP 123 or MCP  878...\" it seems to make things run quicker!\n\nMy \"belief\" is that the information I can give Claude in the prompt or .md to not have to figure something out on its own and possibly make a less than optimal decision yields fewer tokens used and probably a better answer. I would love to hear other people's opinions on this.",
+          "score": 2,
+          "created_utc": "2026-08-04 16:41:05",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "p1okpw9",
+              "author": "International_Emu772",
+              "text": "This is an approach that works most of the time ",
+              "score": 1,
+              "created_utc": "2026-08-04 16:48:48",
+              "is_submitter": false,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "p1ooyr1",
+          "author": "donk8r",
+          "text": "youve got two problems in there and they pull in opposite directions if you treat them as one.\n\nlosing track of the task, repeating work, finishing without checking the result. none of that is mcp orchestration. youd have every bit of it with zero servers connected. thats task state, and the fix is a checklist living outside the model that has to be ticked as work completes, plus a final gate that fails when the check didnt run. an agent that \"forgets\" to verify usually just had nothing in the loop forcing it to.\n\nthe real multi-server problem is tool selection, and the first lever there is connecting fewer of them rather than prompting better. every connected servers tool schemas go out before you type a word, so each one costs context on every request and adds another description that can collide with one you already had. OracleofFls trick does work, but its worth noticing why. naming the server by hand disambiguates, which means the descriptions were ambiguous to begin with. you can fix that at the source by renaming tools so no two servers are claiming the same verb.",
           "score": 1,
-          "created_utc": "2026-08-06 21:47:45",
+          "created_utc": "2026-08-04 17:06:28",
           "is_submitter": false,
           "replies": []
         },
         {
-          "id": "p261fg7",
-          "author": "ValuableSite429",
-          "text": "I worked as a freelance dev web but now I am also forming myself as an ai agentic developer specialist MCP. One of the things I am learning is to not use the LLM for everything : sometimes RAG are enough for simple requests. You could also put in place a cache for repetitive requests maybe.",
+          "id": "p1os87m",
+          "author": "IWillAlwaysReplyBack",
+          "text": "don't overload the context window with too many MCPs loaded in, and be more precise with your specs / prompt",
           "score": 1,
-          "created_utc": "2026-08-07 00:04:44",
+          "created_utc": "2026-08-04 17:19:53",
           "is_submitter": false,
           "replies": []
         },
         {
-          "id": "p274pxz",
-          "author": "Humaux",
-          "text": "Shipped one of these to production over the past few weeks with Claude, ChatGPT and Codex all connecting to the same server. Answering the parts I actually have scars on rather than the whole list.\n\n**OAuth 2.1.** The spec is the cheap half. Metadata, dynamic client registration, PKCE authorize/token came out around 500 lines and mostly worked first try. What ate weeks was client-specific behaviour no spec mentions: how long each client waits, what it does with a response it doesn't understand, and whether its loopback callback listener is still alive by the time your user finishes typing an email code. Test against more than one client early or you'll think you're done.\n\nThe single hardest thing I learned: **every capability you declare in metadata is a contract some client will enforce against you.** We advertised RFC 9207 iss support — accurate, we send it on every redirect. One client family reads that declaration and enforces it, using a callback parser that doesn't read iss. Perfect callback in, \"missing issuer\" out. Fix was deleting one line of metadata. Declaration surface is liability, not a completeness contest.\n\nTwo cheap wins while you're in there: reuse whatever JWT your web login already mints as the access token, so the resource side needs zero changes; and reuse the web session cookie on the consent page so returning users get one-click approve — SameSite=Lax, not Strict, or the cookie never arrives on the authorize redirect.\n\n**Guardrails.** Annotate every tool explicitly — readOnlyHint, destructiveHint, openWorldHint on all of them, not just the scary ones. Clients genuinely use destructiveHint to ask the user before calling. Then make \"destructive\" structurally rare: our updates are versioned upserts and cancel is a recorded state rather than a delete, so exactly one tool in fifteen is flagged destructive.\n\nThe guardrail that actually bit us wasn't a tool at all — a background job walked failed → dead → auto-delete after 24h. Nobody thought of it as destructive because no *tool* triggered it, and it was the only real data-loss path in the system. Audit your pipelines, not just your tool list.\n\n**Tools and resources.** Add outputSchema, and return structuredContent that actually conforms to it — not one without the other. A schema you don't honour is the same trap as the iss declaration above. Ours makes the difference between \"here are the top 5\" and \"here are 5 of a true 89\" machine-readable, which is a distinction the model otherwise has to infer from prose.\n\n**Maintenance across spec changes.** Freeze your public surface in a test. We pin the exact advertised tool list, every parameter name, default and enum, and the annotations, in one shared contract file that both an import-the-module test and a parse-the-source test read. Adding a tool is *supposed* to fail that test until someone updates the pin deliberately. It's caught two accidental breaking changes that would have shipped silently to already-installed clients.\n\n**Multi-tenant, if that applies.** Isolate failures per tenant. One customer's expired provider key 401'd forever, our adaptive concurrency controller read the global error rate, and unrelated tenants' jobs sat for half an hour. Circuit-break per tenant on auth failures specifically — not on timeouts or 429s, those deserve normal retries.",
+          "id": "p1ows6l",
+          "author": "eltham-digital",
+          "text": "I built an interface that sits on top of Cursor and runs multiple MCPs  \n[https://www.youtube.com/watch?v=7K\\_QXhOajMM](https://www.youtube.com/watch?v=7K_QXhOajMM)",
           "score": 1,
-          "created_utc": "2026-08-07 03:46:30",
+          "created_utc": "2026-08-04 17:38:33",
           "is_submitter": false,
           "replies": []
         },
         {
-          "id": "p24yxxd",
-          "author": "gnoraz_theorc",
-          "text": "I've personally found the best way to use mcp is to net let the Ai use it directly. Maintain a clean context and let it use the full power of Cli.\n\nI've crunched some numbers here in real measurement. Maybe that or the tool helps your goals. \n\n[Mduct - make every MCP a CLI tool and keep context clean. ](https://github.com/TheFox666/mduct)",
-          "score": 0,
-          "created_utc": "2026-08-06 20:55:10",
+          "id": "p1paqrm",
+          "author": "Ambitious-Prompt-975",
+          "text": "check maybe [this](http://flujo.com.co) , you can build workflows (imagine like a [skill.md](http://skill.md), but visually) and to each step you only connect the tools that you need . has an auto generator too.., try [here](http://try.flujo.com.co), click around, see how you like it, without even installing on your pc .. its opensource and can use your claude or codex subscription\n\n(online version may be weird at some places because its an online sandbox and just a demo. It works better on your computer)",
+          "score": 1,
+          "created_utc": "2026-08-04 18:36:02",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "p1pg52v",
+          "author": "Arpitbuilds",
+          "text": "biggest thing that fixed this for us was giving each MCP a clear one line \"when to use\" description, not just what it does. AI picks the right one way more reliably when the description says the use case, not just the capability. also helps to explicitly say in the system prompt which MCP is default vs which ones are situational, otherwise it tries all of them or picks randomly when tasks overlap",
+          "score": 1,
+          "created_utc": "2026-08-04 18:58:41",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "p1qbm98",
+          "author": "cmtape",
+          "text": "This is like trying to manage a team of specialists by shouting in one room. The prompt \"emphasizing\" one MCP is just you playing traffic cop. The real fix isn't better shouting; it's a router that only lets the right specialist into the room for that specific sub-task. If the AI has to see every tool schema every time, you're just paying a \"complexity tax\" on every single token.",
+          "score": 1,
+          "created_utc": "2026-08-04 21:17:17",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "p1rbklb",
+          "author": "cmtape",
+          "text": "This is like trying to manage a kitchen by giving the chef a list of every appliance in the building. The problem isn't that the chef doesn't know the oven exists; it's that they're spending half their mental energy deciding which spoon to use for the soup. Tool selection isn't an intelligence problem, it's a signal-to-noise problem. The more 'capabilities' you load into the context, the more the signal drifts.",
+          "score": 1,
+          "created_utc": "2026-08-05 00:16:31",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "p1revmg",
+          "author": "leetheguy",
+          "text": "I don't. I built a router in n8n that lets me call workflows based on skills. My agents have access to that router and they send it a skill name and parameters.\n\nThat gives them the keys to the kingdom. They have one skill and one MCP endpoint. The skill tells them how to use the end point and access a database with a list of other skills they can use as the job requires it.\n\nNo more confusing your poor AIs. No more token/usage bloat from tons of MCPs loading all of their context at once.\n\nInstead of giving them another MCP to access more tools, I just create another workflow that accesses an API and all the AI has to do is assemble the HTTP request body in the params it sends.\n\nAI doesn't have to learn a bunch of different disciplines that way. It uses what it knows. One simple tool and from there it knows how to assemble JSON. It knows how to call websites. It knows how to do bash commands on its sandbox.\n\nOne MCP endpoint. One skill. One ring to rule them all.",
+          "score": 1,
+          "created_utc": "2026-08-05 00:34:10",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "p1rh2d4",
+          "author": "Massive_Baby4147",
+          "text": "One thing I’d avoid is making the agent’s MCP topology mirror your backend topology.  \n  \nHaving eight internal services does not necessarily mean the model should see eight MCP servers and every low-level tool they expose. The agent-facing interface should be organized around tasks, not infrastructure.  \n  \nI’d split the problem into two layers:  \n1. Task state belongs outside the model. Keep the plan, completed steps, artifacts, and required verification in an external state machine or checklist. MCP routing will not stop an agent from repeating work or declaring completion without checking the result.  \n2. Tool selection needs a smaller surface. Give the model short capability descriptions first, select the relevant domain, and only then load that domain’s tool schemas. Namespace overlapping tools and use a per-task allowlist.  \n  \nIf you control the servers, consolidation is another useful lever. Related operations can live behind one domain-focused MCP server with consistent parameter names, errors, and return shapes. The agent does not need to know which internal API or service ultimately handles the call.  \n  \nI’m working on part of this interface problem with intpot:  \n[https://github.com/tugrulguner/intpot](https://github.com/tugrulguner/intpot)  \n  \nIt can expose typed Python functions through FastMCP and convert existing FastAPI or Typer applications into MCP tools. That can reduce the adapter work when creating a curated, consolidated server.  \n  \nIt is not an orchestrator or dynamic tool router, though. I would still put a routing and task-state layer above it, and I would manually choose which converted operations the agent is allowed to see rather than exposing an entire backend automatically.",
+          "score": 1,
+          "created_utc": "2026-08-05 00:45:51",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "p1seh0f",
+          "author": "Independent-Date393",
+          "text": "Sounds less like orchestration and more like missing state. The model drops the task because nothing outside the context window holds it, and more servers make it worse since tool count eats selection accuracy. A single checklist tool it has to tick off beats wiring five MCPs together.",
+          "score": 1,
+          "created_utc": "2026-08-05 03:56:06",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "p1tgq75",
+          "author": "Watty_Cartii",
+          "text": "anyone actually measure the token difference or just going by feel",
+          "score": 1,
+          "created_utc": "2026-08-05 08:46:52",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "p1vf4lu",
+          "author": "No_Abalone2363",
+          "text": "You don't want to necessarily \"orchestrate\" MCP. That's going to give you a massive amount of context bloat if not done properly. You want something that is going to optimize tool calls to reduce this. If you want something for free ToolHive has one: [https://github.com/stacklok/toolhive](https://github.com/stacklok/toolhive)",
+          "score": 1,
+          "created_utc": "2026-08-05 15:24:00",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "p1vrswb",
+          "author": "Heavy-Foundation6154",
+          "text": "I work on [Airia](http://airia.com)'s MCP Gateway team, and we developed a feature called Radar precisely to solve this issue. It's a bit of a industry secret, so I'd get in trouble for revealing how it works on reddit, but it works well, even when a single gateway has 20 MCPs added with a total of 1000 tools. It's fast, accurate, and incredibly token efficient. We're in the process of getting a patent on it (which will be my first one so I'm pretty excited). ",
+          "score": 1,
+          "created_utc": "2026-08-05 16:16:38",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "p1vtodk",
+              "author": "FewScarcity6957",
+              "text": "Wow this is awesome! ",
+              "score": 1,
+              "created_utc": "2026-08-05 16:24:16",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "p23qh9z",
+                  "author": "Heavy-Foundation6154",
+                  "text": "It really is. I sometimes create new MCPs from just wrapping API specs. just a couple days I ago I wrapped a spec with 1500 endpoints (which created 1500 tools) and it still worked perfectly. Legit magical. I get to be so lazy now when creating new MCPs and Radar immediately picks up the slack. ",
+                  "score": 1,
+                  "created_utc": "2026-08-06 17:45:34",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "p20aju4",
+          "author": "Obvious-Car-2016",
+          "text": "We bundle MCPs into use cases so that all the tools are together, then have skills/agent memory for recurring processes. I'd look at MintMCP if you're looking for a solution along these lines. [https://www.mintmcp.com](https://www.mintmcp.com) ",
+          "score": 1,
+          "created_utc": "2026-08-06 06:09:23",
           "is_submitter": false,
           "replies": []
         }
@@ -1343,9 +1470,9 @@
       "url": "https://glama.ai/mcp/servers/HookbaseApp/mcp-server",
       "author": "modelcontextprotocol",
       "created_utc": "2026-08-06 00:00:01",
-      "score": 6,
+      "score": 5,
       "num_comments": 2,
-      "upvote_ratio": 1.0,
+      "upvote_ratio": 0.86,
       "text": "[External Link]",
       "is_original_content": false,
       "link_flair_text": "server",
@@ -1371,9 +1498,9 @@
       "url": "https://glama.ai/mcp/servers/openpharma-org/eu-filings-mcp-server",
       "author": "modelcontextprotocol",
       "created_utc": "2026-08-01 05:00:01",
-      "score": 6,
+      "score": 5,
       "num_comments": 1,
-      "upvote_ratio": 1.0,
+      "upvote_ratio": 0.86,
       "text": "[External Link]",
       "is_original_content": false,
       "link_flair_text": "server",
@@ -1513,199 +1640,6 @@
               ]
             }
           ]
-        }
-      ]
-    },
-    {
-      "id": "1vffcei",
-      "title": "how do you orchestrate multiple MCPs?",
-      "subreddit": "mcp",
-      "url": "https://www.reddit.com/r/mcp/comments/1vffcei/how_do_you_orchestrate_multiple_mcps/",
-      "author": "FewScarcity6957",
-      "created_utc": "2026-08-04 16:30:53",
-      "score": 5,
-      "num_comments": 20,
-      "upvote_ratio": 1.0,
-      "text": "Do you use multiple MCPs with AI? How do you orchestrate them and make sure the AI uses each one correctly?\n\nWhile building real projects with AI, I noticed that the biggest problems were often not about intelligence. The AI would lose track of the task, repeat work, miss requirements, or finish without checking the result.",
-      "is_original_content": false,
-      "link_flair_text": "question",
-      "permalink": "https://reddit.com/r/mcp/comments/1vffcei/how_do_you_orchestrate_multiple_mcps/",
-      "domain": "self.mcp",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "p1oiupz",
-          "author": "OracleofFl",
-          "text": "I add to my prompt to tell Claude (in my case) which MCP to \"emphasize\" in its use for a particular part of the prompt.\n\nI say things like \"look for xyx with my recommended use of MCP 123 or MCP  878...\" it seems to make things run quicker!\n\nMy \"belief\" is that the information I can give Claude in the prompt or .md to not have to figure something out on its own and possibly make a less than optimal decision yields fewer tokens used and probably a better answer. I would love to hear other people's opinions on this.",
-          "score": 2,
-          "created_utc": "2026-08-04 16:41:05",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "p1okpw9",
-              "author": "International_Emu772",
-              "text": "This is an approach that works most of the time ",
-              "score": 1,
-              "created_utc": "2026-08-04 16:48:48",
-              "is_submitter": false,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "p1ooyr1",
-          "author": "donk8r",
-          "text": "youve got two problems in there and they pull in opposite directions if you treat them as one.\n\nlosing track of the task, repeating work, finishing without checking the result. none of that is mcp orchestration. youd have every bit of it with zero servers connected. thats task state, and the fix is a checklist living outside the model that has to be ticked as work completes, plus a final gate that fails when the check didnt run. an agent that \"forgets\" to verify usually just had nothing in the loop forcing it to.\n\nthe real multi-server problem is tool selection, and the first lever there is connecting fewer of them rather than prompting better. every connected servers tool schemas go out before you type a word, so each one costs context on every request and adds another description that can collide with one you already had. OracleofFls trick does work, but its worth noticing why. naming the server by hand disambiguates, which means the descriptions were ambiguous to begin with. you can fix that at the source by renaming tools so no two servers are claiming the same verb.",
-          "score": 1,
-          "created_utc": "2026-08-04 17:06:28",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "p1os87m",
-          "author": "IWillAlwaysReplyBack",
-          "text": "don't overload the context window with too many MCPs loaded in, and be more precise with your specs / prompt",
-          "score": 1,
-          "created_utc": "2026-08-04 17:19:53",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "p1ows6l",
-          "author": "eltham-digital",
-          "text": "I built an interface that sits on top of Cursor and runs multiple MCPs  \n[https://www.youtube.com/watch?v=7K\\_QXhOajMM](https://www.youtube.com/watch?v=7K_QXhOajMM)",
-          "score": 1,
-          "created_utc": "2026-08-04 17:38:33",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "p1paqrm",
-          "author": "Ambitious-Prompt-975",
-          "text": "check maybe [this](http://flujo.com.co) , you can build workflows (imagine like a [skill.md](http://skill.md), but visually) and to each step you only connect the tools that you need . has an auto generator too.., try [here](http://try.flujo.com.co), click around, see how you like it, without even installing on your pc .. its opensource and can use your claude or codex subscription\n\n(online version may be weird at some places because its an online sandbox and just a demo. It works better on your computer)",
-          "score": 1,
-          "created_utc": "2026-08-04 18:36:02",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "p1pg52v",
-          "author": "Arpitbuilds",
-          "text": "biggest thing that fixed this for us was giving each MCP a clear one line \"when to use\" description, not just what it does. AI picks the right one way more reliably when the description says the use case, not just the capability. also helps to explicitly say in the system prompt which MCP is default vs which ones are situational, otherwise it tries all of them or picks randomly when tasks overlap",
-          "score": 1,
-          "created_utc": "2026-08-04 18:58:41",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "p1qbm98",
-          "author": "cmtape",
-          "text": "This is like trying to manage a team of specialists by shouting in one room. The prompt \"emphasizing\" one MCP is just you playing traffic cop. The real fix isn't better shouting; it's a router that only lets the right specialist into the room for that specific sub-task. If the AI has to see every tool schema every time, you're just paying a \"complexity tax\" on every single token.",
-          "score": 1,
-          "created_utc": "2026-08-04 21:17:17",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "p1rbklb",
-          "author": "cmtape",
-          "text": "This is like trying to manage a kitchen by giving the chef a list of every appliance in the building. The problem isn't that the chef doesn't know the oven exists; it's that they're spending half their mental energy deciding which spoon to use for the soup. Tool selection isn't an intelligence problem, it's a signal-to-noise problem. The more 'capabilities' you load into the context, the more the signal drifts.",
-          "score": 1,
-          "created_utc": "2026-08-05 00:16:31",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "p1revmg",
-          "author": "leetheguy",
-          "text": "I don't. I built a router in n8n that lets me call workflows based on skills. My agents have access to that router and they send it a skill name and parameters.\n\nThat gives them the keys to the kingdom. They have one skill and one MCP endpoint. The skill tells them how to use the end point and access a database with a list of other skills they can use as the job requires it.\n\nNo more confusing your poor AIs. No more token/usage bloat from tons of MCPs loading all of their context at once.\n\nInstead of giving them another MCP to access more tools, I just create another workflow that accesses an API and all the AI has to do is assemble the HTTP request body in the params it sends.\n\nAI doesn't have to learn a bunch of different disciplines that way. It uses what it knows. One simple tool and from there it knows how to assemble JSON. It knows how to call websites. It knows how to do bash commands on its sandbox.\n\nOne MCP endpoint. One skill. One ring to rule them all.",
-          "score": 1,
-          "created_utc": "2026-08-05 00:34:10",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "p1rh2d4",
-          "author": "Massive_Baby4147",
-          "text": "One thing I’d avoid is making the agent’s MCP topology mirror your backend topology.  \n  \nHaving eight internal services does not necessarily mean the model should see eight MCP servers and every low-level tool they expose. The agent-facing interface should be organized around tasks, not infrastructure.  \n  \nI’d split the problem into two layers:  \n1. Task state belongs outside the model. Keep the plan, completed steps, artifacts, and required verification in an external state machine or checklist. MCP routing will not stop an agent from repeating work or declaring completion without checking the result.  \n2. Tool selection needs a smaller surface. Give the model short capability descriptions first, select the relevant domain, and only then load that domain’s tool schemas. Namespace overlapping tools and use a per-task allowlist.  \n  \nIf you control the servers, consolidation is another useful lever. Related operations can live behind one domain-focused MCP server with consistent parameter names, errors, and return shapes. The agent does not need to know which internal API or service ultimately handles the call.  \n  \nI’m working on part of this interface problem with intpot:  \n[https://github.com/tugrulguner/intpot](https://github.com/tugrulguner/intpot)  \n  \nIt can expose typed Python functions through FastMCP and convert existing FastAPI or Typer applications into MCP tools. That can reduce the adapter work when creating a curated, consolidated server.  \n  \nIt is not an orchestrator or dynamic tool router, though. I would still put a routing and task-state layer above it, and I would manually choose which converted operations the agent is allowed to see rather than exposing an entire backend automatically.",
-          "score": 1,
-          "created_utc": "2026-08-05 00:45:51",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "p1seh0f",
-          "author": "Independent-Date393",
-          "text": "Sounds less like orchestration and more like missing state. The model drops the task because nothing outside the context window holds it, and more servers make it worse since tool count eats selection accuracy. A single checklist tool it has to tick off beats wiring five MCPs together.",
-          "score": 1,
-          "created_utc": "2026-08-05 03:56:06",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "p1tgq75",
-          "author": "Watty_Cartii",
-          "text": "anyone actually measure the token difference or just going by feel",
-          "score": 1,
-          "created_utc": "2026-08-05 08:46:52",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "p1tjd7n",
-          "author": "Vilanova-Zira",
-          "text": "we just cut down to 2 servers and most of it sorted itself out",
-          "score": 1,
-          "created_utc": "2026-08-05 09:08:20",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "p1vf4lu",
-          "author": "No_Abalone2363",
-          "text": "You don't want to necessarily \"orchestrate\" MCP. That's going to give you a massive amount of context bloat if not done properly. You want something that is going to optimize tool calls to reduce this. If you want something for free ToolHive has one: [https://github.com/stacklok/toolhive](https://github.com/stacklok/toolhive)",
-          "score": 1,
-          "created_utc": "2026-08-05 15:24:00",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "p1vrswb",
-          "author": "Heavy-Foundation6154",
-          "text": "I work on [Airia](http://airia.com)'s MCP Gateway team, and we developed a feature called Radar precisely to solve this issue. It's a bit of a industry secret, so I'd get in trouble for revealing how it works on reddit, but it works well, even when a single gateway has 20 MCPs added with a total of 1000 tools. It's fast, accurate, and incredibly token efficient. We're in the process of getting a patent on it (which will be my first one so I'm pretty excited). ",
-          "score": 1,
-          "created_utc": "2026-08-05 16:16:38",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "p1vtodk",
-              "author": "FewScarcity6957",
-              "text": "Wow this is awesome! ",
-              "score": 1,
-              "created_utc": "2026-08-05 16:24:16",
-              "is_submitter": true,
-              "replies": [
-                {
-                  "id": "p23qh9z",
-                  "author": "Heavy-Foundation6154",
-                  "text": "It really is. I sometimes create new MCPs from just wrapping API specs. just a couple days I ago I wrapped a spec with 1500 endpoints (which created 1500 tools) and it still worked perfectly. Legit magical. I get to be so lazy now when creating new MCPs and Radar immediately picks up the slack. ",
-                  "score": 1,
-                  "created_utc": "2026-08-06 17:45:34",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "p20aju4",
-          "author": "Obvious-Car-2016",
-          "text": "We bundle MCPs into use cases so that all the tools are together, then have skills/agent memory for recurring processes. I'd look at MintMCP if you're looking for a solution along these lines. [https://www.mintmcp.com](https://www.mintmcp.com) ",
-          "score": 1,
-          "created_utc": "2026-08-06 06:09:23",
-          "is_submitter": false,
-          "replies": []
         }
       ]
     },
