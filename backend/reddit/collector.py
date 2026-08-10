@@ -573,11 +573,10 @@ class RedditContentCollector:
                     "time_filter": time_filter,
                     "total_items": len(merged_items),
                     "total_comments": total_comments,
-                    "file_size_bytes": 0  # Will be updated after saving
                 },
                 "items": merged_items
             }
-            
+
             logger.info("   📝 Đang ghi file JSON...")
             with output_file.open("w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
@@ -632,15 +631,12 @@ class RedditContentCollector:
                     "subreddit": subreddit,
                     "total_items": len(trimmed_items),
                     "total_comments": total_comments,
-                    "file_size_bytes": 0
                 },
                 "items": trimmed_items
             }
 
             with output_file.open("w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
-
-            data["metadata"]["file_size_bytes"] = output_file.stat().st_size
 
             index_entries.append({
                 "subreddit": subreddit,
