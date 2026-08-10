@@ -49,5 +49,7 @@ def load_state(path: Path, subreddit_count: int) -> Dict[str, Any]:
 
 def save_state(path: Path, state: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
+    tmp = path.with_suffix(".tmp")
+    with tmp.open("w", encoding="utf-8") as handle:
         json.dump(state, handle, ensure_ascii=False, indent=2)
+    tmp.replace(path)

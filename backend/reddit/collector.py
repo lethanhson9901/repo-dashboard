@@ -179,7 +179,7 @@ class RedditContentCollector:
             "author": str(comment.author) if comment.author else "[deleted]",
             "text": comment.body if hasattr(comment, 'body') else "[No content]",
             "score": int(comment.score),
-            "created_utc": datetime.fromtimestamp(comment.created_utc).strftime("%Y-%m-%d %H:%M:%S"),
+            "created_utc": datetime.utcfromtimestamp(comment.created_utc).strftime("%Y-%m-%d %H:%M:%S"),
             "is_submitter": comment.is_submitter,
             "replies": replies
         }
@@ -201,7 +201,7 @@ class RedditContentCollector:
             "subreddit": str(item.subreddit),
             "url": f"https://reddit.com{item.permalink}",
             "author": str(item.author) if item.author else "[deleted]",
-            "created_utc": datetime.fromtimestamp(item.created_utc).strftime("%Y-%m-%d %H:%M:%S"),
+            "created_utc": datetime.utcfromtimestamp(item.created_utc).strftime("%Y-%m-%d %H:%M:%S"),
             "score": int(item.score),
             "text": text,
             "comments": []
@@ -220,19 +220,32 @@ class RedditContentCollector:
         """Fetch content from Reddit account."""
         existing_ids = {item["id"] for item in self.data[content_type]}
         new_content: List[RedditContent] = []
+        retries = 0
+        max_retries = 3
 
-        try:
-            items = (self.reddit.user.me().saved(limit=None) if content_type == ContentType.SAVED
-                    else self.reddit.user.me().upvoted(limit=None))
+        while retries <= max_retries:
+            try:
+                items = (self.reddit.user.me().saved(limit=None) if content_type == ContentType.SAVED
+                        else self.reddit.user.me().upvoted(limit=None))
 
-            for item in items:
-                if item.id not in existing_ids:
-                    content = self._process_item(item)
-                    new_content.append(content)
-                    self.data[content_type].append(content)
+                for item in items:
+                    if item.id not in existing_ids:
+                        content = self._process_item(item)
+                        new_content.append(content)
+                        self.data[content_type].append(content)
+                        existing_ids.add(item.id)
+                break
 
-        except Exception as e:
-            logger.error(f"Error fetching {content_type} content: {e}")
+            except TooManyRequests as e:
+                retries += 1
+                wait = 60 * retries
+                self._handle_rate_limit(e, context=f"get_content({content_type})", wait_time=wait)
+                if retries > max_retries:
+                    logger.error(f"Rate limit retries exhausted for {content_type}")
+                    break
+            except Exception as e:
+                logger.error(f"Error fetching {content_type} content: {e}")
+                break
 
         return new_content
 
@@ -334,6 +347,25 @@ class RedditContentCollector:
             state["paused"] = False
             state["pause_reason"] = ""
             
+            def _collect_comments(comment, depth=0) -> CommentData:
+                if depth >= comment_depth or not hasattr(comment, 'body'):
+                    return None
+                replies = []
+                if hasattr(comment, 'replies'):
+                    for reply in comment.replies:
+                        reply_data = _collect_comments(reply, depth + 1)
+                        if reply_data:
+                            replies.append(reply_data)
+                return {
+                    "id": comment.id,
+                    "author": str(comment.author) if comment.author else "[deleted]",
+                    "text": comment.body,
+                    "score": comment.score,
+                    "created_utc": datetime.utcfromtimestamp(comment.created_utc).strftime("%Y-%m-%d %H:%M:%S"),
+                    "is_submitter": comment.is_submitter,
+                    "replies": replies
+                }
+
             paused = False
             start_index = state["next_subreddit_index"]
             for idx in range(start_index, len(subscribed)):
@@ -341,19 +373,15 @@ class RedditContentCollector:
                 subreddit_start_time = time.time()
                 subreddit_posts = 0
                 subreddit_filtered = 0
-                
+
                 try:
                     logger.info(f"🔄 [{idx + 1}/{len(subscribed)}] Đang thu thập từ r/{subreddit}")
-                    
-                    # Fetch posts with rate limit handling
+
                     try:
                         top_posts = subreddit.top(
                             time_filter=praw_time_filter,
                             limit=limit
                         )
-                        posts_list = list(top_posts)  # Convert generator to list
-                        logger.info(f"   📥 Lấy được {len(posts_list)} posts từ r/{subreddit}")
-                        
                     except TooManyRequests as e:
                         rate_limit_hits += 1
                         limits = self._get_rate_limits()
@@ -374,63 +402,26 @@ class RedditContentCollector:
                         save_state(state_file, state)
                         continue
 
-                    limits = self._should_pause(rate_limit_threshold)
-                    if limits:
-                        state.update({
-                            "paused": True,
-                            "pause_reason": "low_remaining_after_list",
-                            "rate_remaining": limits.get("remaining"),
-                            "rate_used": limits.get("used"),
-                            "rate_reset_timestamp": limits.get("reset_timestamp"),
-                            "next_subreddit_index": idx
-                        })
-                        save_state(state_file, state)
-                        paused = True
-                        break
-                    
-                    for post_idx, post in enumerate(posts_list, 1):
+                    for post_idx, post in enumerate(top_posts, 1):
                         total_posts_processed += 1
                         subreddit_posts += 1
-                        
+
                         if post.score >= min_score:
                             total_posts_filtered += 1
                             subreddit_filtered += 1
-                            
-                            logger.debug(f"      📝 [{post_idx}/{len(posts_list)}] Xử lý post: {post.title[:50]}... (score: {post.score})")
-                            
+
+                            logger.debug(f"      📝 [{post_idx}] Xử lý post: {post.title[:50]}... (score: {post.score})")
+
                             # Process comments with rate limit handling
                             comments: List[CommentData] = []
                             try:
-                                post.comments.replace_more(limit=0)  # Remove MoreComments objects
-                                
-                                def process_comment(comment, depth=0) -> CommentData:
-                                    if depth >= comment_depth or not hasattr(comment, 'body'):
-                                        return None
-                                        
-                                    replies = []
-                                    if hasattr(comment, 'replies'):
-                                        for reply in comment.replies:
-                                            reply_data = process_comment(reply, depth + 1)
-                                            if reply_data:
-                                                replies.append(reply_data)
-                                    
-                                    return {
-                                        "id": comment.id,
-                                        "author": str(comment.author) if comment.author else "[deleted]",
-                                        "text": comment.body,
-                                        "score": comment.score,
-                                        "created_utc": datetime.fromtimestamp(comment.created_utc).strftime("%Y-%m-%d %H:%M:%S"),
-                                        "is_submitter": comment.is_submitter,
-                                        "replies": replies
-                                    }
-                                
-                                # Process top-level comments
+                                post.comments.replace_more(limit=0)
                                 for comment in post.comments:
-                                    comment_data = process_comment(comment)
+                                    comment_data = _collect_comments(comment)
                                     if comment_data:
                                         comments.append(comment_data)
                                         total_comments_processed += 1
-                                
+
                             except TooManyRequests as e:
                                 rate_limit_hits += 1
                                 limits = self._get_rate_limits()
@@ -456,7 +447,7 @@ class RedditContentCollector:
                                 "subreddit": str(post.subreddit),
                                 "url": post.url,
                                 "author": str(post.author) if post.author else "[deleted]",
-                                "created_utc": datetime.fromtimestamp(post.created_utc).strftime("%Y-%m-%d %H:%M:%S"),
+                                "created_utc": datetime.utcfromtimestamp(post.created_utc).strftime("%Y-%m-%d %H:%M:%S"),
                                 "score": post.score,
                                 "num_comments": post.num_comments,
                                 "upvote_ratio": post.upvote_ratio,
@@ -484,7 +475,7 @@ class RedditContentCollector:
                                 paused = True
                                 break
                         else:
-                            logger.debug(f"      ⏭️  [{post_idx}/{len(posts_list)}] Bỏ qua post (score {post.score} < {min_score})")
+                            logger.debug(f"      ⏭️  [{post_idx}] Bỏ qua post (score {post.score} < {min_score})")
 
                         if paused:
                             break
@@ -587,20 +578,13 @@ class RedditContentCollector:
                 "items": merged_items
             }
             
-            # Save with progress logging
             logger.info("   📝 Đang ghi file JSON...")
             with output_file.open("w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
-            
-            # Get file size
+
             file_size = output_file.stat().st_size
             file_size_mb = file_size / (1024 * 1024)
-            
-            # Update metadata with actual file size
-            data["metadata"]["file_size_bytes"] = file_size
-            with output_file.open("w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            
+
             save_duration = time.time() - save_start_time
             logger.info(f"   ✅ Lưu thành công:")
             logger.info(f"      - File: {output_file}")
@@ -656,10 +640,7 @@ class RedditContentCollector:
             with output_file.open("w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
 
-            file_size = output_file.stat().st_size
-            data["metadata"]["file_size_bytes"] = file_size
-            with output_file.open("w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            data["metadata"]["file_size_bytes"] = output_file.stat().st_size
 
             index_entries.append({
                 "subreddit": subreddit,

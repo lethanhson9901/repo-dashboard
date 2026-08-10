@@ -1,4 +1,5 @@
 import { useState, useMemo } from 'react';
+import { filterData, sortData } from '../utils/dataUtils';
 
 export const useRepoData = (initialData) => {
   const [searchTerm, setSearchTerm] = useState('');
@@ -7,83 +8,9 @@ export const useRepoData = (initialData) => {
   const [itemsPerPage, setItemsPerPage] = useState(50);
 
   const filteredAndSortedData = useMemo(() => {
-    let filtered = [...initialData];
-    
-    if (searchTerm) {
-      filtered = filtered.filter(repo => {
-        const searchTermLower = searchTerm.toLowerCase();
-        
-        // Search in multiple fields with different strategies
-        const searchFields = [
-          // Full name (owner/repo-name)
-          repo.name,
-          // Repository name only (after /)
-          repo.name?.split('/')[1] || '',
-          // Owner name only (before /)
-          repo.name?.split('/')[0] || '',
-          // Description
-          repo.description,
-          // Language
-          repo.language,
-          // Topics array
-          ...(repo.topics || []),
-          // Owner username
-          repo.owner?.username,
-          // URL
-          repo.url
-        ].filter(Boolean);
-
-        // Check if any field contains the search term
-        return searchFields.some(field => 
-          field.toLowerCase().includes(searchTermLower)
-        );
-      });
-    }
-
-    // If no sort key is specified (default), return data in original order
-    if (!sortConfig.key) {
-      return filtered;
-    }
-    
-    return filtered.sort((a, b) => {
-      const { key, direction } = sortConfig;
-      
-      if (key === 'last_updated') {
-        const dateA = new Date(a[key] || 0);
-        const dateB = new Date(b[key] || 0);
-        return direction === 'asc' ? dateA - dateB : dateB - dateA;
-      }
-      
-      if (key === 'owner') {
-        const valueA = a.owner?.username ?? '';
-        const valueB = b.owner?.username ?? '';
-        return direction === 'asc'
-          ? valueA.localeCompare(valueB)
-          : valueB.localeCompare(valueA);
-      }
-      
-      if (key === 'name') {
-        // Extract repository name from "owner/repo-name" format for sorting
-        const valueA = a.name?.split('/')[1] || a.name || '';
-        const valueB = b.name?.split('/')[1] || b.name || '';
-        return direction === 'asc'
-          ? valueA.localeCompare(valueB)
-          : valueB.localeCompare(valueA);
-      }
-      
-      const valueA = a[key] ?? 0;
-      const valueB = b[key] ?? 0;
-      
-      if (typeof valueA === 'number' && typeof valueB === 'number') {
-        return direction === 'asc' ? valueA - valueB : valueB - valueA;
-      }
-      
-      const stringA = String(valueA).toLowerCase();
-      const stringB = String(valueB).toLowerCase();
-      return direction === 'asc'
-        ? stringA.localeCompare(stringB)
-        : stringB.localeCompare(stringA);
-    });
+    const filtered = filterData(initialData, searchTerm);
+    if (!sortConfig.key) return filtered;
+    return sortData(filtered, sortConfig);
   }, [initialData, searchTerm, sortConfig]);
 
   const paginatedData = useMemo(() => {

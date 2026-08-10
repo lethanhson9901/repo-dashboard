@@ -40,5 +40,14 @@ class StateTests(unittest.TestCase):
             self.assertEqual(reloaded["subreddit_count"], 10)
 
 
+    def test_save_state_no_tmp_file_left_behind(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "collector_state.json"
+            state = default_state(subreddit_count=3)
+            save_state(state_path, state)
+            self.assertTrue(state_path.exists())
+            self.assertFalse(state_path.with_suffix(".tmp").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -23,5 +23,21 @@ class NewsMergeTests(unittest.TestCase):
         self.assertEqual(merged[0]["title"], "New")
 
 
+    def test_merge_preserves_existing_comments_when_new_has_none(self):
+        existing = [{"id": "a", "title": "A", "comments": [{"id": "c1", "text": "hello"}]}]
+        new = [{"id": "a", "title": "A updated", "comments": []}]
+        merged = merge_news_items(existing, new)
+        self.assertEqual(merged[0]["title"], "A updated")
+        self.assertEqual(len(merged[0]["comments"]), 1)
+        self.assertEqual(merged[0]["comments"][0]["id"], "c1")
+
+    def test_merge_uses_new_comments_when_present(self):
+        existing = [{"id": "a", "title": "A", "comments": [{"id": "c1"}]}]
+        new = [{"id": "a", "title": "A", "comments": [{"id": "c2"}, {"id": "c3"}]}]
+        merged = merge_news_items(existing, new)
+        self.assertEqual(len(merged[0]["comments"]), 2)
+        self.assertEqual(merged[0]["comments"][0]["id"], "c2")
+
+
 if __name__ == "__main__":
     unittest.main()

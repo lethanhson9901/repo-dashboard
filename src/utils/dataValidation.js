@@ -2,17 +2,22 @@ export const validateRepoData = (data) => {
     if (!Array.isArray(data)) {
       throw new Error('Repository data must be an array');
     }
-  
+
     return data.map(repo => {
       if (!repo || typeof repo !== 'object') {
         throw new Error('Each repository must be an object');
       }
-  
-      // Ensure required fields exist with proper types
+
+      const rawUrl = String(repo.url || '');
+      const safeUrl = /^https?:\/\//i.test(rawUrl) ? rawUrl : '';
+
+      const rawProfileUrl = repo.owner ? String(repo.owner.profile_url || '') : '';
+      const safeProfileUrl = /^https?:\/\//i.test(rawProfileUrl) ? rawProfileUrl : '';
+
       const validatedRepo = {
         name: String(repo.name || ''),
         description: String(repo.description || ''),
-        url: String(repo.url || ''),
+        url: safeUrl,
         language: repo.language || null,
         stars: Number(repo.stars || 0),
         forks: Number(repo.forks || 0),
@@ -20,10 +25,10 @@ export const validateRepoData = (data) => {
         topics: Array.isArray(repo.topics) ? repo.topics : [],
         owner: repo.owner ? {
           username: String(repo.owner.username || ''),
-          profile_url: String(repo.owner.profile_url || '')
+          profile_url: safeProfileUrl
         } : null
       };
-  
+
       return validatedRepo;
     });
   };

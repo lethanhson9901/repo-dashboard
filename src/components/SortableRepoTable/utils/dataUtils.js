@@ -47,13 +47,13 @@ export const formatDate = (dateString) => {
   export const sortData = (data, { key, direction }) => {
     return [...data].sort((a, b) => {
       if (!a || !b) return 0;
-      
+
       if (key === 'last_updated') {
         const dateA = new Date(a[key] || 0);
         const dateB = new Date(b[key] || 0);
         return direction === 'asc' ? dateA - dateB : dateB - dateA;
       }
-      
+
       if (key === 'owner') {
         const valueA = a.owner?.username ?? '';
         const valueB = b.owner?.username ?? '';
@@ -61,14 +61,22 @@ export const formatDate = (dateString) => {
           ? valueA.localeCompare(valueB)
           : valueB.localeCompare(valueA);
       }
-      
+
+      if (key === 'name') {
+        const valueA = a.name?.split('/')[1] || a.name || '';
+        const valueB = b.name?.split('/')[1] || b.name || '';
+        return direction === 'asc'
+          ? valueA.localeCompare(valueB)
+          : valueB.localeCompare(valueA);
+      }
+
       const valueA = a[key] ?? 0;
       const valueB = b[key] ?? 0;
-      
+
       if (typeof valueA === 'number' && typeof valueB === 'number') {
         return direction === 'asc' ? valueA - valueB : valueB - valueA;
       }
-      
+
       const stringA = String(valueA).toLowerCase();
       const stringB = String(valueB).toLowerCase();
       return direction === 'asc'

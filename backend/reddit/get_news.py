@@ -44,7 +44,7 @@ def get_time_filter_label(time_filter: TimeFilter) -> str:
 
 def get_news_post_limit() -> int:
     """Return the max posts to fetch per subreddit."""
-    return 20
+    return 50
 
 def get_env_variables() -> Dict[str, str]:
     """
