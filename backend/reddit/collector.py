@@ -240,9 +240,6 @@ class RedditContentCollector:
                 retries += 1
                 wait = 60 * retries
                 self._handle_rate_limit(e, context=f"get_content({content_type})", wait_time=wait)
-                if retries > max_retries:
-                    logger.error(f"Rate limit retries exhausted for {content_type}")
-                    break
             except Exception as e:
                 logger.error(f"Error fetching {content_type} content: {e}")
                 break
