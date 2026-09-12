@@ -1,10 +1,10 @@
 {
   "metadata": {
-    "last_updated": "2026-09-11 04:27:09",
+    "last_updated": "2026-09-12 04:24:09",
     "time_filter": "week",
     "subreddit": "mlops",
     "total_items": 20,
-    "total_comments": 83
+    "total_comments": 90
   },
   "items": [
     {
@@ -14,9 +14,9 @@
       "url": "https://www.reddit.com/r/mlops/comments/1w9vum9/how_do_you_ship_when_two_llm_judges_disagree_on/",
       "author": "Loud-Job9164",
       "created_utc": "2026-09-07 15:50:08",
-      "score": 23,
+      "score": 24,
       "num_comments": 14,
-      "upvote_ratio": 1.0,
+      "upvote_ratio": 0.97,
       "text": "Our support summarizer passes deterministic citation checks, but then two LLM judges split on the same release candidate. One rewards concise, fluent answers. The other punishes any missing caveat, even when the caveat doesn’t change the action. The disagreement rate is high enough that our manual tie break queue has hit its ceiling (the spreadsheet now has opinions)\n\nI’m testing Braintrust for versioned datasets, side by side experiments, multiple scorers and slice metrics so we can calibrate judges against the same human reviewed set. I still need an adjudication rule that won’t turn every release into a meeting.\n\nDo you block on the stricter judge, set a regression threshold by slice or send only disagreement cases to human review?",
       "is_original_content": false,
       "link_flair_text": "(Gen)AI / Agents / LLMOps :illuminati:",
@@ -37,7 +37,7 @@
           "id": "p8e1unk",
           "author": "Vegetable_Fun_4358",
           "text": "How are you deciding when a judge disagreement becomes a blocker versus just a review item? Braintrust can work for keeping scorer outputs and human decisions tied together, however the release rule still looks tricky",
-          "score": 7,
+          "score": 6,
           "created_utc": "2026-09-07 17:30:17",
           "is_submitter": false,
           "replies": [
@@ -103,7 +103,7 @@
           "id": "p8i0val",
           "author": "alexpran",
           "text": "None of the three, in the sense that all three are trying to answer \"which judge is right\", and for a release decision you don't need to know.\n\nWhat worked for me: stop reading the judges' absolute scores and read each one against itself. Take the release you last accepted, run both judges on it, and record per case what each of them said — including how much each moves on its own when you run it a few times, because they will. That is the reference. For a candidate, the question per judge is not \"is this good\" but \"did this judge score it worse than it scored the accepted version, by more than that judge's own noise\". The strict judge and the fluent judge can disagree by a mile on the absolute level and still both say \"no worse than last time\"; that's a ship. Only a case where either judge drops beyond its own band goes to a human, and those are few, because most disagreement is level, not direction.\n\nThat also answers the caveat problem without picking a winner: if the strict judge always docks missing caveats, it docked them on the accepted version too, and the reference absorbs it. It only fires when a caveat that was there disappears.\n\nTwo practical notes. Disagreement rate on the absolute scores is a property of the judges, not of the release; measuring it once on the reference tells you whether the two are worth keeping, and mine usually aren't both. And \"regression threshold by slice\" is right but the threshold shouldn't be a number you pick, it should be the spread the judge showed on that slice on the accepted version, otherwise the spreadsheet gets opinions again.",
-          "score": 1,
+          "score": 2,
           "created_utc": "2026-09-08 06:54:42",
           "is_submitter": false,
           "replies": []
@@ -162,7 +162,7 @@
       "url": "https://www.reddit.com/r/mlops/comments/1w9iv5u/how_are_people_serving_45_small_models_without_a/",
       "author": "WallabyIcy8537",
       "created_utc": "2026-09-07 05:15:17",
-      "score": 15,
+      "score": 16,
       "num_comments": 7,
       "upvote_ratio": 1.0,
       "text": "Trying to figure out if I'm doing this the dumb way. Our agent pipeline has an embedder for retrieval, a reranker, an extractor for entities, and a small Qwen model doing the routine generation (summarizing tool output, classifying intent). None of these are big. All of them are small enough that a single one barely touches a GPU.\n\nProblem is the default way to serve them is one process per model. vLLM for the small LLM, TEI for the embedder, and the leftovers wrapped in a FastAPI service each. Every one of those reserves its own block of GPU memory and holds it whether requests are coming in or not. Since you rent GPUs by the hour, idle capacity costs exactly the same as busy capacity. So I've got 4-5 mostly-idle cards and a bill that doesn't care that they're idle.\n\nThe thing that finally bugged me is we spent a while swapping in smaller models to cut cost, and the bill barely moved. Because the money was never in the model calls, it was in the servers sitting reserved.\n\nWhat I've tried or looked at:\n\n* Cramming a few onto one GPU manually with MPS, works but managing memory and batching by hand gets old fast\n* vLLM, but it's really built to spread one big model across GPUs, not pack a bunch of small ones onto one\n* TEI is fine for the embedder but it's one model per server, so it doesn't help with the other three\n\nThe direction I'm leaning now is a single server that loads and evicts models on demand instead of pinning one per process. SIE (Superlinked's open-source one) is the main thing I've found built for exactly this, encode/score/extract/generate behind one API, models load on first call and get evicted LRU when the GPU fills. Haven't run it in prod yet, and the obvious worry is one process serving everything means a bad model or an OOM could take the whole pipeline down instead of one service.\n\nSo before I commit: for those running several small models, are you packing them onto shared GPUs, and if so how, MPS, a serving layer, something homegrown? And how are you handling the blast-radius problem when they all share a process?",
@@ -230,15 +230,89 @@
       ]
     },
     {
+      "id": "1wahi89",
+      "title": "Thinking about black-box LLM monitoring as a partially observable decision problem",
+      "subreddit": "mlops",
+      "url": "https://www.reddit.com/r/mlops/comments/1wahi89/thinking_about_blackbox_llm_monitoring_as_a/",
+      "author": "Particular-Roof4257",
+      "created_utc": "2026-09-08 07:27:26",
+      "score": 14,
+      "num_comments": 6,
+      "upvote_ratio": 1.0,
+      "text": "I'm exploring a monitoring problem where the system being monitored is an external LLM and its actual internal state is unavailable.\n\nThe monitor only sees observations such as:\n\n* prompt/response behavior\n* evaluation scores\n* semantic changes from a trusted baseline\n* safety/refusal/instruction-following behavior\n* latency and error signals\n* delayed user feedback\n* results from additional probes\n\nBehind those observations, several different things could be happening: a silent provider update, genuine capability degradation, distribution shift, prompt/context sensitivity, a policy change, evaluator error, or simply a transient anomaly.\n\nThat makes the problem interesting because the same observed behavioral change can correspond to very different underlying causes.\n\nI'm currently thinking about it as a partially observable decision problem. The monitor maintains a belief about the underlying state and can either continue operating, gather more evidence, or take a stronger action.\n\nOne thing that seems easy to get wrong is designing the hidden state around what is convenient for the experiment rather than what would actually explain failures in deployment.\n\nFor example, \"model degraded\" might be too broad if the important distinction is between persistent degradation, a narrow capability regression, a provider-side behavior change, and a change caused by the incoming request distribution.\n\nI'm looking at this from both the modeling and evaluation perspective, particularly around what information a monitor fundamentally cannot observe and how that should affect its decisions.\n\nI'd be interested in discussion from people who have worked with model monitoring, uncertainty estimation, POMDPs, evaluation systems, or production ML failures especially cases where the observable signal initially pointed toward the wrong explanation.",
+      "is_original_content": false,
+      "link_flair_text": "Discussion :snoo_dealwithit:",
+      "permalink": "https://reddit.com/r/mlops/comments/1wahi89/thinking_about_blackbox_llm_monitoring_as_a/",
+      "domain": "self.mlops",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "p8i4r98",
+          "author": "AutoModerator",
+          "text": "**AI usage disclosure**\n\nHi u/Particular-Roof4257 — thanks for posting to r/mlops!\n\nBecause this community discusses and builds AI/ML systems, using AI tools is not inherently a problem. We do, however, ask for transparency about how submissions are created.\n\n**Please reply to this comment with a brief AI / automation disclosure, particularly if this post was created or submitted in whole or in part by an autonomous agent, bot, workflow, or other automated system.**\n\nIf AI or automation was involved, please briefly describe what it did and what human review was performed before posting.\n\nThis disclosure helps the r/mlops community distinguish human discussion, AI-assisted work, and automated/agent traffic while keeping the focus on useful technical conversation.\n\nThanks for helping keep the signal high.\n\n\n*I am a bot, and this action was performed automatically. Please [contact the moderators of this subreddit](/message/compose/?to=/r/mlops) if you have any questions or concerns.*",
+          "score": 1,
+          "created_utc": "2026-09-08 07:27:26",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "p8i5fs7",
+          "author": "BackgroundPlayful610",
+          "text": "The framing around hidden state granularity is the part that actually matters here. I've seen too many monitoring setups where \"model degraded\" is treated as a single flag, and the on-call person has to manually figure out if it's a real regression or just a Tuesday afternoon traffic shift.\n\n  \nWhat trips people up is how the same observation chain can look identical for completely different root causes. A spike in refusal rates could be a safety policy update, or it could be your user base suddenly asking about sensitive topics because of something in the news. The monitor can't tell the difference unless you've designed the belief state to distinguish between those.\n\n  \nI'd push back slightly on the POMDP framing being the right level of abstraction for most teams though. The action space in practice is usually pretty constrained, page someone, roll back, gather more data, do nothing. The bigger challenge is getting the observation model right so you're not constantly waking people up for nothing.\n\n  \nCurious how you're thinking about the evaluation side of this. Synthetic injection of known failure modes, or replaying historical incidents with the monitor's decisions compared against what the team actually did?",
+          "score": 2,
+          "created_utc": "2026-09-08 07:33:20",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "p8iausw",
+              "author": "Ali-WAIL",
+              "text": "The evaluation point is interesting. In your experience, which of those has been more representative of production behavior: injecting known failure modes, or replaying historical incidents?\n\nMy concern with synthetic failures is that they can make the monitor look better than it really is if the injected failure matches the assumptions built into the observation model.",
+              "score": 1,
+              "created_utc": "2026-09-08 08:20:34",
+              "is_submitter": false,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "p8iabg1",
+          "author": "Ali-WAIL",
+          "text": "The ambiguity between the observed signal and the underlying state is the part I find most interesting here.\n\nIf two hidden states can produce almost the same observations but would justify different actions, how are you thinking about the decision boundary?\n\nWould you let the system act once the belief in one state becomes strong enough, or explicitly model the cost of acting on the wrong explanation and sometimes keep gathering evidence instead?",
+          "score": 1,
+          "created_utc": "2026-09-08 08:15:51",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "p8iw0tl",
+          "author": "IndividualTop3675",
+          "text": "Framing this as a POMDP is intellectually satisfying and probably the right theoretical lens, but the practical challenge that will dominate your design is that the belief update step requires some prior over state transition probabilities that you almost certainly don't have access to, since provider update schedules, policy change timing, and capability regression rates are proprietary and opaque in ways that make your belief state more of a structured heuristic than a principled posterior.",
+          "score": 1,
+          "created_utc": "2026-09-08 11:10:34",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "p8j9t4t",
+          "author": "alexpran",
+          "text": "A quality gate on an LLM app reported a regression: one case dropped from 5/5 to 2/5. Every hypothesis on your list was checked, provider change, prompt, config, input drift. All identical. Fifteen minutes later the same case was 5/5 again with nothing touched. The true state was \"the evaluator moved\", and the observation was indistinguishable from \"narrow capability regression\" until we had a second sample.\n\nWhat we do now maps onto your framing more literally than I expected:\n\n* Two of your hidden causes are made observable by construction. Provider or config changes are recorded with the reference (a hash over model, temperature, prompt, tools), so a change there is read from the record, not inferred from behaviour. That removes the two easiest confounders before any belief update.\n* Evaluator noise is measured, not assumed. Each case is scored several times on the accepted version and the spread is stored. A new observation inside that spread updates nothing.\n* The \"gather more evidence\" action has a stopping rule: a drop beyond the spread gets re-sampled once; if it persists it's treated as real, if it vanishes it's logged as a draw and not re-run again, because re-running until it goes green is how the monitor teaches itself to ignore real regressions.\n\nWhat the monitor fundamentally cannot see, in my experience, is the difference between \"the model got worse on this input\" and \"the model got worse\". Per-case records help, several cases moving a little in the same direction is the strongest signal I have for the second, but it's inference, not observation, and I'd design the hidden state around exactly that gap.",
+          "score": 1,
+          "created_utc": "2026-09-08 12:34:30",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
       "id": "1waxsgh",
       "title": "What production skills are actually worth learning in Year 1 of an AI/ML journey?",
       "subreddit": "mlops",
       "url": "https://www.reddit.com/r/mlops/comments/1waxsgh/what_production_skills_are_actually_worth/",
       "author": "Comfortable-Ebb-2687",
       "created_utc": "2026-09-08 19:05:46",
-      "score": 14,
-      "num_comments": 12,
-      "upvote_ratio": 0.86,
+      "score": 13,
+      "num_comments": 13,
+      "upvote_ratio": 0.82,
       "text": "Hey everyone,\n\nI'm starting a BS Mathematics degree in October 2026. My university classes will be online and flexible, and I'm preparing for a long-term career in AI/ML Engineering.I also plan to pursue a Master's in AI/ML or a closely related field later.\n\nFor context, my Year 1 university curriculum includes:\n\n**Semester 1:** Calculus I, Sets & Logic, General Mathematics, Introduction to Computing, English, Business, Ethics/Islamic Studies.\n\n**Semester 2:** Python + Python Practical, Calculus II, Business Mathematics & Statistics, General Science, Technical Writing, Pakistan Studies.\n\nAlongside university, I'll be doing a 12-month AI program that covers FastAPI, PostgreSQL, APIs, Docker, evaluation, observability, MCP/A2A and basic deployment/production concepts.\n\nI'll also be learning Python, DSA, SQL, classical ML and PyTorch separately.\n\nFor experienced MLOps/AI engineers:\n\nWhich production skills would you recommend learning in Year 1, and which ones should I leave for later?\n\nI'm trying to build good engineering foundations without rushing into advanced MLOps too early.",
       "is_original_content": false,
       "link_flair_text": "Discussion :snoo_dealwithit:",
@@ -352,80 +426,6 @@
       ]
     },
     {
-      "id": "1wahi89",
-      "title": "Thinking about black-box LLM monitoring as a partially observable decision problem",
-      "subreddit": "mlops",
-      "url": "https://www.reddit.com/r/mlops/comments/1wahi89/thinking_about_blackbox_llm_monitoring_as_a/",
-      "author": "Particular-Roof4257",
-      "created_utc": "2026-09-08 07:27:26",
-      "score": 11,
-      "num_comments": 6,
-      "upvote_ratio": 0.88,
-      "text": "I'm exploring a monitoring problem where the system being monitored is an external LLM and its actual internal state is unavailable.\n\nThe monitor only sees observations such as:\n\n* prompt/response behavior\n* evaluation scores\n* semantic changes from a trusted baseline\n* safety/refusal/instruction-following behavior\n* latency and error signals\n* delayed user feedback\n* results from additional probes\n\nBehind those observations, several different things could be happening: a silent provider update, genuine capability degradation, distribution shift, prompt/context sensitivity, a policy change, evaluator error, or simply a transient anomaly.\n\nThat makes the problem interesting because the same observed behavioral change can correspond to very different underlying causes.\n\nI'm currently thinking about it as a partially observable decision problem. The monitor maintains a belief about the underlying state and can either continue operating, gather more evidence, or take a stronger action.\n\nOne thing that seems easy to get wrong is designing the hidden state around what is convenient for the experiment rather than what would actually explain failures in deployment.\n\nFor example, \"model degraded\" might be too broad if the important distinction is between persistent degradation, a narrow capability regression, a provider-side behavior change, and a change caused by the incoming request distribution.\n\nI'm looking at this from both the modeling and evaluation perspective, particularly around what information a monitor fundamentally cannot observe and how that should affect its decisions.\n\nI'd be interested in discussion from people who have worked with model monitoring, uncertainty estimation, POMDPs, evaluation systems, or production ML failures especially cases where the observable signal initially pointed toward the wrong explanation.",
-      "is_original_content": false,
-      "link_flair_text": "Discussion :snoo_dealwithit:",
-      "permalink": "https://reddit.com/r/mlops/comments/1wahi89/thinking_about_blackbox_llm_monitoring_as_a/",
-      "domain": "self.mlops",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "p8i4r98",
-          "author": "AutoModerator",
-          "text": "**AI usage disclosure**\n\nHi u/Particular-Roof4257 — thanks for posting to r/mlops!\n\nBecause this community discusses and builds AI/ML systems, using AI tools is not inherently a problem. We do, however, ask for transparency about how submissions are created.\n\n**Please reply to this comment with a brief AI / automation disclosure, particularly if this post was created or submitted in whole or in part by an autonomous agent, bot, workflow, or other automated system.**\n\nIf AI or automation was involved, please briefly describe what it did and what human review was performed before posting.\n\nThis disclosure helps the r/mlops community distinguish human discussion, AI-assisted work, and automated/agent traffic while keeping the focus on useful technical conversation.\n\nThanks for helping keep the signal high.\n\n\n*I am a bot, and this action was performed automatically. Please [contact the moderators of this subreddit](/message/compose/?to=/r/mlops) if you have any questions or concerns.*",
-          "score": 1,
-          "created_utc": "2026-09-08 07:27:26",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "p8i5fs7",
-          "author": "BackgroundPlayful610",
-          "text": "The framing around hidden state granularity is the part that actually matters here. I've seen too many monitoring setups where \"model degraded\" is treated as a single flag, and the on-call person has to manually figure out if it's a real regression or just a Tuesday afternoon traffic shift.\n\n  \nWhat trips people up is how the same observation chain can look identical for completely different root causes. A spike in refusal rates could be a safety policy update, or it could be your user base suddenly asking about sensitive topics because of something in the news. The monitor can't tell the difference unless you've designed the belief state to distinguish between those.\n\n  \nI'd push back slightly on the POMDP framing being the right level of abstraction for most teams though. The action space in practice is usually pretty constrained, page someone, roll back, gather more data, do nothing. The bigger challenge is getting the observation model right so you're not constantly waking people up for nothing.\n\n  \nCurious how you're thinking about the evaluation side of this. Synthetic injection of known failure modes, or replaying historical incidents with the monitor's decisions compared against what the team actually did?",
-          "score": 2,
-          "created_utc": "2026-09-08 07:33:20",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "p8iausw",
-              "author": "Ali-WAIL",
-              "text": "The evaluation point is interesting. In your experience, which of those has been more representative of production behavior: injecting known failure modes, or replaying historical incidents?\n\nMy concern with synthetic failures is that they can make the monitor look better than it really is if the injected failure matches the assumptions built into the observation model.",
-              "score": 1,
-              "created_utc": "2026-09-08 08:20:34",
-              "is_submitter": false,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "p8iabg1",
-          "author": "Ali-WAIL",
-          "text": "The ambiguity between the observed signal and the underlying state is the part I find most interesting here.\n\nIf two hidden states can produce almost the same observations but would justify different actions, how are you thinking about the decision boundary?\n\nWould you let the system act once the belief in one state becomes strong enough, or explicitly model the cost of acting on the wrong explanation and sometimes keep gathering evidence instead?",
-          "score": 1,
-          "created_utc": "2026-09-08 08:15:51",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "p8iw0tl",
-          "author": "IndividualTop3675",
-          "text": "Framing this as a POMDP is intellectually satisfying and probably the right theoretical lens, but the practical challenge that will dominate your design is that the belief update step requires some prior over state transition probabilities that you almost certainly don't have access to, since provider update schedules, policy change timing, and capability regression rates are proprietary and opaque in ways that make your belief state more of a structured heuristic than a principled posterior.",
-          "score": 1,
-          "created_utc": "2026-09-08 11:10:34",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "p8j9t4t",
-          "author": "alexpran",
-          "text": "A quality gate on an LLM app reported a regression: one case dropped from 5/5 to 2/5. Every hypothesis on your list was checked, provider change, prompt, config, input drift. All identical. Fifteen minutes later the same case was 5/5 again with nothing touched. The true state was \"the evaluator moved\", and the observation was indistinguishable from \"narrow capability regression\" until we had a second sample.\n\nWhat we do now maps onto your framing more literally than I expected:\n\n* Two of your hidden causes are made observable by construction. Provider or config changes are recorded with the reference (a hash over model, temperature, prompt, tools), so a change there is read from the record, not inferred from behaviour. That removes the two easiest confounders before any belief update.\n* Evaluator noise is measured, not assumed. Each case is scored several times on the accepted version and the spread is stored. A new observation inside that spread updates nothing.\n* The \"gather more evidence\" action has a stopping rule: a drop beyond the spread gets re-sampled once; if it persists it's treated as real, if it vanishes it's logged as a draw and not re-run again, because re-running until it goes green is how the monitor teaches itself to ignore real regressions.\n\nWhat the monitor fundamentally cannot see, in my experience, is the difference between \"the model got worse on this input\" and \"the model got worse\". Per-case records help, several cases moving a little in the same direction is the strongest signal I have for the second, but it's inference, not observation, and I'd design the hidden state around exactly that gap.",
-          "score": 1,
-          "created_utc": "2026-09-08 12:34:30",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
       "id": "1w9w8ny",
       "title": "DevSecOps Engineer (6+ yrs) looking to get hands-on with MLOps : open to low-cost/collab opportunities",
       "subreddit": "mlops",
@@ -433,7 +433,7 @@
       "author": "wakandanowandforever",
       "created_utc": "2026-09-07 16:04:00",
       "score": 9,
-      "num_comments": 5,
+      "num_comments": 7,
       "upvote_ratio": 0.85,
       "text": "Hi all,\n\nI'm a DevSecOps Engineer with 6+ years of experience in DevOps, handling production infrastructure, CI/CD, Kubernetes, and cloud environments. Lately I've been diving into MLOps and want to get real hands-on experience beyond just reading docs and tutorials.\n\nI'm comfortable with production systems and can bring that reliability and security mindset to ML pipelines and infrastructure. Since I'm looking to build practical experience in this space, I'm open to working at minimal or reduced rates for the right opportunity, whether it's a small project, a startup that needs help setting up ML infra, or someone willing to mentor/collaborate.\n\nIf you know of any openings, freelance work, or projects where I could contribute and learn, please let me know. Happy to share more about my background if useful.\n\nThanks!",
       "is_original_content": false,
@@ -455,7 +455,7 @@
           "id": "p8do6fb",
           "author": "InformedCrossover",
           "text": "you could probably skip the whole reduced rate thing honestly your background is already solid enough for a lateral move\n\n  \nive seen devops folks slide into mlops roles pretty easily cause half the battle is just knowing how to keep the damn pipelines from falling over at 3am. the ml part you pick up as you go\n\n  \nmaybe look for companies that already have a ml team but their infra is held together with duct tape and prayers. thats where you shine. they need someone who actually understands k8s and monitoring instead of just notebook jockeys\n\n  \nalso check out the mlops community slack if you havent already. people post collab gigs there sometimes",
-          "score": 3,
+          "score": 4,
           "created_utc": "2026-09-07 16:30:12",
           "is_submitter": false,
           "replies": [
@@ -478,6 +478,25 @@
               "replies": []
             }
           ]
+        },
+        {
+          "id": "p93sz5t",
+          "author": "MarcelLecture",
+          "text": "Where are you located ? Are you open to relocation ? I have an open position",
+          "score": 1,
+          "created_utc": "2026-09-11 06:18:02",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "p950ri6",
+              "author": "wakandanowandforever",
+              "text": "Currently in Kolkata, india and open for relocation.",
+              "score": 1,
+              "created_utc": "2026-09-11 11:56:03",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
         }
       ]
     },
@@ -490,7 +509,7 @@
       "created_utc": "2026-09-06 16:51:47",
       "score": 8,
       "num_comments": 7,
-      "upvote_ratio": 0.9,
+      "upvote_ratio": 0.84,
       "text": "We spent a while optimising the wrong number and I think it is a common mistake, so here is the arithmetic.\n\nPrice per token tells you what a call costs. It does not tell you what a finished task costs, because a task is not one call. On the pipeline I care about, a finished task is two tool calls and a strict JSON output, and it fails often enough that the retries matter.\n\nOnce you count retries, malformed output and the second attempt that finally parses, a cheap model can cost more per finished task than an expensive one. That is the part that surprised us. The cheap model was not worse in general, it was worse on our task specifically, so it failed on the same handful of edge cases over and over and we paid for every attempt.\n\nWhat we do now, and I would suggest it whether or not you ever change models:\n\n\\- log cost per finished task, not tokens per call\n\n\\- log it per step, because one step usually dominates and it is rarely the one you would guess\n\n\\- count a retry as part of the task it belongs to, not as a new task\n\nThe step that dominated for us was a classification call that ran on every item. Moving that one step off the frontier model took the task from 2.8 cents to 0.036 cents at the same accuracy. The retry rate fell too, which we did not predict: the smaller model had only ever been trained on traces that finished clean, so it produced fewer of the malformed outputs that caused retries in the first place.\n\nDisclosure: I work on this at Nimble, so treat it as a biased source.\n\nWrite-up and the tool if it is useful: [https://nimblemodels.com](https://nimblemodels.com) The first five distillations are free and you keep the weights either way.\n\n",
       "is_original_content": false,
       "link_flair_text": "Self-promotion :upvote:",
@@ -555,43 +574,6 @@
       ]
     },
     {
-      "id": "1w9lm1p",
-      "title": "Machine Learning testing performance",
-      "subreddit": "mlops",
-      "url": "https://www.reddit.com/r/mlops/comments/1w9lm1p/machine_learning_testing_performance/",
-      "author": "Sharp-Front-3450",
-      "created_utc": "2026-09-07 07:45:03",
-      "score": 8,
-      "num_comments": 2,
-      "upvote_ratio": 1.0,
-      "text": " Hello!  \nI've been doing my master degree and need some help.\n\n  \nContext:\n\nI'm working with an method to correct unfairness on ML models, currently testing on XGBoost and Logistic Regression. To test these models and the method I'm running 20 different scenarios, and each one of these scenarios need to be run 10 times, due to a test on one of the methods parameters.\n\nProblem:  \nI've said all of this to say that even tough I run the scenarios with some kind of parallelism it still takes a lot of time to test all scenarios whenever I do some change and need to test it.\n\nSince my computer does not have too much ram (16gb) and the dataset is kind of big I cannot increase the parallelism.\n\nDo you know any kind of cloud solution that can help on me that? Are colab notebooks a good option for this kind of issue?",
-      "is_original_content": false,
-      "link_flair_text": "MLOps Questions :snoo_hearteyes:",
-      "permalink": "https://reddit.com/r/mlops/comments/1w9lm1p/machine_learning_testing_performance/",
-      "domain": "self.mlops",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "p8b9i5f",
-          "author": "AutoModerator",
-          "text": "**AI usage disclosure**\n\nHi u/Sharp-Front-3450 — thanks for posting to r/mlops!\n\nBecause this community discusses and builds AI/ML systems, using AI tools is not inherently a problem. We do, however, ask for transparency about how submissions are created.\n\n**Please reply to this comment with a brief AI / automation disclosure, particularly if this post was created or submitted in whole or in part by an autonomous agent, bot, workflow, or other automated system.**\n\nIf AI or automation was involved, please briefly describe what it did and what human review was performed before posting.\n\nThis disclosure helps the r/mlops community distinguish human discussion, AI-assisted work, and automated/agent traffic while keeping the focus on useful technical conversation.\n\nThanks for helping keep the signal high.\n\n\n*I am a bot, and this action was performed automatically. Please [contact the moderators of this subreddit](/message/compose/?to=/r/mlops) if you have any questions or concerns.*",
-          "score": 1,
-          "created_utc": "2026-09-07 07:45:03",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "p8ba6wk",
-          "author": "PsychologicalPast935",
-          "text": "20 scenarios, 10 runs each, that's 200 experiments per change, sounds like a grind on 16gb\n\n  \ncolab might work but the free tier ram limits can be flaky, and sessions timeout if you're not paying attention\n\n  \ncould try spinning up a cheap cloud vm with more memory, something pay-as-you-go so you're not burning cash while debugging code between runs\n\n  \nor bake your test loop into a script, dump results to a csv, and just fire-and-forget on a rented instance, no need to stare at it",
-          "score": 1,
-          "created_utc": "2026-09-07 07:50:59",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
       "id": "1w9ipv7",
       "title": "A point in time AI red teaming only finds yesterday's attacks. I’ve come to realize the test battery I trusted is already stale",
       "subreddit": "mlops",
@@ -638,15 +620,52 @@
       ]
     },
     {
+      "id": "1w9lm1p",
+      "title": "Machine Learning testing performance",
+      "subreddit": "mlops",
+      "url": "https://www.reddit.com/r/mlops/comments/1w9lm1p/machine_learning_testing_performance/",
+      "author": "Sharp-Front-3450",
+      "created_utc": "2026-09-07 07:45:03",
+      "score": 7,
+      "num_comments": 2,
+      "upvote_ratio": 0.9,
+      "text": " Hello!  \nI've been doing my master degree and need some help.\n\n  \nContext:\n\nI'm working with an method to correct unfairness on ML models, currently testing on XGBoost and Logistic Regression. To test these models and the method I'm running 20 different scenarios, and each one of these scenarios need to be run 10 times, due to a test on one of the methods parameters.\n\nProblem:  \nI've said all of this to say that even tough I run the scenarios with some kind of parallelism it still takes a lot of time to test all scenarios whenever I do some change and need to test it.\n\nSince my computer does not have too much ram (16gb) and the dataset is kind of big I cannot increase the parallelism.\n\nDo you know any kind of cloud solution that can help on me that? Are colab notebooks a good option for this kind of issue?",
+      "is_original_content": false,
+      "link_flair_text": "MLOps Questions :snoo_hearteyes:",
+      "permalink": "https://reddit.com/r/mlops/comments/1w9lm1p/machine_learning_testing_performance/",
+      "domain": "self.mlops",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "p8b9i5f",
+          "author": "AutoModerator",
+          "text": "**AI usage disclosure**\n\nHi u/Sharp-Front-3450 — thanks for posting to r/mlops!\n\nBecause this community discusses and builds AI/ML systems, using AI tools is not inherently a problem. We do, however, ask for transparency about how submissions are created.\n\n**Please reply to this comment with a brief AI / automation disclosure, particularly if this post was created or submitted in whole or in part by an autonomous agent, bot, workflow, or other automated system.**\n\nIf AI or automation was involved, please briefly describe what it did and what human review was performed before posting.\n\nThis disclosure helps the r/mlops community distinguish human discussion, AI-assisted work, and automated/agent traffic while keeping the focus on useful technical conversation.\n\nThanks for helping keep the signal high.\n\n\n*I am a bot, and this action was performed automatically. Please [contact the moderators of this subreddit](/message/compose/?to=/r/mlops) if you have any questions or concerns.*",
+          "score": 1,
+          "created_utc": "2026-09-07 07:45:03",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "p8ba6wk",
+          "author": "PsychologicalPast935",
+          "text": "20 scenarios, 10 runs each, that's 200 experiments per change, sounds like a grind on 16gb\n\n  \ncolab might work but the free tier ram limits can be flaky, and sessions timeout if you're not paying attention\n\n  \ncould try spinning up a cheap cloud vm with more memory, something pay-as-you-go so you're not burning cash while debugging code between runs\n\n  \nor bake your test loop into a script, dump results to a csv, and just fire-and-forget on a rented instance, no need to stare at it",
+          "score": 1,
+          "created_utc": "2026-09-07 07:50:59",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
       "id": "1w8b906",
       "title": "What tools or features do you wish existed for open-weight models?",
       "subreddit": "mlops",
       "url": "https://www.reddit.com/r/mlops/comments/1w8b906/what_tools_or_features_do_you_wish_existed_for/",
       "author": "yasintoy",
       "created_utc": "2026-09-05 20:14:31",
-      "score": 7,
+      "score": 6,
       "num_comments": 4,
-      "upvote_ratio": 1.0,
+      "upvote_ratio": 0.88,
       "text": "What’s missing from the tools you use today? What would save you the most time or money?\n\nI’m building in this space and deciding what to focus on. Curious what you need and how you’re handling it today.",
       "is_original_content": false,
       "link_flair_text": "Research / Academia :snoo_hearteyes:",
@@ -694,81 +713,15 @@
       ]
     },
     {
-      "id": "1w762dz",
-      "title": "Open sourced our k8s-native AI platform for distributed multi-model inference at scale",
-      "subreddit": "mlops",
-      "url": "https://www.reddit.com/r/mlops/comments/1w762dz/open_sourced_our_k8snative_ai_platform_for/",
-      "author": "EmbeddedMagicX",
-      "created_utc": "2026-09-04 14:32:13",
-      "score": 5,
-      "num_comments": 6,
-      "upvote_ratio": 0.67,
-      "text": "I’m one of the co-founders of axem. We recently open sourced **Shaide**, the inference platform we ended up building while trying to make multi-model LLM deployments repeatable across different Kubernetes environments.\n\nThe problem for us wasn’t getting vLLM running. It was everything around it.\n\nOnce we had multiple models, multiple replicas and multiple GPU nodes, we needed a consistent way to handle routing, scaling, model distribution, deployment and the rest of the platform without rebuilding the stack for every environment.\n\nShaide is our attempt to package that into one Kubernetes-native platform.\n\nCurrent setup:\n\n* vLLM for inference\n* llm-d for multi-instance orchestration\n* multiple models running and scaling independently\n* KV-cache-aware scheduling\n* internal OCI registry for container images + model weights\n* OpenAI-compatible API\n* the entire platform is managed as infrastructure as code\n* interactive installer that runs from Docker against an existing Kubernetes cluster\n* can operate fully air-gapped with no cluster egress\n\nWe currently use it with on-prem RKE2, and it also works with EKS/GKE/AKS.\n\nThe project is Apache 2.0 and still early, so some of the interfaces and structure will change.\n\nGitHub:  \n[https://github.com/axem-solutions/shaide](https://github.com/axem-solutions/shaide)\n\n",
-      "is_original_content": false,
-      "link_flair_text": "Self-promotion :upvote:",
-      "permalink": "https://reddit.com/r/mlops/comments/1w762dz/open_sourced_our_k8snative_ai_platform_for/",
-      "domain": "self.mlops",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "p7sbr37",
-          "author": "AutoModerator",
-          "text": "**AI usage disclosure**\n\nHi u/EmbeddedMagicX — thanks for posting to r/mlops!\n\nBecause this community discusses and builds AI/ML systems, using AI tools is not inherently a problem. We do, however, ask for transparency about how submissions are created.\n\n**Please reply to this comment with a brief AI / automation disclosure, particularly if this post was created or submitted in whole or in part by an autonomous agent, bot, workflow, or other automated system.**\n\nIf AI or automation was involved, please briefly describe what it did and what human review was performed before posting.\n\nThis disclosure helps the r/mlops community distinguish human discussion, AI-assisted work, and automated/agent traffic while keeping the focus on useful technical conversation.\n\nThanks for helping keep the signal high.\n\n\n*I am a bot, and this action was performed automatically. Please [contact the moderators of this subreddit](/message/compose/?to=/r/mlops) if you have any questions or concerns.*",
-          "score": 1,
-          "created_utc": "2026-09-04 14:32:14",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "p7t7br6",
-          "author": "Ok_Possession_7018",
-          "text": "The KV-cache-aware scheduling part is what caught my eye, most platforms just do round robin and call it a day. The air-gapped support is also rare to see in open source, usually that is enterprise-only feature. Will check the repo in weekend",
-          "score": 2,
-          "created_utc": "2026-09-04 16:49:37",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "p7tqlri",
-              "author": "EmbeddedMagicX",
-              "text": "To be fair the kv-cache-aware scheduling is coming from the upstream llm-d project (https://llm-d.ai/).\nThe air-gapped support is on us, though. \nThanks for taking a look, I appreciate it! ",
-              "score": 2,
-              "created_utc": "2026-09-04 18:13:11",
-              "is_submitter": true,
-              "replies": []
-            },
-            {
-              "id": "p7uksx7",
-              "author": "Boring-Cicada3828",
-              "text": "I exactly had the same though while reading. Cache aware is definitely the part that makes it interesting. Did you guys tried triton server at some point ?",
-              "score": 1,
-              "created_utc": "2026-09-04 20:26:01",
-              "is_submitter": false,
-              "replies": [
-                {
-                  "id": "p84nlm0",
-                  "author": "EmbeddedMagicX",
-                  "text": "No, we didn't want to get tied to NVIDIA (not that you have much of a choice these days...). Our long-term plan is to support heterogeneous compute pools, so we don't want to be dependent on any single provider.",
-                  "score": 1,
-                  "created_utc": "2026-09-06 09:02:24",
-                  "is_submitter": true,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        }
-      ]
-    },
-    {
       "id": "1w81yqk",
       "title": "Running multiple small models in parallel for inference is the A16 actually worth it over renting A100 slices?",
       "subreddit": "mlops",
       "url": "https://www.reddit.com/r/mlops/comments/1w81yqk/running_multiple_small_models_in_parallel_for/",
       "author": "BunnyCheeky",
       "created_utc": "2026-09-05 14:17:25",
-      "score": 5,
+      "score": 6,
       "num_comments": 9,
-      "upvote_ratio": 0.86,
+      "upvote_ratio": 1.0,
       "text": "Hi guys! Been trying to cut inference costs for about three months and keep hitting the small wall. The work load is embarrassingly parallel: 7B class models quantized to 4-bit, mostly classification and embedding tasks firing concurrently from different services. Nothing compute-heavy per request, just a lot of them at the same time.\n\n  \nThe problem is A100 slices price me for VRAM i never actually use. Each individual request is small, the models fit easily, but I'm paying for peak capacity that exists maybe 10% of the time. Felt like there had to be a better fit for this specific pattern. \n\n  \nStarted looking at density-first GPUs instead of raw-compute ones. The A16 caught my attention  - four independent Ampire dies on one card, 16GB GDDR6 ECC per die, third-gen Tensor cores. Spun up an instance on Severespace to test it, hourly billing so low risk to try. For 7B in 4-bit with concurrent request it's held up fine over three weeks. The hard constraint is your vGPU profile ceiling - anything needing more memory than your alocated profile is a non-starter, so it doesn't suit any workload. \n\n  \nFor this specific pattern though - lots of small parallel requests, models that fit comfortably in a modest profile, it's been a better fit than overpaying for A100 capacity I'd mostly idle.\n\n  \nAnyone else optimized specifically for parallel lightweight inference? Curious what architecture people landed on and where the A100 threshold actually kicks in. ",
       "is_original_content": false,
       "link_flair_text": "MLOps Questions :snoo_hearteyes:",
@@ -809,6 +762,117 @@
           "text": "The A16 sounds like a pretty reasonable fit for that workload if each model stays comfortably inside the memory limit. I’d be curious what happens as concurrency gets high though — does queue latency become the bottleneck before GPU utilization does? Also, are you batching requests centrally or is each service sending them independently?",
           "score": 1,
           "created_utc": "2026-09-07 11:01:24",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1w9lscg",
+      "title": "We started treating LLM benchmarks like production monitoring instead of a leaderboard",
+      "subreddit": "mlops",
+      "url": "https://www.reddit.com/r/mlops/comments/1w9lscg/we_started_treating_llm_benchmarks_like/",
+      "author": "ionutvi",
+      "created_utc": "2026-09-07 07:55:22",
+      "score": 6,
+      "num_comments": 6,
+      "upvote_ratio": 1.0,
+      "text": "I’m the founder of AI Stupid Level, so disclosure upfront: this comes from a commercial platform we’ve been building around continuous LLM benchmarking and drift detection.\n\nOne of the problems that pushed us in this direction was surprisingly simple:\n\n**If your application depends on an external LLM API, how do you know the model you chose six weeks ago is still behaving the way it did when you evaluated it?**\n\nMost teams benchmark models when choosing one, maybe test again when a provider announces a new release, and then mostly monitor the application around it.\n\nBut the model itself is an external production dependency.\n\nThe public model identifier can remain the same while serving conditions, infrastructure, provider configuration, routing, or potentially the underlying implementation changes. At the same time, a few bad generations are obviously not enough to conclude that the model degraded.\n\nSo we started treating model evaluation more like observability.\n\nIn one historical analysis we looked at **31,352 repeated benchmark score observations across 49 models**.\n\nWe saw:\n\n* within-day standard deviation: **2.80 points**\n* between-day standard deviation of daily medians: **8.43 points**\n* descriptive ratio: about **3.01x**\n\nI want to be careful with the interpretation here. This does **not** prove that providers were modifying their models every day. There are multiple confounders: sampling variation, task composition, missing observations, provider-side effects, and the benchmark itself.\n\nWhat it did convince us of is that temporal variation is large enough that a model score shouldn’t necessarily be treated as a permanent property of a model.\n\nFrom an MLOps perspective, the harder engineering problem became attribution.\n\nIf a score suddenly drops, which of these happened?\n\n* the model actually changed\n* the benchmark changed\n* a specific task started failing\n* the provider had an availability/serving problem\n* the caller configuration was wrong\n* normal stochastic variation produced an unusual batch\n\nWe now keep those paths separate.\n\nFor example, benchmark configurations are versioned. If we change something capable of moving the score - task definitions, prompts, tests, request policy, scoring configuration - we don’t silently compare the new measurements against the previous baseline as though nothing changed.\n\nProvider failures are also separated from capability outcomes. A timeout or provider 5xx should not simply become “the model scored worse.”\n\nFor coding evaluations we prefer actual execution against test cases where possible instead of asking another LLM to judge whether the answer looks correct.\n\nWe also track repeated observations over time, look at model-level changes against the model’s own historical baseline, inspect task-level changes, and look for correlated movement across models from the same provider when trying to understand whether something broader happened.\n\nAnother issue we’ve run into is **benchmark contamination**.\n\nThere is a tension between making an evaluation reproducible and publishing every live task, prompt variation and hidden test. Once the complete active benchmark is public, it can eventually become something systems are optimized against rather than an unseen measurement workload.\n\nBecause of that, we’ve started separating:\n\n**Methodological transparency** \\- how measurements are collected, compared and interpreted should be inspectable.\n\n**Live evaluation secrecy** \\- some tasks and operational details may need to remain private or rotate.\n\nWe wrote up the methodology we’re currently using in a public technical reference:\n\n[**https://aistupidlevel.info/asl-public-benchmark-methodology-2026.pdf**](https://aistupidlevel.info/asl-public-benchmark-methodology-2026.pdf) \n\nThe public version deliberately explains the measurement framework and limitations without publishing the complete active task bank or all of the operational parameters.\n\nI’d be especially interested in how people here handle this in production:\n\n1. Are you continuously regression-testing the third-party LLMs your systems depend on, or only testing around announced model releases?\n2. What would you consider enough evidence to alert on “model degradation” rather than ordinary variance?\n3. Do you treat provider availability/reliability as part of model evaluation or as a completely separate SRE signal?\n4. How do you handle baseline resets when your own evaluation harness changes?\n5. Has anyone built something similar into their normal MLOps observability stack?\n\nNot trying to turn this into a product pitch. I’m more interested in whether **continuous external-model evaluation should become a normal MLOps primitive**, in the same way we already monitor databases, APIs, latency, errors and infrastructure.",
+      "is_original_content": false,
+      "link_flair_text": "Discussion :snoo_dealwithit:",
+      "permalink": "https://reddit.com/r/mlops/comments/1w9lscg/we_started_treating_llm_benchmarks_like/",
+      "domain": "self.mlops",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "p8bapex",
+          "author": "AutoModerator",
+          "text": "**AI usage disclosure**\n\nHi u/ionutvi — thanks for posting to r/mlops!\n\nBecause this community discusses and builds AI/ML systems, using AI tools is not inherently a problem. We do, however, ask for transparency about how submissions are created.\n\n**Please reply to this comment with a brief AI / automation disclosure, particularly if this post was created or submitted in whole or in part by an autonomous agent, bot, workflow, or other automated system.**\n\nIf AI or automation was involved, please briefly describe what it did and what human review was performed before posting.\n\nThis disclosure helps the r/mlops community distinguish human discussion, AI-assisted work, and automated/agent traffic while keeping the focus on useful technical conversation.\n\nThanks for helping keep the signal high.\n\n\n*I am a bot, and this action was performed automatically. Please [contact the moderators of this subreddit](/message/compose/?to=/r/mlops) if you have any questions or concerns.*",
+          "score": 1,
+          "created_utc": "2026-09-07 07:55:22",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "p8bb6e3",
+          "author": "obliviousranger_84",
+          "text": "This might be the most MLOps thing I've ever read, treating a third-party API like a flaky microservice and actually instrumenting it properly. Most places I've seen just set a threshold at eval time and pray the model doesn't drift into nonsense six weeks later. The within-day vs between-day variance numbers are way higher than I would've guessed.",
+          "score": 2,
+          "created_utc": "2026-09-07 07:59:23",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "p8jjl4t",
+          "author": "Future_AGI",
+          "text": "Version eval harness configs. Separate provider failures from capability drops. Track model-level drift against its own baseline. Alert on slice regression >2σ, not global score. That's our agent-opt + eval loop design. Check out the repo: [https://github.com/future-agi/future-agi](https://github.com/future-agi/future-agi)",
+          "score": 1,
+          "created_utc": "2026-09-08 13:25:52",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "p8jwp0e",
+              "author": "ionutvi",
+              "text": "Thanks, i actually went through the repo rather than the README, so a few specifics.\n\nOn versioning eval configs, we do this, but you do one part better. `EvalTemplateVersion` stores a full `config_snapshot` per version. We stamp every score with a content hash over everything capable of moving it, which has the advantage that it can't be forgotten, you can't edit a prompt and neglect to bump it, but a hash is one way. When a baseline resets i know the instrument changed and can't show what changed. Keeping the snapshot alongside the hash is a clear improvement and i'm taking it :)\n\nThe slice regression point is the one i found most useful, and i think your implementation is lighter than the claim. As far as i can tell it's a convention rather than a feature, `UserAlertMonitor`has a `filters` JSONField, so a slice monitor is one monitor per slice, and the threshold path is `_check_percentage_change_threshold` mean ± stddev×(1+pct/100) over a trailing window, so \"2σ\" is pct=100. That's an independent one-sided z-test per slice per window with no multiple-comparison handling. At 20 slices that's about a 37% chance of at least one false alert per cycle; at 50 it's 68%. How do you handle that in practice FDR, requiring persistence across cycles, or just keeping the monitor count low?\n\nAsking because the underlying idea is right and it would have caught a real thing for us. Our worst apparent degradation was one task going from 5/5 to 1/5 for about 16 hours while every other task stayed at 1.0. The global score dropped and it looked like a serving change until we split it by task, which we did by hand. For us the natural slice is the task, not a user-facing dimension, and the per-task data is also the part of our store that never contains modelled fallback rows, so it's a cleaner substrate than the aggregate score.\n\nOne genuine question. All 64 of your shipped system evals are `eval_type: agent`, so LLM-as-judge. We went the other way for coding and execute against test cases, mainly because a judge model is itself an external dependency that can drift, which adds a confounder to the exact attribution problem this thread is about. For what you're measuring (tone, hallucination, escalation handling) i don't think there's an executable alternative, so how do you baseline the judge? Pinned version, periodic re-scoring of a golden set, something else? That seems like the harder version of the problem, thanks a bunch!",
+              "score": 1,
+              "created_utc": "2026-09-08 14:29:04",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "p95v69l",
+          "author": "jonah_omninode",
+          "text": "Separating provider failures from capability failures is important. Otherwise a timeout quietly becomes a quality score and the historical baseline stops meaning what people think it means. We have also been moving coding evaluations toward deterministic tests tied to the definition of done, with the evidence stored beside the requirement it answered. A model judge can help explore a failure, but we do not let it decide whether the work is complete. How do you version the expected behavior when a provider changes a model behind a stable public identifier?",
+          "score": 1,
+          "created_utc": "2026-09-11 14:27:01",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1wchf60",
+      "title": "Everyone's consolidating their embedding, reranking and extraction onto one server, but I think that's overkill until you're running several",
+      "subreddit": "mlops",
+      "url": "https://www.reddit.com/r/mlops/comments/1wchf60/everyones_consolidating_their_embedding_reranking/",
+      "author": "WallabyIcy8537",
+      "created_utc": "2026-09-10 12:11:36",
+      "score": 6,
+      "num_comments": 3,
+      "upvote_ratio": 1.0,
+      "text": "There's a wave of inference servers pitching \"one API for embeddings, reranking, extraction and small-model generation,\" and I think people reach for it before they need it. Here's where I think the line is.  \n  \nIf you run one model, you don't need any of this. Single chat model, use vLLM. Single embedding model, TEI is leaner. Putting a multi-model server on top of a one-model workload just adds a layer that can break for no benefit.  \n  \nIt flips when one feature needs several model types per request. Competitive retrieval in 2026 isn't just dense embeddings, it's dense for meaning, sparse for exact keyword and product-name matches, sometimes ColBERT for token-level precision, and a cross-encoder reranker to fix the final order, and increasingly a small local LLM handling the routine generation so you're not paying a frontier API for a one-line summary. That's four or five model types behind one feature, and running each as its own container means four or five deploys to monitor. That's when it stopped being worth it for us.  \n  \nI ended up on the Superlinked Inference Engine (SIE) for this. What sold me wasn't \"one API,\" it was that several modes collapse into one call, bge-m3 emits dense and sparse together, reranking is a score call, and small-model generation runs through a generate call on the same server. It's OpenAI-compatible on embeddings and chat so the client mostly repoints. The honest framing, from their docs, is it doesn't replace your frontier LLM, it takes the routine generation and everything around it. So if your \"sprawl\" is one embedder and a chat model, this isn't for you.  \n  \nThe reason I'd still think twice is contention. Their docs are upfront that under heavy concurrent load, models on one GPU fight for memory, and a latency-critical model at steady QPS is better in its own pool. So this is a mixed-and-bursty answer, not a put-everything-on-one-box answer.",
+      "is_original_content": false,
+      "link_flair_text": "Tales From the Trenches :snoo_shrug:",
+      "permalink": "https://reddit.com/r/mlops/comments/1wchf60/everyones_consolidating_their_embedding_reranking/",
+      "domain": "self.mlops",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "p8xqjf2",
+          "author": "AutoModerator",
+          "text": "**AI usage disclosure**\n\nHi u/WallabyIcy8537 — thanks for posting to r/mlops!\n\nBecause this community discusses and builds AI/ML systems, using AI tools is not inherently a problem. We do, however, ask for transparency about how submissions are created.\n\n**Please reply to this comment with a brief AI / automation disclosure, particularly if this post was created or submitted in whole or in part by an autonomous agent, bot, workflow, or other automated system.**\n\nIf AI or automation was involved, please briefly describe what it did and what human review was performed before posting.\n\nThis disclosure helps the r/mlops community distinguish human discussion, AI-assisted work, and automated/agent traffic while keeping the focus on useful technical conversation.\n\nThanks for helping keep the signal high.\n\n\n*I am a bot, and this action was performed automatically. Please [contact the moderators of this subreddit](/message/compose/?to=/r/mlops) if you have any questions or concerns.*",
+          "score": 1,
+          "created_utc": "2026-09-10 12:11:36",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "p8xzcju",
+          "author": "Ok_Salamander6093",
+          "text": "Makes sense, the monitoring overhead alone gets crazy when you have four separate containers just for retrieval stuff.",
+          "score": 1,
+          "created_utc": "2026-09-10 12:58:07",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "p8yifao",
+          "author": "Worldly_North_7213",
+          "text": "The contention caveat at the end is the right worry, but in our measurements the more common failure was the opposite of contention: the card sitting idle because something upstream fed it too slowly. Across 15 batch jobs we logged GPU utilisation next to cost and it ranged from 37 to 99 percent on jobs that all looked healthy from the outside. The low ones were host-CPU bound rather than model bound, and none of them errored or warned.\n\n  \nThat cuts both ways for the consolidation question. If five retrieval models each hold their own container on their own slice of a card, a lot of what you are paying for is idle, and packing them behind one server is a real saving rather than an aesthetic preference. But if the single model you already run sits at 40 percent, consolidating will not recover that, because the bottleneck is upstream of the serving layer entirely. Our worst case was exactly that: same job, same card, a host with 5 vCPUs versus one with 24, 1.85x difference in wall clock, 40 versus 75 percent utilisation.\n\n  \nSo the cheap thing to do before committing to either architecture is log utilisation per container for a day alongside QPS. A packing problem and a feeding problem look identical on a cost dashboard and have completely different fixes, and only one of them is solved by the decision you are making.",
+          "score": 1,
+          "created_utc": "2026-09-10 14:27:46",
           "is_submitter": false,
           "replies": []
         }
@@ -984,127 +1048,6 @@
       ]
     },
     {
-      "id": "1w9lscg",
-      "title": "We started treating LLM benchmarks like production monitoring instead of a leaderboard",
-      "subreddit": "mlops",
-      "url": "https://www.reddit.com/r/mlops/comments/1w9lscg/we_started_treating_llm_benchmarks_like/",
-      "author": "ionutvi",
-      "created_utc": "2026-09-07 07:55:22",
-      "score": 5,
-      "num_comments": 5,
-      "upvote_ratio": 1.0,
-      "text": "I’m the founder of AI Stupid Level, so disclosure upfront: this comes from a commercial platform we’ve been building around continuous LLM benchmarking and drift detection.\n\nOne of the problems that pushed us in this direction was surprisingly simple:\n\n**If your application depends on an external LLM API, how do you know the model you chose six weeks ago is still behaving the way it did when you evaluated it?**\n\nMost teams benchmark models when choosing one, maybe test again when a provider announces a new release, and then mostly monitor the application around it.\n\nBut the model itself is an external production dependency.\n\nThe public model identifier can remain the same while serving conditions, infrastructure, provider configuration, routing, or potentially the underlying implementation changes. At the same time, a few bad generations are obviously not enough to conclude that the model degraded.\n\nSo we started treating model evaluation more like observability.\n\nIn one historical analysis we looked at **31,352 repeated benchmark score observations across 49 models**.\n\nWe saw:\n\n* within-day standard deviation: **2.80 points**\n* between-day standard deviation of daily medians: **8.43 points**\n* descriptive ratio: about **3.01x**\n\nI want to be careful with the interpretation here. This does **not** prove that providers were modifying their models every day. There are multiple confounders: sampling variation, task composition, missing observations, provider-side effects, and the benchmark itself.\n\nWhat it did convince us of is that temporal variation is large enough that a model score shouldn’t necessarily be treated as a permanent property of a model.\n\nFrom an MLOps perspective, the harder engineering problem became attribution.\n\nIf a score suddenly drops, which of these happened?\n\n* the model actually changed\n* the benchmark changed\n* a specific task started failing\n* the provider had an availability/serving problem\n* the caller configuration was wrong\n* normal stochastic variation produced an unusual batch\n\nWe now keep those paths separate.\n\nFor example, benchmark configurations are versioned. If we change something capable of moving the score - task definitions, prompts, tests, request policy, scoring configuration - we don’t silently compare the new measurements against the previous baseline as though nothing changed.\n\nProvider failures are also separated from capability outcomes. A timeout or provider 5xx should not simply become “the model scored worse.”\n\nFor coding evaluations we prefer actual execution against test cases where possible instead of asking another LLM to judge whether the answer looks correct.\n\nWe also track repeated observations over time, look at model-level changes against the model’s own historical baseline, inspect task-level changes, and look for correlated movement across models from the same provider when trying to understand whether something broader happened.\n\nAnother issue we’ve run into is **benchmark contamination**.\n\nThere is a tension between making an evaluation reproducible and publishing every live task, prompt variation and hidden test. Once the complete active benchmark is public, it can eventually become something systems are optimized against rather than an unseen measurement workload.\n\nBecause of that, we’ve started separating:\n\n**Methodological transparency** \\- how measurements are collected, compared and interpreted should be inspectable.\n\n**Live evaluation secrecy** \\- some tasks and operational details may need to remain private or rotate.\n\nWe wrote up the methodology we’re currently using in a public technical reference:\n\n[**https://aistupidlevel.info/asl-public-benchmark-methodology-2026.pdf**](https://aistupidlevel.info/asl-public-benchmark-methodology-2026.pdf) \n\nThe public version deliberately explains the measurement framework and limitations without publishing the complete active task bank or all of the operational parameters.\n\nI’d be especially interested in how people here handle this in production:\n\n1. Are you continuously regression-testing the third-party LLMs your systems depend on, or only testing around announced model releases?\n2. What would you consider enough evidence to alert on “model degradation” rather than ordinary variance?\n3. Do you treat provider availability/reliability as part of model evaluation or as a completely separate SRE signal?\n4. How do you handle baseline resets when your own evaluation harness changes?\n5. Has anyone built something similar into their normal MLOps observability stack?\n\nNot trying to turn this into a product pitch. I’m more interested in whether **continuous external-model evaluation should become a normal MLOps primitive**, in the same way we already monitor databases, APIs, latency, errors and infrastructure.",
-      "is_original_content": false,
-      "link_flair_text": "Discussion :snoo_dealwithit:",
-      "permalink": "https://reddit.com/r/mlops/comments/1w9lscg/we_started_treating_llm_benchmarks_like/",
-      "domain": "self.mlops",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "p8bapex",
-          "author": "AutoModerator",
-          "text": "**AI usage disclosure**\n\nHi u/ionutvi — thanks for posting to r/mlops!\n\nBecause this community discusses and builds AI/ML systems, using AI tools is not inherently a problem. We do, however, ask for transparency about how submissions are created.\n\n**Please reply to this comment with a brief AI / automation disclosure, particularly if this post was created or submitted in whole or in part by an autonomous agent, bot, workflow, or other automated system.**\n\nIf AI or automation was involved, please briefly describe what it did and what human review was performed before posting.\n\nThis disclosure helps the r/mlops community distinguish human discussion, AI-assisted work, and automated/agent traffic while keeping the focus on useful technical conversation.\n\nThanks for helping keep the signal high.\n\n\n*I am a bot, and this action was performed automatically. Please [contact the moderators of this subreddit](/message/compose/?to=/r/mlops) if you have any questions or concerns.*",
-          "score": 1,
-          "created_utc": "2026-09-07 07:55:22",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "p8bb6e3",
-          "author": "obliviousranger_84",
-          "text": "This might be the most MLOps thing I've ever read, treating a third-party API like a flaky microservice and actually instrumenting it properly. Most places I've seen just set a threshold at eval time and pray the model doesn't drift into nonsense six weeks later. The within-day vs between-day variance numbers are way higher than I would've guessed.",
-          "score": 2,
-          "created_utc": "2026-09-07 07:59:23",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "p8jjl4t",
-          "author": "Future_AGI",
-          "text": "Version eval harness configs. Separate provider failures from capability drops. Track model-level drift against its own baseline. Alert on slice regression >2σ, not global score. That's our agent-opt + eval loop design. Check out the repo: [https://github.com/future-agi/future-agi](https://github.com/future-agi/future-agi)",
-          "score": 1,
-          "created_utc": "2026-09-08 13:25:52",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "p8jwp0e",
-              "author": "ionutvi",
-              "text": "Thanks, i actually went through the repo rather than the README, so a few specifics.\n\nOn versioning eval configs, we do this, but you do one part better. `EvalTemplateVersion` stores a full `config_snapshot` per version. We stamp every score with a content hash over everything capable of moving it, which has the advantage that it can't be forgotten, you can't edit a prompt and neglect to bump it, but a hash is one way. When a baseline resets i know the instrument changed and can't show what changed. Keeping the snapshot alongside the hash is a clear improvement and i'm taking it :)\n\nThe slice regression point is the one i found most useful, and i think your implementation is lighter than the claim. As far as i can tell it's a convention rather than a feature, `UserAlertMonitor`has a `filters` JSONField, so a slice monitor is one monitor per slice, and the threshold path is `_check_percentage_change_threshold` mean ± stddev×(1+pct/100) over a trailing window, so \"2σ\" is pct=100. That's an independent one-sided z-test per slice per window with no multiple-comparison handling. At 20 slices that's about a 37% chance of at least one false alert per cycle; at 50 it's 68%. How do you handle that in practice FDR, requiring persistence across cycles, or just keeping the monitor count low?\n\nAsking because the underlying idea is right and it would have caught a real thing for us. Our worst apparent degradation was one task going from 5/5 to 1/5 for about 16 hours while every other task stayed at 1.0. The global score dropped and it looked like a serving change until we split it by task, which we did by hand. For us the natural slice is the task, not a user-facing dimension, and the per-task data is also the part of our store that never contains modelled fallback rows, so it's a cleaner substrate than the aggregate score.\n\nOne genuine question. All 64 of your shipped system evals are `eval_type: agent`, so LLM-as-judge. We went the other way for coding and execute against test cases, mainly because a judge model is itself an external dependency that can drift, which adds a confounder to the exact attribution problem this thread is about. For what you're measuring (tone, hallucination, escalation handling) i don't think there's an executable alternative, so how do you baseline the judge? Pinned version, periodic re-scoring of a golden set, something else? That seems like the harder version of the problem, thanks a bunch!",
-              "score": 1,
-              "created_utc": "2026-09-08 14:29:04",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        }
-      ]
-    },
-    {
-      "id": "1waeoon",
-      "title": "what’s a failure that looked like a model problem but actually wasn’t?",
-      "subreddit": "mlops",
-      "url": "https://www.reddit.com/r/mlops/comments/1waeoon/whats_a_failure_that_looked_like_a_model_problem/",
-      "author": "Sensitive-Parsnip-12",
-      "created_utc": "2026-09-08 04:49:45",
-      "score": 5,
-      "num_comments": 7,
-      "upvote_ratio": 1.0,
-      "text": "sometimes the output is wrong and the first instinct is “the model messed up” but the real issue ends up being somewhere else entirel.\n\ncould be:\n\n* stale state\n* bad retrieval\n* wrong tool result\n* prompt assembly\n* schema conversion\n* retry behavior\n* a handoff dropping context\n* external state changing underneath the run\n\ncurious about cases where the model got blamed first but the actual failure was somewhere around it.\n\nwhat did the trace make it look like at first, and what ended up being the real issue?",
-      "is_original_content": false,
-      "link_flair_text": "Discussion :snoo_dealwithit:",
-      "permalink": "https://reddit.com/r/mlops/comments/1waeoon/whats_a_failure_that_looked_like_a_model_problem/",
-      "domain": "self.mlops",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "p8hl3pk",
-          "author": "AutoModerator",
-          "text": "**AI usage disclosure**\n\nHi u/Sensitive-Parsnip-12 — thanks for posting to r/mlops!\n\nBecause this community discusses and builds AI/ML systems, using AI tools is not inherently a problem. We do, however, ask for transparency about how submissions are created.\n\n**Please reply to this comment with a brief AI / automation disclosure, particularly if this post was created or submitted in whole or in part by an autonomous agent, bot, workflow, or other automated system.**\n\nIf AI or automation was involved, please briefly describe what it did and what human review was performed before posting.\n\nThis disclosure helps the r/mlops community distinguish human discussion, AI-assisted work, and automated/agent traffic while keeping the focus on useful technical conversation.\n\nThanks for helping keep the signal high.\n\n\n*I am a bot, and this action was performed automatically. Please [contact the moderators of this subreddit](/message/compose/?to=/r/mlops) if you have any questions or concerns.*",
-          "score": 1,
-          "created_utc": "2026-09-08 04:49:46",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "p8hmxk5",
-          "author": "Ancient_Zombie6375",
-          "text": "Model was returning garbled Spanish and everyone assumed it was a prompt thing, turns out the retry logic was swapping in a backup config that pointed at a completley different endpoint mid-run.",
-          "score": 2,
-          "created_utc": "2026-09-08 05:03:09",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "p8hrsfd",
-              "author": "Ali-WAIL",
-              "text": "This is a great example of why I think the requested execution and the execution that actually happened need to be treated separately. From the output alone that looks like a model/prompt problem, while the interesting evidence is really in the retry path and target change.",
-              "score": 1,
-              "created_utc": "2026-09-08 05:40:46",
-              "is_submitter": false,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "p8hrisb",
-          "author": "Ali-WAIL",
-          "text": "One case I’ve been looking at is amplification rather than the model itself being the failure.\n\nA tool/dependency can be only mildly degraded in isolation, but the execution path keeps revisiting it. At the run level it then looks like the whole system — or even the model — has degraded badly, while most of the impact comes from repetition amplifying a smaller downstream problem.\n\nThat’s made me increasingly cautious about attributing a bad run from any single trace signal.",
-          "score": 1,
-          "created_utc": "2026-09-08 05:38:38",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "p8qhg84",
-          "author": "Immediate_Debate_991",
-          "text": "Tool calls are a sneaky one. We had a bad answer that looked like reasoning had gone sideways, then following the run in Braintrust showed the tool response itself was stale. Since then I try to trace the first point where the run becomes wrong instead of starting from the final output.",
-          "score": 1,
-          "created_utc": "2026-09-09 12:37:34",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
       "id": "1wc2cnr",
       "title": "Any decent LiteLLM alternatives for per team limits and concurrency?",
       "subreddit": "mlops",
@@ -1112,8 +1055,8 @@
       "author": "Ok_Bar_8613",
       "created_utc": "2026-09-09 23:42:16",
       "score": 5,
-      "num_comments": 7,
-      "upvote_ratio": 0.86,
+      "num_comments": 8,
+      "upvote_ratio": 1.0,
       "text": "How are people handling per team limits with LiteLLM alternatives? The budget controls per key make sense, but concurrency feels like a separate problem when one team suddenly opens a ton of streams at once. Looking at NeuralTrust TrustGate, Portkey and Kong AI Gateway right now. Mainly trying to understand how each handles concurrency, budgets and per key limits without turning the gateway into another headache. Curious what people here would pick.",
       "is_original_content": false,
       "link_flair_text": "MLOps Questions :snoo_hearteyes:",
@@ -1185,106 +1128,78 @@
           "created_utc": "2026-09-10 15:02:39",
           "is_submitter": false,
           "replies": []
-        }
-      ]
-    },
-    {
-      "id": "1wchf60",
-      "title": "Everyone's consolidating their embedding, reranking and extraction onto one server, but I think that's overkill until you're running several",
-      "subreddit": "mlops",
-      "url": "https://www.reddit.com/r/mlops/comments/1wchf60/everyones_consolidating_their_embedding_reranking/",
-      "author": "WallabyIcy8537",
-      "created_utc": "2026-09-10 12:11:36",
-      "score": 5,
-      "num_comments": 3,
-      "upvote_ratio": 0.86,
-      "text": "There's a wave of inference servers pitching \"one API for embeddings, reranking, extraction and small-model generation,\" and I think people reach for it before they need it. Here's where I think the line is.  \n  \nIf you run one model, you don't need any of this. Single chat model, use vLLM. Single embedding model, TEI is leaner. Putting a multi-model server on top of a one-model workload just adds a layer that can break for no benefit.  \n  \nIt flips when one feature needs several model types per request. Competitive retrieval in 2026 isn't just dense embeddings, it's dense for meaning, sparse for exact keyword and product-name matches, sometimes ColBERT for token-level precision, and a cross-encoder reranker to fix the final order, and increasingly a small local LLM handling the routine generation so you're not paying a frontier API for a one-line summary. That's four or five model types behind one feature, and running each as its own container means four or five deploys to monitor. That's when it stopped being worth it for us.  \n  \nI ended up on the Superlinked Inference Engine (SIE) for this. What sold me wasn't \"one API,\" it was that several modes collapse into one call, bge-m3 emits dense and sparse together, reranking is a score call, and small-model generation runs through a generate call on the same server. It's OpenAI-compatible on embeddings and chat so the client mostly repoints. The honest framing, from their docs, is it doesn't replace your frontier LLM, it takes the routine generation and everything around it. So if your \"sprawl\" is one embedder and a chat model, this isn't for you.  \n  \nThe reason I'd still think twice is contention. Their docs are upfront that under heavy concurrent load, models on one GPU fight for memory, and a latency-critical model at steady QPS is better in its own pool. So this is a mixed-and-bursty answer, not a put-everything-on-one-box answer.",
-      "is_original_content": false,
-      "link_flair_text": "Tales From the Trenches :snoo_shrug:",
-      "permalink": "https://reddit.com/r/mlops/comments/1wchf60/everyones_consolidating_their_embedding_reranking/",
-      "domain": "self.mlops",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "p8xqjf2",
-          "author": "AutoModerator",
-          "text": "**AI usage disclosure**\n\nHi u/WallabyIcy8537 — thanks for posting to r/mlops!\n\nBecause this community discusses and builds AI/ML systems, using AI tools is not inherently a problem. We do, however, ask for transparency about how submissions are created.\n\n**Please reply to this comment with a brief AI / automation disclosure, particularly if this post was created or submitted in whole or in part by an autonomous agent, bot, workflow, or other automated system.**\n\nIf AI or automation was involved, please briefly describe what it did and what human review was performed before posting.\n\nThis disclosure helps the r/mlops community distinguish human discussion, AI-assisted work, and automated/agent traffic while keeping the focus on useful technical conversation.\n\nThanks for helping keep the signal high.\n\n\n*I am a bot, and this action was performed automatically. Please [contact the moderators of this subreddit](/message/compose/?to=/r/mlops) if you have any questions or concerns.*",
-          "score": 1,
-          "created_utc": "2026-09-10 12:11:36",
-          "is_submitter": false,
-          "replies": []
         },
         {
-          "id": "p8xzcju",
-          "author": "Ok_Salamander6093",
-          "text": "Makes sense, the monitoring overhead alone gets crazy when you have four separate containers just for retrieval stuff.",
+          "id": "p95yvc7",
+          "author": "Maleficent_Pair4920",
+          "text": "[requesty.ai](http://requesty.ai) if you don't want to self-host",
           "score": 1,
-          "created_utc": "2026-09-10 12:58:07",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "p8yifao",
-          "author": "Worldly_North_7213",
-          "text": "The contention caveat at the end is the right worry, but in our measurements the more common failure was the opposite of contention: the card sitting idle because something upstream fed it too slowly. Across 15 batch jobs we logged GPU utilisation next to cost and it ranged from 37 to 99 percent on jobs that all looked healthy from the outside. The low ones were host-CPU bound rather than model bound, and none of them errored or warned.\n\n  \nThat cuts both ways for the consolidation question. If five retrieval models each hold their own container on their own slice of a card, a lot of what you are paying for is idle, and packing them behind one server is a real saving rather than an aesthetic preference. But if the single model you already run sits at 40 percent, consolidating will not recover that, because the bottleneck is upstream of the serving layer entirely. Our worst case was exactly that: same job, same card, a host with 5 vCPUs versus one with 24, 1.85x difference in wall clock, 40 versus 75 percent utilisation.\n\n  \nSo the cheap thing to do before committing to either architecture is log utilisation per container for a day alongside QPS. A packing problem and a feeding problem look identical on a cost dashboard and have completely different fixes, and only one of them is solved by the decision you are making.",
-          "score": 1,
-          "created_utc": "2026-09-10 14:27:46",
+          "created_utc": "2026-09-11 14:43:23",
           "is_submitter": false,
           "replies": []
         }
       ]
     },
     {
-      "id": "1w7xx01",
-      "title": "Kasetto - declarative AI agent environment manager, written in Rust",
+      "id": "1waeoon",
+      "title": "what’s a failure that looked like a model problem but actually wasn’t?",
       "subreddit": "mlops",
-      "url": "https://www.reddit.com/r/mlops/comments/1w7xx01/kasetto_declarative_ai_agent_environment_manager/",
-      "author": "pivoshenko",
-      "created_utc": "2026-09-05 11:13:21",
-      "score": 5,
-      "num_comments": 5,
-      "upvote_ratio": 1.0,
-      "text": "Hey everyone!\n\nI want to share an open-source tool I built for myself that I hope will be useful to other developers working with AI agents - Kasetto.\n\n- GitHub: https://github.com/pivoshenko/kasetto\n- Docs: https://kasetto.dev\n- My personal setup: https://github.com/pivoshenko/pivoshenko.ai\n\n**Why \"kasetto\"?**\n\nThe name comes from the Japanese カセット (kasetto) - cassette. Remember car cassettes? pop a tape in and one thing plays; eject it, slide in another, and the music changes. No configuration, no installs. Just hot-swap.\n\nAI assets (skills, MCPs, instructions) work the same way in Kasetto. Each asset is a cassette you can insert, swap out, or share with a friend. One YAML config is your tape collection.\n\n**Problem**\n\nProbably familiar to many of you: the more AI tools you work with (Claude Code, Cursor, Codex, Copilot, Gemini CLI...), the messier the setup gets. Skills get installed by hand via npx skills, MCPs get copy-pasted from docs into every config file separately, CLAUDE.md and .cursor/rules live lives of their own. Handing all of this to a teammate or bringing it up on a new machine is a quest in itself.\n\nKasetto does for this what uv and Cargo did for dependencies: one declarative YAML describes the whole environment, a lock file pins the exact state, and kst sync brings the machine to it. Commit the config to the repo and the whole team gets an identical environment - no manual edits and no drift between machines or from your own setup.\n\n**Features**\n\n- Four asset kinds - skills, MCPs, commands, and instructions (CLAUDE.md, AGENTS.md, .cursor/rules, and so on). Everything is pulled from git repos or local directories\n- 23 agents - Pi, Claude Code, Cursor, Codex, Windsurf, Copilot, Gemini CLI and more. Kasetto transforms each asset into the native format of each agent on its own\n- Project or global scope - sync per repository, with the lock committed next to your code, or machine-wide for your personal setup; you can mix both\n- Lockfile - kasetto.lock pins hashes and revisions. A plain sync installs exactly what the lock says (and needs no network at all if everything is in place); updates happen only via --update. Full reproducibility on any machine\n- Secrets for MCPs - ${kst:...} inject tokens from env vars, 1Password, Vault, KeePassXC, AWS/GCP/Azure, pass, or macOS Keychain right at sync time. Values never land in the config or the lock\n- Any git host - GitHub, GitLab, Bitbucket, Codeberg, including self-hosted and enterprise\n- Fast - Rust, a single binary with no dependencies. Parallel downloads, a cache of extracted sources, sparse extraction for monorepos\n- CI-friendly - --dry-run, --locked, --json, and a non-zero exit code on failures. kst doctor shows drift from the lock state and files nothing tracks\n\n**Example Config**\n\nOne YAML config describes all your assets - where to get them, which agent to install them for, and where to put them. No manual copying. Create kasetto.yaml in the project root or anywhere else:\n\n```yaml\n# Option A: preset destination by agent (see README for supported agent values)\nagent:\n  - codex\n  - claude-code\n\n# Option B: manual destination (takes precedence if both are set)\n# destination: ./.agents/skills\n\nskills:\n  # \"*\" syncs every skill in the source — each is a directory with a SKILL.md,\n  # discovered in the source root or its skills/ subdirectory\n  - source: https://github.com/vercel-labs/next-skills\n    # ref: v1.0.0   # pin to a tag or commit; omit to track the default branch\n    skills: \"*\"\n\n  # or list skills by name\n  - source: https://github.com/anthropics/skills\n    skills:\n      - doc-coauthoring\n      - pptx\n\n  # sub-dir: resolve the named skills under this path, e.g. skills/productivity/grill-me/\n  - source: https://github.com/mattpocock/skills\n    sub-dir: skills/productivity\n    skills:\n      - grill-me\n      - caveman\n\n  # path: a skill in a non-standard location → <path>/<name>/, here skills/engineering/improve-codebase-architecture/\n  - source: https://github.com/mattpocock/skills\n    skills:\n      - name: improve-codebase-architecture\n        path: skills/engineering\n\ncommands:\n  # names resolve to commands/<name>.md in the source (nested dirs namespace, e.g. git:commit)\n  - source: https://github.com/gsd-build/get-shit-done\n    commands:\n      - gsd:explore\n      - gsd:fast\n\ninstructions:\n  # instructions wire CLAUDE.md / .cursor/rules / AGENTS.md etc. from instructions/<name>.{md,mdc}\n  # \"*\" syncs every instruction; aggregate files (CLAUDE.md, AGENTS.md) get managed blocks\n  - source: https://github.com/pivoshenko/pivoshenko.ai\n    instructions:\n      - docs-autoupdate\n      - multi-agent-dispatch\n\nmcps:\n  # names resolve to mcps/<name>.json in the source\n  - source: https://github.com/pivoshenko/pivoshenko.ai\n    branch: main   # track a specific branch (use ref: to pin a tag or commit)\n    mcps:\n      - github\n      - vercel\n      - kaggle\n```\n\n**Install**\n\n```sh\n# macOS / Linux\ncurl -fsSL kasetto.dev/install | sh\n\n# Homebrew\nbrew install pivoshenko/tap/kasetto\n\n# Windows\npowershell -ExecutionPolicy Bypass -c \"irm https://raw.githubusercontent.com/pivoshenko/kasetto/main/scripts/install.ps1 | iex\"\n\n# Cargo\ncargo install kasetto\n```\n\nHappy to hear feedback, questions, and criticism. And if the tool looks useful, a star on GitHub helps the project a lot. ❤️\n",
+      "url": "https://www.reddit.com/r/mlops/comments/1waeoon/whats_a_failure_that_looked_like_a_model_problem/",
+      "author": "Sensitive-Parsnip-12",
+      "created_utc": "2026-09-08 04:49:45",
+      "score": 4,
+      "num_comments": 7,
+      "upvote_ratio": 0.84,
+      "text": "sometimes the output is wrong and the first instinct is “the model messed up” but the real issue ends up being somewhere else entirel.\n\ncould be:\n\n* stale state\n* bad retrieval\n* wrong tool result\n* prompt assembly\n* schema conversion\n* retry behavior\n* a handoff dropping context\n* external state changing underneath the run\n\ncurious about cases where the model got blamed first but the actual failure was somewhere around it.\n\nwhat did the trace make it look like at first, and what ended up being the real issue?",
       "is_original_content": false,
-      "link_flair_text": "(Gen)AI / Agents / LLMOps :illuminati:",
-      "permalink": "https://reddit.com/r/mlops/comments/1w7xx01/kasetto_declarative_ai_agent_environment_manager/",
+      "link_flair_text": "Discussion :snoo_dealwithit:",
+      "permalink": "https://reddit.com/r/mlops/comments/1waeoon/whats_a_failure_that_looked_like_a_model_problem/",
       "domain": "self.mlops",
       "is_self": true,
       "comments": [
         {
-          "id": "p7ybakm",
+          "id": "p8hl3pk",
           "author": "AutoModerator",
-          "text": "**AI usage disclosure**\n\nHi u/pivoshenko — thanks for posting to r/mlops!\n\nBecause this community discusses and builds AI/ML systems, using AI tools is not inherently a problem. We do, however, ask for transparency about how submissions are created.\n\n**Please reply to this comment with a brief AI / automation disclosure, particularly if this post was created or submitted in whole or in part by an autonomous agent, bot, workflow, or other automated system.**\n\nIf AI or automation was involved, please briefly describe what it did and what human review was performed before posting.\n\nThis disclosure helps the r/mlops community distinguish human discussion, AI-assisted work, and automated/agent traffic while keeping the focus on useful technical conversation.\n\nThanks for helping keep the signal high.\n\n\n*I am a bot, and this action was performed automatically. Please [contact the moderators of this subreddit](/message/compose/?to=/r/mlops) if you have any questions or concerns.*",
+          "text": "**AI usage disclosure**\n\nHi u/Sensitive-Parsnip-12 — thanks for posting to r/mlops!\n\nBecause this community discusses and builds AI/ML systems, using AI tools is not inherently a problem. We do, however, ask for transparency about how submissions are created.\n\n**Please reply to this comment with a brief AI / automation disclosure, particularly if this post was created or submitted in whole or in part by an autonomous agent, bot, workflow, or other automated system.**\n\nIf AI or automation was involved, please briefly describe what it did and what human review was performed before posting.\n\nThis disclosure helps the r/mlops community distinguish human discussion, AI-assisted work, and automated/agent traffic while keeping the focus on useful technical conversation.\n\nThanks for helping keep the signal high.\n\n\n*I am a bot, and this action was performed automatically. Please [contact the moderators of this subreddit](/message/compose/?to=/r/mlops) if you have any questions or concerns.*",
           "score": 1,
-          "created_utc": "2026-09-05 11:13:22",
+          "created_utc": "2026-09-08 04:49:46",
           "is_submitter": false,
           "replies": []
         },
         {
-          "id": "p853xqs",
-          "author": "Candid-Raspberry3185",
-          "text": "This is actually pretty clever, the cassette metaphor works really well for how AI tool configs get passed around. Been juggling Claude Code and Cursor configs across a few machines and it's such a pain keeping them in sync\n\n  \nthe lockfile approach is smart, feels like the missing piece for team setups where everyone's running slightly different agent configs and nobody knows why things break",
+          "id": "p8hmxk5",
+          "author": "Ancient_Zombie6375",
+          "text": "Model was returning garbled Spanish and everyone assumed it was a prompt thing, turns out the retry logic was swapping in a backup config that pointed at a completley different endpoint mid-run.",
           "score": 2,
-          "created_utc": "2026-09-06 11:17:38",
+          "created_utc": "2026-09-08 05:03:09",
           "is_submitter": false,
           "replies": [
             {
-              "id": "p8p13lw",
-              "author": "pivoshenko",
-              "text": "Thanks!",
+              "id": "p8hrsfd",
+              "author": "Ali-WAIL",
+              "text": "This is a great example of why I think the requested execution and the execution that actually happened need to be treated separately. From the output alone that looks like a model/prompt problem, while the interesting evidence is really in the retry path and target change.",
               "score": 1,
-              "created_utc": "2026-09-09 06:05:47",
-              "is_submitter": true,
+              "created_utc": "2026-09-08 05:40:46",
+              "is_submitter": false,
               "replies": []
             }
           ]
         },
         {
-          "id": "p80vv2d",
-          "author": "Deep_Ad1959",
-          "text": "the thing i'd stress test is the lock file when the host CLI moves under it. skills and MCPs pinned exactly, claude code updates itself, and \"identical environment\" is quietly false again with nothing in the diff to show it.",
+          "id": "p8hrisb",
+          "author": "Ali-WAIL",
+          "text": "One case I’ve been looking at is amplification rather than the model itself being the failure.\n\nA tool/dependency can be only mildly degraded in isolation, but the execution path keeps revisiting it. At the run level it then looks like the whole system — or even the model — has degraded badly, while most of the impact comes from repetition amplifying a smaller downstream problem.\n\nThat’s made me increasingly cautious about attributing a bad run from any single trace signal.",
           "score": 1,
-          "created_utc": "2026-09-05 19:00:35",
+          "created_utc": "2026-09-08 05:38:38",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "p8qhg84",
+          "author": "Immediate_Debate_991",
+          "text": "Tool calls are a sneaky one. We had a bad answer that looked like reasoning had gone sideways, then following the run in Braintrust showed the tool response itself was stale. Since then I try to trace the first point where the run becomes wrong instead of starting from the final output.",
+          "score": 1,
+          "created_utc": "2026-09-09 12:37:34",
           "is_submitter": false,
           "replies": []
         }
@@ -1299,7 +1214,7 @@
       "created_utc": "2026-09-08 05:42:01",
       "score": 4,
       "num_comments": 13,
-      "upvote_ratio": 0.84,
+      "upvote_ratio": 1.0,
       "text": "Not the final error, timeout, or bad output — I mean something earlier in the execution that, in hindsight, was the first sign the run was already going wrong.\n\nFor example: a tool starting to repeat, latency gradually drifting, retries accumulating, an unusual execution path, a dependency getting slower, context growing unexpectedly, or an agent revisiting the same state.\n\nI’m especially interested in cases where the run still looked technically healthy at that point — no hard error yet — but later failed or required intervention.\n\nTwo things I’m curious about:\n\n**How early could you realistically have known?**\n\nAnd if you had known at that point, **what would you actually have changed — retry, reroute, stop, or just let it continue?**\n\nReal production examples would be especially interesting.",
       "is_original_content": false,
       "link_flair_text": "MLOps Questions :snoo_hearteyes:",
@@ -1413,7 +1328,7 @@
       "created_utc": "2026-09-07 18:03:08",
       "score": 4,
       "num_comments": 3,
-      "upvote_ratio": 0.84,
+      "upvote_ratio": 1.0,
       "text": "Disclosure: I work at Schema Labs, we build a model that reads tables. Free tier, paid above it.\n\nIf your pipeline asks a model what a table contains, you get an answer whether or not there's anything in it. Meaningless table and meaningful table come back in the same format with the same tone. No error path. That's calibration, not accuracy, and it doesn't show up in any accuracy metric.\n\n**Method.** 5000 rows of `np.random.rand()`, columns c1 through c20, no structure, no target. Asked for domain identification and per-column meaning with confidence.\n\nGeneral-purpose LLMs described it every time. One returned manufacturing sensor readings with suggested correlations. Asking for a confidence number alongside just gets you an invented confidence number. A second model as a check doesn't help, they agree with each other.\n\nOurs returns no domain identified, below threshold. Which is what we wanted, but:\n\n**Limitations.** Only catches total noise — a real table where I've mislabelled the domain passes everything. `rand()` is unrealistically structureless, real garbage has a distribution, a repeated default, a truncation artifact, and I didn't test that. Refusal rate on noise says nothing about false refusals on valid data; we measured one and not the other, which is the convenient way round. And the threshold is a knob we set, so \"it refuses\" is partly a statement about where we put the knob.\n\nSo: does anyone test their data-understanding step for calibration rather than accuracy? Specifically how you build a realistic negative case instead of `rand()`, and whether you track false-refusal rate next to refusal rate, because I'm fairly sure we should be and aren't.\n\n[platform.schemalabs.ai](http://platform.schemalabs.ai) if you want to run it yourself, free tier covers it. I'd rather someone got it to hallucinate a domain than not.",
       "is_original_content": false,
       "link_flair_text": "Self-promotion :upvote:",
@@ -1446,6 +1361,155 @@
               "created_utc": "2026-09-07 18:37:57",
               "is_submitter": true,
               "replies": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "1wa3u1k",
+      "title": "how are you actually enforcing AI guardrails in production without breaking real workflows?",
+      "subreddit": "mlops",
+      "url": "https://www.reddit.com/r/mlops/comments/1wa3u1k/how_are_you_actually_enforcing_ai_guardrails_in/",
+      "author": "Puzleheadoed-Ice3232",
+      "created_utc": "2026-09-07 20:41:26",
+      "score": 4,
+      "num_comments": 5,
+      "upvote_ratio": 1.0,
+      "text": "we have genAI workflows in prod across engineering and sales, but guardrails are messy.\n\nwe’ve tried a few approaches. some catch obvious issues but don’t actually stop risky behavior in real time. others are too aggressive and end up blocking normal usage or adding noticeable latency.\n\nthe biggest problem is balancing control vs usability. once guardrails start interfering with everyday workflows, people work around them or disable them entirely.\n\nwe’ve also seen gaps with things like embedded models in tools or indirect usage paths that don’t go through a single control point.\n\nmanagement wants something that can prevent sensitive data from being exposed through prompts, without slowing everything down or breaking how teams use AI day to day.\n\nwhat’s actually working for you at scale? how are you enforcing guardrails in a way that holds up under real usage without disrupting workflows",
+      "is_original_content": false,
+      "link_flair_text": "(Gen)AI / Agents / LLMOps :illuminati:",
+      "permalink": "https://reddit.com/r/mlops/comments/1wa3u1k/how_are_you_actually_enforcing_ai_guardrails_in/",
+      "domain": "self.mlops",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "p8f8br1",
+          "author": "AutoModerator",
+          "text": "**AI usage disclosure**\n\nHi u/Puzleheadoed-Ice3232 — thanks for posting to r/mlops!\n\nBecause this community discusses and builds AI/ML systems, using AI tools is not inherently a problem. We do, however, ask for transparency about how submissions are created.\n\n**Please reply to this comment with a brief AI / automation disclosure, particularly if this post was created or submitted in whole or in part by an autonomous agent, bot, workflow, or other automated system.**\n\nIf AI or automation was involved, please briefly describe what it did and what human review was performed before posting.\n\nThis disclosure helps the r/mlops community distinguish human discussion, AI-assisted work, and automated/agent traffic while keeping the focus on useful technical conversation.\n\nThanks for helping keep the signal high.\n\n\n*I am a bot, and this action was performed automatically. Please [contact the moderators of this subreddit](/message/compose/?to=/r/mlops) if you have any questions or concerns.*",
+          "score": 1,
+          "created_utc": "2026-09-07 20:41:26",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "p8fcozb",
+          "author": "AccidentallyVenomous",
+          "text": "we ended up putting guardrails at the proxy level, catches everything even the sneaky embeddings that bypass the main api. latency sucks but you can shave it down with streaming checks, not perfect but way better than batch scanning every prompt",
+          "score": 1,
+          "created_utc": "2026-09-07 21:02:19",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "p8ge7db",
+          "author": "BuildingLayrin",
+          "text": "One approach is to protect the data before the model call instead of relying only on blocking at the proxy. Detect sensitive values locally, let the user review what was caught and add anything else they want protected, then replace those values with reversible tokens before the text goes to the AI.\n\nThat way the workflow still works without sending the real sensitive data out.\n\nI built Layrin around this approach if you want to see an example: [https://layrin.com](https://layrin.com). I see it more as another layer alongside proxy/DLP controls, not a replacement for them.",
+          "score": 1,
+          "created_utc": "2026-09-08 00:24:24",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "p8jbkn3",
+          "author": "ces_evolutionic211",
+          "text": "The control vs usability tradeoff is where this gets messy. I work with Evolution, so take that with context, but I’d look at coverage before tuning the guardrails themselves. If some tools or integrations can bypass the main control point, even a good policy layer is going to have blind spots. Are most of your model calls going through one gateway today, or are teams calling providers from different tools? Happy to compare approaches if useful.",
+          "score": 1,
+          "created_utc": "2026-09-08 12:44:07",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "p8ji804",
+          "author": "Future_AGI",
+          "text": "Run local scanners (<10ms) inline at the gateway, cloud scanners (PII, toxicity) async with fail-open + alert. Per-call allow/deny per MCP tool. We do 8 local + 6 cloud this way , check out the repo: [https://github.com/future-agi/future-agi](https://github.com/future-agi/future-agi)\n\n",
+          "score": 1,
+          "created_utc": "2026-09-08 13:18:59",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1wanfqq",
+      "title": "OpenTelemetry vs OpenLineage: two different ideas of what a default should do. What would you do?",
+      "subreddit": "mlops",
+      "url": "https://www.reddit.com/r/mlops/comments/1wanfqq/opentelemetry_vs_openlineage_two_different_ideas/",
+      "author": "coldoven",
+      "created_utc": "2026-09-08 12:46:03",
+      "score": 4,
+      "num_comments": 9,
+      "upvote_ratio": 0.83,
+      "text": "We ship two observability integrations for an open source data framework. One emits OpenTelemetry spans per pipeline step, one emits OpenLineage RunEvents. You add either with one line. Constructed with no arguments they do completely different things, and each is right by its own ecosystem.\n\n**OpenTelemetry: the app decides.** Ours asks for a tracer with `trace.get_tracer(name, tracer_provider=None)`. If the application has set up OpenTelemetry, spans go there. If not, nothing happens. The library never picks a destination itself, because the application already did.\n\n**OpenLineage: the environment decides.** Ours builds an `OpenLineageClient()`, which reads `OPENLINEAGE_URL`, `OPENLINEAGE_CONFIG`, `~/.openlineage/openlineage.yml` and `OPENLINEAGE__*`. If a URL is set, events go there, whoever set it. If nothing is set, every event prints to the console. Checked on openlineage-python 1.53.0:\n\n```\nOPENLINEAGE_URL=http://marquez.internal:5000 -> HttpTransport, url http://marquez.internal:5000\nunset                                        -> ConsoleTransport\n```\n\nBoth have a good reason behind them. The OTel rule keeps a library from choosing a backend behind the app's back. The OpenLineage rule is what makes zero-code instrumentation work: set one env var on the runner and everything running there produces lineage, no code change anywhere.\n\nPut them side by side in one framework and they collide. The same line in a user's pipeline means \"go where this app was set up to go\" for one integration and \"go where this machine says\" for the other. The case that made us look at it: a shared runner where `OPENLINEAGE_URL` is already set for another team's pipeline. Add the integration and job names, dataset names and column schemas start going to that endpoint, with no URL anywhere in the user's code. Metadata, not values, and nobody ran into it, we found it in review before the package was released.\n\nSo, if you were shipping both, what would you do?\n\n- keep each vendor's default, so people who know that ecosystem are never surprised\n- make both quiet until someone names a destination in code\n- make both read the environment, and document it loudly\n- something else\n\nWe went with the second, with an explicit `use_sdk_defaults=True` that hands resolution back to the vendor SDK when you want it. The OpenTelemetry half is the one I am least comfortable with, because there the setup was done by the application itself, usually the same person writing the pipeline. If that is the wrong trade, I would like to hear why.\n\nDisclosure: I maintain the framework, Apache-2.0, links in a comment.",
+      "is_original_content": false,
+      "link_flair_text": "MLOps Questions :snoo_hearteyes:",
+      "permalink": "https://reddit.com/r/mlops/comments/1wanfqq/opentelemetry_vs_openlineage_two_different_ideas/",
+      "domain": "self.mlops",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "p8jbxre",
+          "author": "AutoModerator",
+          "text": "**AI usage disclosure**\n\nHi u/coldoven — thanks for posting to r/mlops!\n\nBecause this community discusses and builds AI/ML systems, using AI tools is not inherently a problem. We do, however, ask for transparency about how submissions are created.\n\n**Please reply to this comment with a brief AI / automation disclosure, particularly if this post was created or submitted in whole or in part by an autonomous agent, bot, workflow, or other automated system.**\n\nIf AI or automation was involved, please briefly describe what it did and what human review was performed before posting.\n\nThis disclosure helps the r/mlops community distinguish human discussion, AI-assisted work, and automated/agent traffic while keeping the focus on useful technical conversation.\n\nThanks for helping keep the signal high.\n\n\n*I am a bot, and this action was performed automatically. Please [contact the moderators of this subreddit](/message/compose/?to=/r/mlops) if you have any questions or concerns.*",
+          "score": 1,
+          "created_utc": "2026-09-08 12:46:04",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "p8jefzc",
+          "author": "Anxious_Sprinkles492",
+          "text": "keep each vendor's default, the collision isn't the framework's problem to solve. if someone's running on a shared machine that has \\`OPENLINEAGE\\_URL\\` set, that machine is already opting everything into that lineage endpoint, they just didn't realize it. better to match ecosystem expectations and let teams sort out their infra boundaries.",
+          "score": 2,
+          "created_utc": "2026-09-08 12:59:22",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "p8lwsac",
+              "author": "coldoven",
+              "text": "Interesting, so you argue that the teams should know their tools?",
+              "score": 1,
+              "created_utc": "2026-09-08 19:42:32",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "p8jc1tt",
+          "author": "coldoven",
+          "text": "The issue with the two options as they were written: [https://github.com/mloda-ai/mloda-registry/issues/551](https://github.com/mloda-ai/mloda-registry/issues/551)\n\nThe PR that changed it: [https://github.com/mloda-ai/mloda-registry/pull/573](https://github.com/mloda-ai/mloda-registry/pull/573)\n\nThe extender guide, \"Sink Resolution\": [https://github.com/mloda-ai/mloda-registry/blob/main/docs/guides/11-create-extender.md](https://github.com/mloda-ai/mloda-registry/blob/main/docs/guides/11-create-extender.md)\n\nRepo, Apache-2.0: [https://github.com/mloda-ai/mloda-registry](https://github.com/mloda-ai/mloda-registry)",
+          "score": 1,
+          "created_utc": "2026-09-08 12:46:40",
+          "is_submitter": true,
+          "replies": []
+        },
+        {
+          "id": "p8k391j",
+          "author": "jonah_omninode",
+          "text": "On a shared runner, an inherited environment variable should not count as permission to send metadata somewhere. I think your quiet default plus \\`use\\_sdk\\_defaults=True\\` is the safer contract.\n\n\n\nI wouldn't force both adapters to resolve configuration the same way internally. I would make them expose the same result: the destination, where that choice came from, and whether it was selected explicitly or inherited. Print that at startup and refuse ambiguous precedence. Then OTel can honor an application-owned provider, while OpenLineage can honor an environment-owned sink only when the caller opts into the SDK behavior.\n\n\n\nAre you exposing the resolved sink in runtime metadata, or only in logs?",
+          "score": 1,
+          "created_utc": "2026-09-08 14:58:47",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "p8lwn8z",
+              "author": "coldoven",
+              "text": "It can be exposed in runtime, logs or whatever form is needed.",
+              "score": 2,
+              "created_utc": "2026-09-08 19:41:56",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "p8seted",
+                  "author": "jonah_omninode",
+                  "text": "I would make it structured startup state, not just a log line. Record the adapter, resolved destination, where the configuration came from, whether it was explicit or inherited, and whether emission is enabled. Then a platform policy can reject an inherited sink on a shared runner before the first event leaves. Logs help explain a bad route afterward. Structured runtime state gives the admission step something it can act on. Do both integrations already have a common startup hook where they could emit the same record?",
+                  "score": 1,
+                  "created_utc": "2026-09-09 17:49:14",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
             }
           ]
         }
