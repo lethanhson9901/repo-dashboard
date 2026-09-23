@@ -1,10 +1,10 @@
 {
   "metadata": {
-    "last_updated": "2026-09-22 20:12:13",
+    "last_updated": "2026-09-23 13:51:44",
     "time_filter": "week",
     "subreddit": "huggingface",
-    "total_items": 15,
-    "total_comments": 30
+    "total_items": 18,
+    "total_comments": 37
   },
   "items": [
     {
@@ -14,9 +14,9 @@
       "url": "https://www.reddit.com/r/huggingface/comments/1wis9t4/qwopus3827bflash_from_qwen38_hybrid_architecture/",
       "author": "Timely-Discount1586",
       "created_utc": "2026-09-17 12:12:21",
-      "score": 85,
+      "score": 97,
       "num_comments": 15,
-      "upvote_ratio": 0.91,
+      "upvote_ratio": 0.92,
       "text": "**Qwopus3.8-27B-Flash** is an experimental post-trained model built on top of **Qwen3.8-27B**, with a focus on inference efficiency, reasoning efficiency, MTP utilization, and real-world Agent workloads.\n\nHugging Face:\n\n[Qwopus3.8-27B-Flash-GGUF](https://huggingface.co/Jackrong/Qwopus3.8-27B-Flash-GGUF)\n\nThe goal of this project is not simply to push benchmark accuracy higher.\n\nInstead, it explores a different question:\n\n>**Can a reasoning model preserve most of its original capability while reducing unnecessary reasoning, improving MTP speculative decoding efficiency, and lowering the total compute required to complete real tasks?**\n\nBefore discussing the Flash variant, it is worth looking more closely at the architecture of Qwen3.8-27B itself.\n\n# Qwen3.8-27B Is No Longer a Traditional Full-Attention Transformer\n\nQwen3.8-27B is a dense model with roughly 27 billion parameters.\n\nIts main configuration includes:\n\n* 64 layers\n* Hidden size: 5120\n* FFN intermediate size: 17,408\n* Native context length: 262K\n* Vision-Language support\n* Thinking / reasoning support\n* Multi-Token Prediction (MTP)\n\nAt first glance, these specifications still resemble a conventional large Transformer.\n\nThe more interesting part is that its 64 layers are **not all standard self-attention layers**.\n\nThe architecture can be summarized as:\n\n`16 × [3 × (Gated DeltaNet → FFN) + 1 × (Gated Attention → FFN)]`\n\nIn other words, the model is composed of:\n\n**48 Gated DeltaNet layers**\n\nplus\n\n**16 Gated Attention layers**\n\nThis makes Qwen3.8-27B a clear example of a:\n\n**Hybrid Attention Architecture**\n\nrather than a conventional full-attention Transformer.\n\n# What Problem Does Gated DeltaNet Solve?\n\nStandard self-attention has an obvious advantage:\n\nthe model can directly access information from many different positions in the context.\n\nThis is extremely useful for tasks such as:\n\n* precise retrieval\n* code reference\n* long-context reasoning\n* exact copying\n* cross-document information lookup\n\nHowever, the cost becomes increasingly important as context length grows.\n\nIn workloads involving:\n\n* 100K+ context\n* repository-level coding\n* long Agent sessions\n* multi-step tool use\n* high-concurrency serving\n\nthe cost of attention and KV cache can become a major bottleneck.\n\nGated DeltaNet takes a different approach.\n\nInstead of requiring every layer to perform full token-to-token attention, it behaves more like a:\n\n**recurrent state update / linear-attention-style memory mechanism**\n\nThe model continuously updates an internal state that compresses and carries information from earlier tokens.\n\nA simple way to think about it is:\n\n>Instead of forcing every layer to repeatedly reread the full history, part of the model maintains a compressed internal representation of that history.\n\nThis design has potential advantages for both long-context processing and autoregressive decoding.\n\n# Why Keep Attention at All?\n\nIf DeltaNet is more efficient, an obvious question is:\n\n**Why not use DeltaNet for all 64 layers?**\n\nBecause efficiency is not the only requirement.\n\nSome tasks still benefit heavily from exact access to specific earlier tokens.\n\nExamples include:\n\n* locating a function definition\n* referring back to an exact variable\n* extracting a specific sentence from a long document\n* combining information from distant parts of the context\n* reproducing strict formatting\n\nStandard attention remains very effective for this type of precise retrieval.\n\nQwen3.8 therefore uses a hybrid pattern:\n\n`DeltaNet → DeltaNet → DeltaNet → Attention`\n\nrepeated throughout the model.\n\nConceptually, the architecture can be viewed as:\n\n**DeltaNet for efficient state maintenance**\n\ncombined with\n\n**Attention for periodic precise access to the full context**\n\nThis creates a balance between:\n\n**Efficiency**\n\nand\n\n**Precise Retrieval**\n\n# Only One Quarter of the Layers Use Full Attention\n\nQwen3.8-27B contains 64 layers in total.\n\nOnly:\n\n**16 of them are Gated Attention layers.**\n\nThe attention component uses:\n\n* 24 Query Heads\n* 4 KV Heads\n* Head Dimension: 256\n\nThis is an important architectural signal.\n\nIn large-scale inference, parameter count is not the only source of cost.\n\nAnother major bottleneck is:\n\n**KV Cache**\n\nespecially under:\n\n* long context\n* large batch sizes\n* high concurrency\n* long-running Agent sessions\n\nQwen3.8 reduces dependence on full attention not just at the layer level, but also through a relatively small number of KV heads.\n\nThe broader trend is therefore not simply:\n\n>“Support a longer context window.”\n\nIt is closer to:\n\n>**Redesign the model so that long-context inference and continuous generation become more computationally sustainable.**\n\n# 262K Context Is More Than Just a Larger Context Window\n\nQwen3.8-27B natively supports approximately:\n\n**262K tokens of context**\n\nBut long-context modeling is not simply a matter of increasing a configuration value.\n\nIf every layer still performs full attention, increasing the context length leads to:\n\n* larger KV cache\n* higher memory-bandwidth pressure\n* increased decode latency\n* lower serving concurrency\n\nThe hybrid architecture is closely related to Qwen3.8's long-context design.\n\nWith a large proportion of DeltaNet-style layers, the model does not require every layer to process the complete history with the same attention cost.\n\nSo rather than simply saying:\n\n>Qwen3.8 supports 262K context.\n\nA more interesting observation is:\n\n>**Qwen3.8 changes part of the underlying computation path in order to make long-context inference more practical.**\n\n# MTP Is Another Important Part of Qwen3.8\n\nAnother major feature of Qwen3.8 is native training for:\n\n**Multi-Token Prediction (MTP)**\n\nTraditional autoregressive decoding usually follows a pattern like:\n\n`Token 1 → Token 2 → Token 3 → Token 4`\n\nwith each decoding step primarily determining the next token.\n\nMTP instead attempts to predict multiple future tokens from the current state.\n\nA simplified process looks like:\n\n`Current State`\n\n↓\n\n`Predict Several Future Tokens`\n\n↓\n\n`Verify`\n\n↓\n\n`Accept Multiple Tokens`\n\nIf several draft tokens are accepted at once, the decoder can advance multiple positions in a single verification cycle.\n\nThis makes MTP naturally useful for:\n\n**speculative decoding**\n\n# MTP Support Alone Is Not Enough\n\nA model supporting MTP does not automatically mean that speculative decoding will provide strong acceleration.\n\nThe more important metric is:\n\n**Draft Acceptance Rate**\n\nSuppose the model predicts four future tokens.\n\nIf the result is:\n\n`token1 ✓`\n\n`token2 ✗`\n\nthen the remaining draft tokens may need to be discarded or recomputed.\n\nIn that case, the benefit from speculative decoding is limited.\n\nBut if the model frequently produces:\n\n`token1 ✓`\n\n`token2 ✓`\n\n`token3 ✓`\n\n`token4 ✓`\n\nthen a single verification step can advance several tokens.\n\nFor this reason, a more useful question than:\n\n>“Does the model support MTP?”\n\nis:\n\n>**How many MTP draft tokens are actually accepted during decoding?**\n\nThis became one of the key metrics evaluated in Qwopus3.8-27B-Flash.\n\n# From Qwen3.8 to Flash: Efficiency Beyond Architecture\n\nQwen3.8 already addresses part of the inference-efficiency problem at the architectural level.\n\nHowever, reasoning models introduce another form of inefficiency that architecture alone cannot solve:\n\n**the model may simply generate too many unnecessary tokens.**\n\nCommon examples include:\n\n* continuing to reason after the solution is already clear\n* repeatedly verifying the same conclusion\n* redundant replanning\n* unnecessary self-correction\n* reasoning loops\n* failing to terminate after the task is effectively complete\n\nThese behaviors cannot be fixed simply by making the Transformer backbone faster.\n\nEven if one model achieves higher raw tokens per second, it may still be slower in practice if it generates twice as many tokens.\n\nThe main goal of Qwopus3.8-27B-Flash is therefore:\n\n>**not only to make decoding faster, but also to reduce unnecessary computation during reasoning and Agent execution.**\n\nThe project focuses on three areas:\n\n**Reasoning Efficiency**\n\n**MTP Efficiency**\n\n**Agent Efficiency**\n\n# Post-Training Strategy: High-Quality SFT + GSPO\n\nThe post-training pipeline is intentionally straightforward.\n\nThe first stage uses high-quality supervised fine-tuning.\n\nThe initial candidate pool contained roughly:\n\n**1.5 million teacher-generated samples**\n\nThe samples were then filtered using multiple evaluator models based on:\n\n* difficulty\n* reasoning quality\n* correctness\n* consistency\n* training value\n\nOnly approximately:\n\n**the top 10% highest-quality samples**\n\nwere retained for the main SFT stage.\n\nThe training data covered:\n\n* reasoning\n* mathematics\n* coding\n* Agent trajectories\n* tool use\n\nThe second stage used:\n\n**NVIDIA NeMo-RL + GSPO**\n\nto further reinforce:\n\n* more effective reasoning trajectories\n* better task completion behavior\n* improved termination behavior\n* fewer reasoning loops\n* less redundant generation\n\nThe objective was not:\n\n**longer Chain-of-Thought**\n\nbut rather:\n\n>**using reasoning compute more effectively.**\n\n# Inference Efficiency Results\n\n# Decoder Throughput\n\nDecoder-only evaluation was performed on the Mathematics, Physics, and Chemistry subsets of MMLU-Pro.\n\nBoth models used:\n\n**Q5\\_K\\_M + MTP**\n\nThe weighted results were:\n\n**Qwen3.8-27B: 8.284 tok/s**\n\n**Qwopus3.8-27B-Flash: 9.347 tok/s**\n\nOverall improvement:\n\n**+12.8%**\n\nBy subject:\n\n* Mathematics: approximately +11.5%\n* Physics: approximately +15.9%\n* Chemistry: approximately +11.4%\n\nAll three domains showed double-digit improvements in decoder throughput.\n\n# MTP Acceptance\n\nThe larger difference appeared in MTP acceptance.\n\nWeighted across Mathematics, Physics, and Chemistry:\n\n**Qwen3.8-27B: 66.1%**\n\n**Qwopus3.8-27B-Flash: 80.7%**\n\nImprovement:\n\n**+14.6 percentage points**\n\nBy subject:\n\n* Mathematics: 81.1%\n* Physics: 79.2%\n* Chemistry: 81.7%\n\nFor speculative decoding, this metric is particularly important.\n\nA higher acceptance rate means that:\n\n**more draft tokens can be accepted during each verification cycle.**\n\nIt therefore reflects not only raw decoding speed, but also how efficiently speculative decoding is being utilized.\n\n# The Reasoning-Length Distribution Also Changed\n\nAnother interesting difference appears in the distribution of generated output.\n\nAcross Mathematics, Physics, and Chemistry:\n\nQwen3.8 Base produced:\n\n**8,824,213 raw-output characters**\n\nQwopus3.8-27B-Flash produced:\n\n**7,949,546 characters**\n\nThis corresponds to an overall reduction of approximately:\n\n**9.9%**\n\nHowever, this was not simply caused by making every answer shorter.\n\nIn fact:\n\n**median reasoning length increased across all three subjects.**\n\nAt the same time:\n\n**P95 extreme-length outputs decreased significantly.**\n\nDepending on the subject, P95 reasoning length decreased by roughly:\n\n**13%–40%**\n\nThis suggests a more interesting behavioral change.\n\nNormal tasks still receive substantial reasoning, while extreme runaway-reasoning cases become less common.\n\nIn other words, the objective is not:\n\n**Shorter Reasoning**\n\nbut rather:\n\n**Less Wasteful Reasoning**\n\n# Accuracy–Efficiency Trade-off\n\nThe efficiency improvement is not free.\n\nOn approximately 2,500 mixed MMLU-Pro questions:\n\n**Qwen3.8-27B: 92.73%**\n\n**Qwopus3.8-27B-Flash: 91.28%**\n\nDifference:\n\n**-1.45 percentage points**\n\nQwopus3.8-27B-Flash is therefore not intended to be a model that:\n\n>“beats the base model on every benchmark.”\n\nIt is better described as an:\n\n**Accuracy–Efficiency Trade-off Experiment**\n\nThe underlying question is:\n\n>Can a limited reduction in benchmark accuracy be exchanged for higher decoder efficiency, better MTP utilization, and lower Agent execution cost?\n\n# Agent Evaluation\n\nThe model was also evaluated on 14 held-out software-engineering Agent tasks.\n\nThe tasks covered:\n\n* multi-bug repair\n* runtime debugging\n* cross-file refactoring\n* CLI implementation\n* algorithms\n* parser implementation\n* performance optimization\n* self-correction\n* state persistence\n\nAll tasks used:\n\n**deterministic hidden tests**\n\nA task was counted as successful only if:\n\n**all hidden tests passed**\n\nand\n\n**the Agent completed normally**\n\nIn one strict evaluation run:\n\n**13 / 14 tasks passed**\n\nHardware:\n\n**RTX 5090**\n\nTotal wall-clock time:\n\n**26 minutes**\n\nAverage generation speed:\n\n**99 tok/s**\n\nAverage MTP acceptance:\n\n**88.8%**\n\nThis should be interpreted as a:\n\n**single-run capability evaluation**\n\nrather than a stable leaderboard success rate.\n\nA more rigorous Agent benchmark would require multiple seeds and repeated runs.\n\n# Why Agent Efficiency Cannot Be Measured by tok/s Alone\n\nOne practical Agent workload case study showed:\n\n# Qwopus3.8-27B-Flash\n\n* 20 turns\n* 27,975 generated tokens\n* 640 seconds\n* completed\n\n# Qwen3.8-27B Base\n\n* 48 turns\n* 109,337 generated tokens\n* 1,390 seconds\n* did not terminate successfully\n\nA single workload cannot represent overall model performance.\n\nHowever, it illustrates an important point:\n\n>**Tokens per second is not the same as Agent speed.**\n\nA model can decode very quickly and still be inefficient if it:\n\n* reasons for too long\n* performs too many tool calls\n* repeatedly replans\n* overuses self-correction\n* fails to terminate efficiently\n\nFor Agent workloads, efficiency may therefore need to be evaluated using several metrics together:\n\n* tokens/s\n* total generated tokens\n* MTP acceptance\n* number of turns\n* tool calls\n* wall-clock time\n* task success rate\n\nA more meaningful long-term metric may eventually be:\n\n**Compute per Successfully Completed Task**\n\n# Known Issue: Python Indentation\n\nThe current version still has one known issue under investigation.\n\nIn some specific Python coding tasks, the model may generate abnormal indentation.\n\nThe issue appears most often in structures involving:\n\n* nested blocks\n* multiple context managers\n* multi-level Python structures\n\nIn certain cases, Python code that should contain normal hierarchical indentation may be collapsed into unusual 1-space indentation.\n\nThe issue is currently being investigated through:\n\n* training-data audits\n* formatting-pattern analysis\n* quantization comparison\n* generation-behavior analysis\n* reproducibility testing\n\nThe limitation is already documented in the model card.\n\nReproducible prompts, sampling configurations, or generation outputs that consistently trigger the issue would be especially useful for further debugging.\n\n# From “More Reasoning” to “More Efficient Reasoning”\n\nThe development of reasoning models has largely focused on:\n\n**more inference-time compute**\n\n**longer Chain-of-Thought**\n\n**larger search budgets**\n\nBut as reasoning models are increasingly used in:\n\n* Coding Agents\n* Autonomous Workflows\n* Long-Running Tool Use\n* Local Inference\n* Speculative Decoding\n\nanother question is becoming increasingly important:\n\n>**How much compute does a model need to reach a correct answer?**\n\nThe main results currently observed with Qwopus3.8-27B-Flash include:\n\n**+12.8% decoder-only throughput**\n\n**MTP acceptance: 66.1% → 80.7%**\n\n**approximately -9.9% aggregate raw output**\n\n**significantly lower P95 runaway reasoning**\n\n**approximately +8% end-to-end batch evaluation throughput**\n\nThe corresponding trade-off is:\n\n**MMLU-Pro: 92.73% → 91.28%**\n\nFor this reason, the model is better understood as a:\n\n**Reasoning Efficiency Optimization Experiment**\n\nrather than a fine-tune designed purely around benchmark SOTA.\n\nQwen3.8 already addresses inference efficiency at the architectural level through:\n\n**Hybrid DeltaNet + Attention**\n\n**Long Context**\n\n**MTP**\n\nQwopus3.8-27B-Flash extends that idea to another layer:\n\n>**Once the underlying architecture becomes more efficient, can the model itself learn to waste less reasoning and complete tasks with less total compute?**\n\nFor future reasoning-model evaluation, traditional metrics such as Accuracy, MMLU, and SWE-Bench may not be enough.\n\nIt may also become increasingly useful to measure:\n\n**Tokens per Correct Answer**\n\nand ultimately:\n\n**Compute per Completed Task**\n\nModel:\n\n[Qwopus3.8-27B-Flash-GGUF](https://huggingface.co/Jackrong/Qwopus3.8-27B-Flash-GGUF)",
       "is_original_content": false,
       "link_flair_text": null,
@@ -28,7 +28,7 @@
           "id": "pai6uwy",
           "author": "MindfulK9Coach",
           "text": "TLDR anyone? 😂",
-          "score": 7,
+          "score": 8,
           "created_utc": "2026-09-18 03:39:48",
           "is_submitter": false,
           "replies": [
@@ -167,14 +167,61 @@
       ]
     },
     {
+      "id": "1wnig5h",
+      "title": "My contribution to the local AI community: 9 abliterated models, 99 GGUF quantizations in progress",
+      "subreddit": "huggingface",
+      "url": "https://i.redd.it/miikvy4lc4rh1.jpeg",
+      "author": "thaurock",
+      "created_utc": "2026-09-22 18:57:19",
+      "score": 33,
+      "num_comments": 3,
+      "upvote_ratio": 0.91,
+      "text": "[External Link]",
+      "is_original_content": false,
+      "link_flair_text": null,
+      "permalink": "https://reddit.com/r/huggingface/comments/1wnig5h/my_contribution_to_the_local_ai_community_9/",
+      "domain": "i.redd.it",
+      "is_self": false,
+      "comments": [
+        {
+          "id": "pbfrn5s",
+          "author": "LowCatch4324",
+          "text": "No recuerdo todos los clips que estoy usando. Alguno de los tuyos son aplicables en comfyUI?",
+          "score": 1,
+          "created_utc": "2026-09-22 20:30:21",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "pbftic2",
+              "author": "thaurock",
+              "text": "They are mainly LLM GGUF models, not CLIP models, so they won’t directly replace the CLIP encoders in standard ComfyUI image workflows. However, some may work with ComfyUI custom nodes that support GGUF language models. I haven’t tested them in ComfyUI yet, so I don’t want to promise compatibility",
+              "score": 1,
+              "created_utc": "2026-09-22 20:38:27",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "pbhxonk",
+          "author": "for4f",
+          "text": "oh nice, abliterated qwen3-coder 30b is exactly what i've been too lazy to quant myself lol. are the quants calibrated with imatrix or default? on my 4090 i usually just grab q5_k_m and call it a day, but for the 70b ones i'm curious what actually fits",
+          "score": 1,
+          "created_utc": "2026-09-23 03:24:54",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
       "id": "1wm1beq",
       "title": "I created my first public dataset: Congressional Stock Trades!",
       "subreddit": "huggingface",
       "url": "https://huggingface.co/datasets/austin-starks/congressional-stock-trades",
       "author": "NextgenAITrading",
       "created_utc": "2026-09-21 03:19:51",
-      "score": 18,
-      "num_comments": 0,
+      "score": 21,
+      "num_comments": 1,
       "upvote_ratio": 1.0,
       "text": "[External Link]",
       "is_original_content": false,
@@ -182,7 +229,17 @@
       "permalink": "https://reddit.com/r/huggingface/comments/1wm1beq/i_created_my_first_public_dataset_congressional/",
       "domain": "huggingface.co",
       "is_self": false,
-      "comments": []
+      "comments": [
+        {
+          "id": "pbh5cui",
+          "author": "Symbiote69",
+          "text": "Im new to this dataset thing. How do you use this? ",
+          "score": 1,
+          "created_utc": "2026-09-23 00:42:46",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
     },
     {
       "id": "1wjcgs4",
@@ -191,9 +248,9 @@
       "url": "https://www.reddit.com/r/huggingface/comments/1wjcgs4/made_a_tool_that_tells_you_which_gguf_quants_will/",
       "author": "asankhs",
       "created_utc": "2026-09-18 01:27:39",
-      "score": 12,
+      "score": 13,
       "num_comments": 3,
-      "upvote_ratio": 0.88,
+      "upvote_ratio": 0.89,
       "text": "It's hard to tell from a model page whether a quant will fit once you add context, KV cache, and whatever layers or experts end up on CPU. So I made this:\n\n[https://huggingface.co/spaces/LocalLLaMA/local-model-explorer](https://huggingface.co/spaces/LocalLLaMA/local-model-explorer)\n\nEnter your GPU(s) and RAM, or a Mac / Strix Halo / DGX Spark and its unified memory. Pick a context length and KV cache type, and it ranks around 3,000 popular GGUF models by what fits.\n\n\\- Memory use comes from reading each GGUF's header (layers, KV heads, sliding window, MoE experts), not from guessing by parameter count\n\n\\- Shows whether a quant runs fully on GPU, or works when the MoE experts are moved to CPU, needs partial offload, or won't fit\n\n\\- Gives you a ready llama-server -hf repo:quant -c ... -ngl ... --n-cpu-moe ... command, plus the ollama one\n\n\\- Every quant from every uploader in one table, with KV cache size from 4k to 262k context\n\n\\- Links to MLX, AWQ, GPTQ, EXL2/EXL3 and FP8 versions when they exist\n\nIt doesn't estimate speed, since I don't have all that hardware to calibrate against. Instead you can paste your llama-bench output on a model's page, and those numbers show up for everyone else. Only the parsed numbers and your hardware class are kept, and the dataset is public: [https://huggingface.co/datasets/LocalLLaMA/local-model-explorer-data](https://huggingface.co/datasets/LocalLLaMA/local-model-explorer-data)\n\nFor Macs there's also an MLX version: [https://huggingface.co/spaces/mlx-community/mlx-model-explorer](https://huggingface.co/spaces/mlx-community/mlx-model-explorer)\n\nIf a model or GPU is missing, or a fit looks wrong, let me know and I'll fix it.",
       "is_original_content": false,
       "link_flair_text": null,
@@ -238,9 +295,9 @@
       "url": "/r/LocalLLaMA/comments/1wijo3e/i_literally_built_the_jev_architecture_one_year/",
       "author": "Nandakishor_ml",
       "created_utc": "2026-09-17 08:29:22",
-      "score": 12,
+      "score": 11,
       "num_comments": 0,
-      "upvote_ratio": 0.93,
+      "upvote_ratio": 0.87,
       "text": "[External Link]",
       "is_original_content": false,
       "link_flair_text": null,
@@ -250,22 +307,70 @@
       "comments": []
     },
     {
-      "id": "1wnig5h",
-      "title": "My contribution to the local AI community: 9 abliterated models, 99 GGUF quantizations in progress",
+      "id": "1wjttmc",
+      "title": "Building an open-source 500+ language Sparse MoE translation model from scratch (Apache 2.0)",
       "subreddit": "huggingface",
-      "url": "https://i.redd.it/miikvy4lc4rh1.jpeg",
-      "author": "thaurock",
-      "created_utc": "2026-09-22 18:57:19",
-      "score": 12,
-      "num_comments": 0,
-      "upvote_ratio": 0.93,
-      "text": "[External Link]",
+      "url": "https://www.reddit.com/r/huggingface/comments/1wjttmc/building_an_opensource_500_language_sparse_moe/",
+      "author": "Adithyanbm",
+      "created_utc": "2026-09-18 15:46:32",
+      "score": 9,
+      "num_comments": 6,
+      "upvote_ratio": 0.79,
+      "text": "Hey everyone! For the past few months, I've been training a 2.04B Sparse Mixture-of-Experts (SMoE) foundation translation model (Mythos2.0-2B) from scratch on 2x T4 GPUs.\n\nIt covers 500+ languages—focusing on underserved African, Indigenous, and regional Asian languages that have zero commercial API coverage.\n\nEverything is completely open-source under Apache 2.0. Check out the project on Hugging Face at AdithyanAI/Mythos2.0-2B!",
       "is_original_content": false,
       "link_flair_text": null,
-      "permalink": "https://reddit.com/r/huggingface/comments/1wnig5h/my_contribution_to_the_local_ai_community_9/",
-      "domain": "i.redd.it",
-      "is_self": false,
-      "comments": []
+      "permalink": "https://reddit.com/r/huggingface/comments/1wjttmc/building_an_opensource_500_language_sparse_moe/",
+      "domain": "self.huggingface",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "paldfup",
+          "author": "NaturalPsychology785",
+          "text": "Wow 500 language in small 2B model even my old mobile will run smoothly ",
+          "score": 1,
+          "created_utc": "2026-09-18 15:48:49",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "pavpc73",
+              "author": "Routine_Matter8483",
+              "text": "thankyou ",
+              "score": 1,
+              "created_utc": "2026-09-20 01:53:48",
+              "is_submitter": false,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "paq5t2g",
+          "author": "MadScientistRat",
+          "text": "Nice",
+          "score": 1,
+          "created_utc": "2026-09-19 07:31:32",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "pavopab",
+          "author": "External-Ask1490",
+          "text": "Can I run on mobile device",
+          "score": 1,
+          "created_utc": "2026-09-20 01:50:08",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "pavpa4u",
+              "author": "Routine_Matter8483",
+              "text": "yes you can",
+              "score": 1,
+              "created_utc": "2026-09-20 01:53:29",
+              "is_submitter": false,
+              "replies": []
+            }
+          ]
+        }
+      ]
     },
     {
       "id": "1wjxs00",
@@ -274,9 +379,9 @@
       "url": "https://huggingface.co/uran1um1/Qwen3.5-9B-APEX-GGUF",
       "author": "uran1um1",
       "created_utc": "2026-09-18 18:11:04",
-      "score": 7,
+      "score": 8,
       "num_comments": 10,
-      "upvote_ratio": 0.73,
+      "upvote_ratio": 0.75,
       "text": "[External Link]",
       "is_original_content": false,
       "link_flair_text": null,
@@ -381,61 +486,15 @@
       ]
     },
     {
-      "id": "1wkj9jl",
-      "title": "I literally built the Jev architecture one year back and completely open-sourced it with model, dataset and paper",
-      "subreddit": "huggingface",
-      "url": "/r/LocalLLaMA/comments/1wijo3e/i_literally_built_the_jev_architecture_one_year/",
-      "author": "chintan-nz",
-      "created_utc": "2026-09-19 11:02:08",
-      "score": 5,
-      "num_comments": 1,
-      "upvote_ratio": 0.86,
-      "text": "[External Link]",
-      "is_original_content": false,
-      "link_flair_text": null,
-      "permalink": "https://reddit.com/r/huggingface/comments/1wkj9jl/i_literally_built_the_jev_architecture_one_year/",
-      "domain": "",
-      "is_self": false,
-      "comments": [
-        {
-          "id": "patnr4s",
-          "author": "issovossi",
-          "text": "Welcome to the internet.",
-          "score": 1,
-          "created_utc": "2026-09-19 19:25:58",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
-      "id": "1wi11n2",
-      "title": "I put around 15,000 synthetic founder voice SFT pairs on Hugging Face",
-      "subreddit": "huggingface",
-      "url": "https://www.reddit.com/r/huggingface/comments/1wi11n2/i_put_around_15000_synthetic_founder_voice_sft/",
-      "author": "PowerOk7047",
-      "created_utc": "2026-09-16 15:50:35",
-      "score": 5,
-      "num_comments": 0,
-      "upvote_ratio": 1.0,
-      "text": "I published a small synthetic dataset for supervised fine tuning. Each row is a user prompt and a short assistant reply in a blunt founder voice. The answer is a decision rule, not a biography quiz and not a pep talk.\n\nAbout 14791 unique English pairs. One train split. Two columns: prompt and response. Trivia style questions and leftover sales language were filtered out. Replies stay about 1 to 4 sentences.\n\nIt is synthetic. It is meant for research and for teaching a small chat model to sound specific and declarative. It is not a source of facts.\n\nGo to the dataset page on hugging face : [https://huggingface.co/datasets/prathamkode/founder-wisdom-sft](https://huggingface.co/datasets/prathamkode/founder-wisdom-sft)\n\nLoad it with datasets.load\\_dataset, split train. Print row 0 and you should see a prompt plus a response only.\n\nIf you try it, tell me whether the voice holds after a light SFT run or whether it collapses into generic advice.",
-      "is_original_content": false,
-      "link_flair_text": null,
-      "permalink": "https://reddit.com/r/huggingface/comments/1wi11n2/i_put_around_15000_synthetic_founder_voice_sft/",
-      "domain": "self.huggingface",
-      "is_self": true,
-      "comments": []
-    },
-    {
       "id": "1wmw49s",
       "title": "Model grafting: turning Qwen3.5-4B into a causal encoder-decoder after the fact",
       "subreddit": "huggingface",
       "url": "https://www.reddit.com/r/huggingface/comments/1wmw49s/model_grafting_turning_qwen354b_into_a_causal/",
       "author": "asankhs",
       "created_utc": "2026-09-22 01:44:28",
-      "score": 5,
+      "score": 6,
       "num_comments": 5,
-      "upvote_ratio": 0.86,
+      "upvote_ratio": 0.8,
       "text": "Recently, the new DeepSeek-V4.1-Flash architecture showed how a causal encoder-decoder can work, but it was trained from scratch. Model Grafting does it to an existing model: cut at some depth, let the lower layers read the prompt, and use the upper layers get for encoder's residual stream as prefix KV via identity-init adapters, then heal with self-distillation from the unmodified parent. Decoding part stays the same, this method was described in this blog post [https://latentnode.pages.dev/articles/model-grafting](https://latentnode.pages.dev/articles/model-grafting)\n\nI applied the same recipe to Qwen3.5-4B to create two graft variants - [https://huggingface.co/LocalLLaMA/Qwen3.5-4B-graft8](https://huggingface.co/LocalLLaMA/Qwen3.5-4B-graft8) and [https://huggingface.co/LocalLLaMA/Qwen3.5-4B-graft16](https://huggingface.co/LocalLLaMA/Qwen3.5-4B-graft16)   \n  \nThe graft8 variant shows speedup of \\~3.7x at 128K prompt with some loss in accuracy. The graft16 is much more closer to the parent model while showing 2.0x speedup in prompt processing with minimum loss in accuracy.",
       "is_original_content": false,
       "link_flair_text": null,
@@ -493,104 +552,48 @@
       ]
     },
     {
+      "id": "1wkj9jl",
+      "title": "I literally built the Jev architecture one year back and completely open-sourced it with model, dataset and paper",
+      "subreddit": "huggingface",
+      "url": "/r/LocalLLaMA/comments/1wijo3e/i_literally_built_the_jev_architecture_one_year/",
+      "author": "chintan-nz",
+      "created_utc": "2026-09-19 11:02:08",
+      "score": 5,
+      "num_comments": 1,
+      "upvote_ratio": 0.86,
+      "text": "[External Link]",
+      "is_original_content": false,
+      "link_flair_text": null,
+      "permalink": "https://reddit.com/r/huggingface/comments/1wkj9jl/i_literally_built_the_jev_architecture_one_year/",
+      "domain": "",
+      "is_self": false,
+      "comments": [
+        {
+          "id": "patnr4s",
+          "author": "issovossi",
+          "text": "Welcome to the internet.",
+          "score": 1,
+          "created_utc": "2026-09-19 19:25:58",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
       "id": "1wi0f29",
       "title": "Qwen3.8-27B ByteShape IQ4_XS, ASCII-only vocab (English + code only): 12.25 GB, 128k ctx on a 5060 Ti, bit-identical weights",
       "subreddit": "huggingface",
       "url": "/r/Qwen_AI/comments/1wi0etb/qwen3827b_byteshape_iq4_xs_asciionly_vocab/",
       "author": "Flat-Move-5316",
       "created_utc": "2026-09-16 15:27:34",
-      "score": 4,
-      "num_comments": 0,
-      "upvote_ratio": 0.84,
-      "text": "[External Link]",
-      "is_original_content": false,
-      "link_flair_text": null,
-      "permalink": "https://reddit.com/r/huggingface/comments/1wi0f29/qwen3827b_byteshape_iq4_xs_asciionly_vocab/",
-      "domain": "",
-      "is_self": false,
-      "comments": []
-    },
-    {
-      "id": "1wjttmc",
-      "title": "Building an open-source 500+ language Sparse MoE translation model from scratch (Apache 2.0)",
-      "subreddit": "huggingface",
-      "url": "https://www.reddit.com/r/huggingface/comments/1wjttmc/building_an_opensource_500_language_sparse_moe/",
-      "author": "Adithyanbm",
-      "created_utc": "2026-09-18 15:46:32",
-      "score": 4,
-      "num_comments": 6,
-      "upvote_ratio": 0.64,
-      "text": "Hey everyone! For the past few months, I've been training a 2.04B Sparse Mixture-of-Experts (SMoE) foundation translation model (Mythos2.0-2B) from scratch on 2x T4 GPUs.\n\nIt covers 500+ languages—focusing on underserved African, Indigenous, and regional Asian languages that have zero commercial API coverage.\n\nEverything is completely open-source under Apache 2.0. Check out the project on Hugging Face at AdithyanAI/Mythos2.0-2B!",
-      "is_original_content": false,
-      "link_flair_text": null,
-      "permalink": "https://reddit.com/r/huggingface/comments/1wjttmc/building_an_opensource_500_language_sparse_moe/",
-      "domain": "self.huggingface",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "paldfup",
-          "author": "NaturalPsychology785",
-          "text": "Wow 500 language in small 2B model even my old mobile will run smoothly ",
-          "score": 1,
-          "created_utc": "2026-09-18 15:48:49",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "pavpc73",
-              "author": "Routine_Matter8483",
-              "text": "thankyou ",
-              "score": 1,
-              "created_utc": "2026-09-20 01:53:48",
-              "is_submitter": false,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "paq5t2g",
-          "author": "MadScientistRat",
-          "text": "Nice",
-          "score": 1,
-          "created_utc": "2026-09-19 07:31:32",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "pavopab",
-          "author": "External-Ask1490",
-          "text": "Can I run on mobile device",
-          "score": 1,
-          "created_utc": "2026-09-20 01:50:08",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "pavpa4u",
-              "author": "Routine_Matter8483",
-              "text": "yes you can",
-              "score": 1,
-              "created_utc": "2026-09-20 01:53:29",
-              "is_submitter": false,
-              "replies": []
-            }
-          ]
-        }
-      ]
-    },
-    {
-      "id": "1wlbye3",
-      "title": "ShadeNet-3.2 5M — single-image inverse rendering (albedo/depth/normal/shading), 4× smaller than my last model and better at depth/normals",
-      "subreddit": "huggingface",
-      "url": "https://www.reddit.com/gallery/1wlby7m",
-      "author": "singam96",
-      "created_utc": "2026-09-20 08:58:07",
-      "score": 4,
+      "score": 5,
       "num_comments": 0,
       "upvote_ratio": 1.0,
       "text": "[External Link]",
       "is_original_content": false,
       "link_flair_text": null,
-      "permalink": "https://reddit.com/r/huggingface/comments/1wlbye3/shadenet32_5m_singleimage_inverse_rendering/",
-      "domain": "reddit.com",
+      "permalink": "https://reddit.com/r/huggingface/comments/1wi0f29/qwen3827b_byteshape_iq4_xs_asciionly_vocab/",
+      "domain": "",
       "is_self": false,
       "comments": []
     },
@@ -601,7 +604,7 @@
       "url": "https://www.reddit.com/r/huggingface/comments/1wmeepa/looking_for_beta_testers_for_an_uncensored_llm/",
       "author": "PsycheYogi",
       "created_utc": "2026-09-21 14:29:39",
-      "score": 4,
+      "score": 5,
       "num_comments": 2,
       "upvote_ratio": 1.0,
       "text": "Hi !\n\nI don't know if this is considered self promotion, as there is nothing to sell. (only looking for testers)\n\nWe are building a platform with an uncensored local LLM which is finetuned for cybersecurity (based on Qwen 3.8).\n\nWe are looking for beta testers right now.\n\nAnyone interested can DM me, or post here.",
@@ -632,22 +635,97 @@
       ]
     },
     {
-      "id": "1whq0al",
-      "title": "Sharing some domain-specialized 7B models we fine-tuned on STEM data (BioMed, RTL, Pure Math)",
+      "id": "1wi11n2",
+      "title": "I put around 15,000 synthetic founder voice SFT pairs on Hugging Face",
       "subreddit": "huggingface",
-      "url": "https://www.reddit.com/r/huggingface/comments/1whq0al/sharing_some_domainspecialized_7b_models_we/",
-      "author": "shreyansh_lab",
-      "created_utc": "2026-09-16 07:11:50",
-      "score": 3,
+      "url": "https://www.reddit.com/r/huggingface/comments/1wi11n2/i_put_around_15000_synthetic_founder_voice_sft/",
+      "author": "PowerOk7047",
+      "created_utc": "2026-09-16 15:50:35",
+      "score": 4,
       "num_comments": 0,
       "upvote_ratio": 1.0,
-      "text": "Hey folks,\n\nI'm a student builder at BITS Pilani working with my small team at Experiment Lab. Over the last few months, we've been experimenting with fine-tuning open 7B architectures for specific technical fields instead of general chat.\n\nWe just uploaded our weights under Apache 2.0:\n• olmo2-7b-biomed-chem: molecular dynamics & drug-target interactions\n• olmo2-7b-silicon-rtl-eda: Verilog synthesis & hardware verification\n• olmo2-7b-phd-pure-math: topology & graduate math derivations\n• Vidhi-AI-Instruct: Indian statutory law reasoning\n• Shreyansh-STEM-1.5B: a tiny SLM for quick local runs on low-VRAM rigs\n\nWe also pushed an experimental 9B model using depth up-scaling (DUS), though we're still running continual pre-training to smooth out the layer seams.\n\nHugging Face hub:\nhttps://huggingface.co/shreyansh12183\n\nWould love any thoughts on the weights or tokenizer behavior if you test them out!",
+      "text": "I published a small synthetic dataset for supervised fine tuning. Each row is a user prompt and a short assistant reply in a blunt founder voice. The answer is a decision rule, not a biography quiz and not a pep talk.\n\nAbout 14791 unique English pairs. One train split. Two columns: prompt and response. Trivia style questions and leftover sales language were filtered out. Replies stay about 1 to 4 sentences.\n\nIt is synthetic. It is meant for research and for teaching a small chat model to sound specific and declarative. It is not a source of facts.\n\nGo to the dataset page on hugging face : [https://huggingface.co/datasets/prathamkode/founder-wisdom-sft](https://huggingface.co/datasets/prathamkode/founder-wisdom-sft)\n\nLoad it with datasets.load\\_dataset, split train. Print row 0 and you should see a prompt plus a response only.\n\nIf you try it, tell me whether the voice holds after a light SFT run or whether it collapses into generic advice.",
       "is_original_content": false,
       "link_flair_text": null,
-      "permalink": "https://reddit.com/r/huggingface/comments/1whq0al/sharing_some_domainspecialized_7b_models_we/",
+      "permalink": "https://reddit.com/r/huggingface/comments/1wi11n2/i_put_around_15000_synthetic_founder_voice_sft/",
       "domain": "self.huggingface",
       "is_self": true,
       "comments": []
+    },
+    {
+      "id": "1wlbye3",
+      "title": "ShadeNet-3.2 5M — single-image inverse rendering (albedo/depth/normal/shading), 4× smaller than my last model and better at depth/normals",
+      "subreddit": "huggingface",
+      "url": "https://www.reddit.com/gallery/1wlby7m",
+      "author": "singam96",
+      "created_utc": "2026-09-20 08:58:07",
+      "score": 4,
+      "num_comments": 0,
+      "upvote_ratio": 0.84,
+      "text": "[External Link]",
+      "is_original_content": false,
+      "link_flair_text": null,
+      "permalink": "https://reddit.com/r/huggingface/comments/1wlbye3/shadenet32_5m_singleimage_inverse_rendering/",
+      "domain": "reddit.com",
+      "is_self": false,
+      "comments": []
+    },
+    {
+      "id": "1wnz751",
+      "title": "Qevi-2B: A Jev-style finetuned model for image classification",
+      "subreddit": "huggingface",
+      "url": "https://www.reddit.com/r/huggingface/comments/1wnz751/qevi2b_a_jevstyle_finetuned_model_for_image/",
+      "author": "Taronyuuu",
+      "created_utc": "2026-09-23 07:29:59",
+      "score": 4,
+      "num_comments": 4,
+      "upvote_ratio": 0.84,
+      "text": "Hi all!\n\nIn the past few days I've been working on a full finetune based on Qwen3-VL-2B and a slightly modified package to have a Jev style inference that works like the Jev / [Typesafe.ai](http://Typesafe.ai) model that you all probably know (and are a bit tired of).\n\nFinetune was done on a dual RTX3090 setup with about 28.000 images. Part of these images were NSFW data because one of the reasons I wanted this is to easily identify NSFW images for uploaded images by users. This model exceptionally shines for these kind of actions where multiple questions are asked about a single image in one go. After the first question each additional question takes \\~3ms extra.\n\nI, by no means, am trying to imply that I'm an expert in any of this but I just wanted to share the idea and working proof of concept with everyone here :)\n\nSee the HuggingFace repo here: [https://huggingface.co/MeerDevelopment/Qevi-2B](https://huggingface.co/MeerDevelopment/Qevi-2B)\n\nWould love to hear your feedback!",
+      "is_original_content": false,
+      "link_flair_text": null,
+      "permalink": "https://reddit.com/r/huggingface/comments/1wnz751/qevi2b_a_jevstyle_finetuned_model_for_image/",
+      "domain": "self.huggingface",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "pbitzl4",
+          "author": "wahnsinnwanscene",
+          "text": "what's the rlcd methodology like?",
+          "score": 1,
+          "created_utc": "2026-09-23 07:31:18",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "pbivx9v",
+              "author": "Taronyuuu",
+              "text": "Right now, there is none. I also don't know the exact details of how Typesafe implements this but Qevi just trains on learning the correct answer from a list given an image. ",
+              "score": 1,
+              "created_utc": "2026-09-23 07:48:29",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "pbj262g",
+          "author": "BodyPhysical",
+          "text": "but can it identify a hotdog? 😄\n\n[**https://www.youtube.com/watch?v=tWwCK95X6go**](https://www.youtube.com/watch?v=tWwCK95X6go)",
+          "score": 1,
+          "created_utc": "2026-09-23 08:44:05",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "pbjdaut",
+              "author": "Taronyuuu",
+              "text": "While working on this, this scene has crossed my mind about 6 times 😂",
+              "score": 1,
+              "created_utc": "2026-09-23 10:18:15",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        }
+      ]
     },
     {
       "id": "1wlcmok",
@@ -656,9 +734,9 @@
       "url": "https://www.reddit.com/r/huggingface/comments/1wlcmok/free_ai_training_credit/",
       "author": "Petabyte-Cloud",
       "created_utc": "2026-09-20 09:37:50",
-      "score": 1,
-      "num_comments": 15,
-      "upvote_ratio": 0.57,
+      "score": 3,
+      "num_comments": 17,
+      "upvote_ratio": 0.67,
       "text": "**Free GPU credits for AI/ML training — looking for testers**\n\nI’m building **Petabyte**, a GPU compute marketplace where you can rent NVIDIA GPUs by the hour for training, fine-tuning, inference, and other CUDA workloads.\n\nWe’re still early, and I’m looking for AI/ML researchers and developers who want to test real workloads.\n\n**Current offer:**\n\n* $10 free credit when you create an account\n* I can add **$50 extra test credit** for people running a real AI workload\n* If you top up your account, we’re also testing a **matching-credit offer** — e.g. deposit $50 and receive another $50 in credit, up to the current promo cap\n* No long-term contract; GPU usage is hourly\n\nCurrent capacity includes GPUs such as **H100 80GB, H200 141GB, and RTX 6000 Ada 48GB**, depending on availability.\n\nGood tests would be things like:\n\n* LLM fine-tuning / LoRA\n* Model inference\n* PyTorch / CUDA training\n* Distributed training\n* Stable Diffusion / image models\n* Synthetic-data generation\n* Benchmarking different GPUs\n\nYou can bring your own Docker/CUDA/Python workload and actually push the machines rather than just testing the UI.\n\n**Petabyte:** [https://petabyte.market](https://petabyte.market)\n\nIf you want the additional testing credit, comment or DM me with roughly what model/workload you want to run. I’d especially like feedback on provisioning, performance, pricing, and anything that breaks.",
       "is_original_content": false,
       "link_flair_text": null,
@@ -699,6 +777,25 @@
               "text": "go ahead its ok",
               "score": 1,
               "created_utc": "2026-09-21 14:22:18",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "pbdhs83",
+          "author": "cool-lala",
+          "text": "I'll take a shot might share in my curriculum too with my students too btw I teach online",
+          "score": 2,
+          "created_utc": "2026-09-22 14:42:15",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "pbes22h",
+              "author": "Petabyte-Cloud",
+              "text": "oh! nice all of your students will get 50$ free credit ! thank you and have a nice day",
+              "score": 1,
+              "created_utc": "2026-09-22 17:58:12",
               "is_submitter": true,
               "replies": []
             }
@@ -768,6 +865,80 @@
                   "replies": []
                 }
               ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "1wnw8gx",
+      "title": "Trained a per-task head on top of convaiinnovations/laya (frozen encoder) and served it behind the Jev API: 38% zero-shot on 77 intents is fixable with your own rows",
+      "subreddit": "huggingface",
+      "url": "https://www.reddit.com/gallery/1wnw8gx",
+      "author": "Inevitable-Log5414",
+      "created_utc": "2026-09-23 04:42:27",
+      "score": 3,
+      "num_comments": 0,
+      "upvote_ratio": 1.0,
+      "text": "[External Link]",
+      "is_original_content": false,
+      "link_flair_text": null,
+      "permalink": "https://reddit.com/r/huggingface/comments/1wnw8gx/trained_a_pertask_head_on_top_of/",
+      "domain": "reddit.com",
+      "is_self": false,
+      "comments": []
+    },
+    {
+      "id": "1wmjrso",
+      "title": "Introducing halo - HF format trainer with up to 3x the speed of TRL and all parallelisms",
+      "subreddit": "huggingface",
+      "url": "https://www.reddit.com/r/huggingface/comments/1wmjrso/introducing_halo_hf_format_trainer_with_up_to_3x/",
+      "author": "ARCHLucifer",
+      "created_utc": "2026-09-21 17:41:35",
+      "score": 3,
+      "num_comments": 0,
+      "upvote_ratio": 1.0,
+      "text": "i work on Halo at White Circle. we built it after repeatedly hitting the gap between stock HF/TRL setups and frameworks that require a separate model implementation and checkpoint format. Halo adds expert, context, tensor and expert-tensor parallelism directly to Hugging Face models. trainers remain HF or TRL subclasses, and the output is a standard checkpoint that loads with from\\_pretrained. the same stack covers SFT, preference optimization, distillation and async multi-turn RL. [https://github.com/whitecircle/halo](https://github.com/whitecircle/halo)\n\nLaunch: [https://x.com/whitecircle/status/2102087563913609534](https://x.com/whitecircle/status/2102087563913609534)",
+      "is_original_content": false,
+      "link_flair_text": null,
+      "permalink": "https://reddit.com/r/huggingface/comments/1wmjrso/introducing_halo_hf_format_trainer_with_up_to_3x/",
+      "domain": "self.huggingface",
+      "is_self": true,
+      "comments": []
+    },
+    {
+      "id": "1wmav9j",
+      "title": "My own Qwen3.8-27B quants for a 16GB card: 70 t/s at 32K, usable out to 252K",
+      "subreddit": "huggingface",
+      "url": "/r/Qwen_AI/comments/1wmav4r/my_own_qwen3827b_quants_for_a_16gb_card_70_ts_at/",
+      "author": "Ronnie_CA",
+      "created_utc": "2026-09-21 12:05:07",
+      "score": 3,
+      "num_comments": 2,
+      "upvote_ratio": 1.0,
+      "text": "[External Link]",
+      "is_original_content": false,
+      "link_flair_text": null,
+      "permalink": "https://reddit.com/r/huggingface/comments/1wmav9j/my_own_qwen3827b_quants_for_a_16gb_card_70_ts_at/",
+      "domain": "",
+      "is_self": false,
+      "comments": [
+        {
+          "id": "pb7xvcm",
+          "author": "MensaProdigy",
+          "text": "Love seeing community models",
+          "score": 1,
+          "created_utc": "2026-09-21 19:02:52",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "pb7z74p",
+              "author": "Ronnie_CA",
+              "text": "We are the best! :D",
+              "score": 1,
+              "created_utc": "2026-09-21 19:08:27",
+              "is_submitter": true,
+              "replies": []
             }
           ]
         }
