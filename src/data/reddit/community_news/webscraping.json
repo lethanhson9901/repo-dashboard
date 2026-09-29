@@ -1,49 +1,12 @@
 {
   "metadata": {
-    "last_updated": "2026-09-28 17:10:00",
+    "last_updated": "2026-09-29 20:58:42",
     "time_filter": "week",
     "subreddit": "webscraping",
     "total_items": 20,
-    "total_comments": 76
+    "total_comments": 82
   },
   "items": [
-    {
-      "id": "1wnllnw",
-      "title": "Google Flights gives a real browser 200 results and an automated 120",
-      "subreddit": "webscraping",
-      "url": "https://www.reddit.com/r/webscraping/comments/1wnllnw/google_flights_gives_a_real_browser_200_results/",
-      "author": "apiagent007",
-      "created_utc": "2026-09-22 20:50:24",
-      "score": 45,
-      "num_comments": 3,
-      "upvote_ratio": 0.98,
-      "text": "Been building a Google Flights scraper for a couple of weeks and ran into something I couldn’t find written up anywhere, so here are the measurements in case it saves someone else the time.\n\nThe symptom: on the Cheapest tab my scraper kept getting \\~120 flights for a route where my own browser showed \\~200. Same URL, same search, same minute. No captcha, no 429, no error. Just fewer results.\n\nTook me embarrassingly long because I assumed cookies or headers.\n\nGoogle sends a BotGuard token in the `x-goog-batchexecute-bgr` header on every `GetShoppingResults` call. I captured one from my own browser (Caido, incognito, through a residential proxy) and replayed it from a script:\n\n* replayed as captured → 202 flights\n* cookies stripped → 202\n* `x-browser-validation` and the other Chrome-only headers stripped → 202\n* bgr header stripped → nothing at all\n* same token from 8 fresh residential IPs → 121 each\n* same token from a datacenter IP → 121\n\nSo cookies don’t matter, Chrome’s private headers don’t matter, the token matters, and it only counts from the IP it was minted on.\n\nThen the browser side, same route, same day:\n\n* Playwright chromium, headful → 122\n* real Chrome launched by hand, no CDP → 205\n* Patchright (Playwright with the CDP leaks patched), headful → 205-207\n* Patchright, headless → 122\n* Patchright headful but from a datacenter IP → 22-122 depending on the run\n\nHeadless is detected no matter which browser. And on a cloud IP even a “clean” browser gets a short list, so you need both: a browser that isn’t obviously automated, and a residential-type IP.\n\nThe part that cost me the most: **when Google doesn’t trust you it doesn’t block you, it answers the Cheapest request with the Best list.** Same JSON shape, real flights, real prices, nothing marking it as degraded. I only caught it by fetching the Best list separately and comparing. A refusal contains 100% of the Best list and adds nothing to it; a real Cheapest list shares only \\~10-20% with Best. That comparison is now my trust check, and it retries on a new IP when it trips.\n\nRelated trap: their backend returns internal errors inside a 200 page. `ds:1` comes back as `[13, null, [ErrorResponse]]` inside an otherwise normal 1.8 MB document. For a while my scraper reported those as “no flights available”, which is the worst kind of bug, because it looks like an answer.\n\nWhat works now: Patchright headful under xvfb, residential egress, a fresh browser process per attempt (reusing a process that had just made a datacenter request got it flagged), plus the Best-list comparison with retries.\n\nStill very much a work in progress. One route with a child passenger still comes back short about half the time and I haven’t worked out why.\n\nIf you want to poke at it, it’s on Apify:  dz\\_omar/google-flights-scraper free while I’m still fixing things. Happy to go into the `tfs`/`tfu` protobuf encoding too, I’ve got that mapped out field by field.",
-      "is_original_content": false,
-      "link_flair_text": "Scaling up 🚀",
-      "permalink": "https://reddit.com/r/webscraping/comments/1wnllnw/google_flights_gives_a_real_browser_200_results/",
-      "domain": "self.webscraping",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "pbhqhuj",
-          "author": "OyaAI",
-          "text": "Google Search and Maps do the exact same silent degradation when BotGuard signals score poorly.\n\n  \nOn Search, low-trust tokens quietly drop snippet extensions and strip results down to 6 or 7 items instead of 10, completely skipping the reCAPTCHA interstitial. On Maps batchexecute calls, it silently truncates reviews and pricing tiers while returning a 200 status.\n\n  \nThe WebGL check is usually triggered by the software rasterizer string (like llvmpipe or SwiftShader) that xvfb defaults to inside container runtimes. BotGuard cross-checks WEBGL\\_debug\\_renderer\\_info against shader precision values and supported extensions, so if the vendor string is spoofed while the underlying precision profile screams Mesa, it treats the session as low-trust and serves the cached 'Best' tier.\n\n  \nAre you running hardware acceleration with --use-gl=angle or GPU passthrough in Docker, or are you patching the WebGL context directly in the page environment?",
-          "score": 3,
-          "created_utc": "2026-09-23 02:40:22",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "pbimaog",
-          "author": "SeleniumVBA_user",
-          "text": "Interesting write-up. I reproduced this with a different stack: Edge launched by msedgedriver and driven over WebDriver BiDi from VBA, using my own library (\\[WebDriver-BiDi-for-SeleniumVBA\\]([https://github.com/hanamichi77777/WebDriver-BiDi-for-SeleniumVBA](https://github.com/hanamichi77777/WebDriver-BiDi-for-SeleniumVBA))). Residential IP in Japan, headful, CTS→CDG one-way, 1 adult. It keeps the raw \\`GetShoppingResults\\` bodies through BiDi \\`network.getData\\`, so the numbers below come from the responses, not the rendered DOM. A few findings that may help:\n\n1. In my setup the trigger was \\`navigator.webdriver\\`, not CDP.\n\nI changed one variable at a time. With webdriver=true, degraded every run; searching by hand inside the driver-launched browser (no scripts, no clicks from code) was still degraded. Adding \\`--disable-blink-features=AutomationControlled\\` alone fixed it: the \"automated test software\" bar and the CDP attachment were still there, and prices matched a manual InPrivate session to the yen. My own page-level hooks (wrapped fetch/XHR/attachShadow, synthetic clicks) made no difference. That would also fit Playwright (webdriver=true by default) vs Patchright (false), though I haven't tested those.\n\n2. The refusal wasn't quite \"the Best list\" for me.\n\nBoth tabs got the same 300-item list. Its first 3 entries match the real Top flights, which is why it looks like Best. But \\~82–84% of the remaining itineraries never appear in either genuine list, and they are heavily 4–5 segment itineraries. The Cheapest tab label also gives it away: \"from ¥116,960\" degraded vs \"from ¥80,544\" genuine. The degraded list was byte-for-byte identical across runs.\n\n3. Trust check that worked for me:key each result as flight numbers + price, and compare Cheapest against Best. Degraded: overlap 1.00. Genuine: 0.06–0.25. Real Cheapest uses other fare sources (self-transfer, OTAs), so even the same flight usually shows a different price.\n\n4. Your child-passenger case: I see it too, and it's independent of detection.\n\nWith 1 adult + 1 child and webdriver=false, Best came back as 90 flights in 3 of 8 runs and 26 flights in 5 of 8, never anything in between. Cheapest stayed at 300 every time. All 26 short-list flights were contained in the degraded list, so it looks like the same fallback. The full list only came from searches that took \\~10 s. Sub-second responses repeated the previous result, so there seems to be a server-side cache, and an immediate retry may just return the same short list. Adults only: 101 flights in 8/8 runs.\n\n5. Parsing tip: in \\`GetShoppingResults\\`, the token next to each \\`\\[\\[null,price\\],\"...\"\\]\\` is base64 protobuf, and field 2 holds the flight numbers (e.g. \\`BR115|BR87\\`). Entries like \\`microflex|agg:20261003\\` are the \"travel on Oct 3 for ¥…\" date suggestions, not flights. Filter those out before counting.\n\nCaveats: one route, a handful of days, Edge only, residential IP only. I didn't test headless or datacenter egress.",
-          "score": 7,
-          "created_utc": "2026-09-23 06:25:54",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
     {
       "id": "1wowgnq",
       "title": "We're doing web scraping wrong",
@@ -51,9 +14,9 @@
       "url": "https://www.reddit.com/r/webscraping/comments/1wowgnq/were_doing_web_scraping_wrong/",
       "author": "moreveal",
       "created_utc": "2026-09-24 08:53:07",
-      "score": 42,
-      "num_comments": 51,
-      "upvote_ratio": 0.92,
+      "score": 41,
+      "num_comments": 52,
+      "upvote_ratio": 0.9,
       "text": "When a website needs JavaScript, we usually launch a browser and let it load the page almost exactly as it would for a human. A scraper might only need a few DOM nodes or some data produced by JavaScript. It doesn't need a screen, but we still give it an entire browser designed around one. We often fetch resources that won't affect the extracted result, decode things nobody will see, and keep state the workload will never read.\n\nI think the runtime should be built around the automation workload instead.\n\nI've been working on this idea in [Mimic](https://moreveal.github.io/mimic-overview/). It's not Chromium with rendering disabled, and it doesn't embed another browser engine. It executes website JavaScript and implements the browser-observable state needed by the page. CDP sits on top of that, so existing Playwright and Puppeteer code can connect to it.\n\nThat already removes a lot of work that exists to serve an interactive browser rather than an automation workload. But there is another obvious source of waste: resources.\n\nA scraper knows what it wants from a page. If I'm extracting text, an image may not need to be fetched at all. Another workload may need its metadata but not decoded pixels. A response body may only need a prefix, or may not need to be retained after it was consumed.\n\nMimic has a `ResourcePolicy`for this. It controls network admission, cache use, body consumption, image decoding, retention and resource budgets. There's also report-only mode to see what a policy would change before enforcing it.\n\nI tested this on a captured Wikipedia extraction workload with 50 isolated pages running concurrently. The policy version only admitted the resources that this particular scraper needed. The extracted results were identical.\n\n|Median of 3 runs|Mimic|Mimic + policy|Chrome|\n|:-|:-|:-|:-|\n|50 pages|3.63 s|**2.11 s**|\\~11.5 s|\n|Throughput|13.77/s|**23.66/s**|\\~4.35/s|\n|Peak RAM|3025 MB|**2450 MB**|\\~13,650 MB|\n\nI've been moving other automation-specific things into the runtime for the same reason. SOCKS5 proxy support, for example, is native rather than something that requires another browser/proxy layer.\n\nMimic is still a public beta and compatibilitскy depends on the workload. That's what I want to work on next instead of optimizing for synthetic tests.\n\nIf you're running a Playwright/Puppeteer scraper where browser CPU or memory is a meaningful cost, send me a representative workload. I'll try adapting Mimic to it and compare it against your current setup.",
       "is_original_content": false,
       "link_flair_text": "Scaling up 🚀",
@@ -65,7 +28,7 @@
           "id": "pbrir66",
           "author": "lethanos",
           "text": "Sorry mate but you are doing web scraping wrong.\n\n99% of the time you don't need to use Playwright/Selenium/Puppeteer for scraping, inspect how the site fetches the data, and implement some code that fetches and parsed said data, way faster than anything else.\n\n  \nin the rare occasion that you may actually need to use one of these tools to drive a real browser is to bypass anti-scraping measures (Turnstile Click Tokens, some other code that needs to run something in Obfuscated javascript that calculates something to allow you to access the site, etc)\n\nStop wasting your time and tokens in this, not useful at all.",
-          "score": 20,
+          "score": 17,
           "created_utc": "2026-09-24 13:29:46",
           "is_submitter": false,
           "replies": [
@@ -73,7 +36,7 @@
               "id": "pbrl0h6",
               "author": "bluewhalefunk",
               "text": "I stuck with pure HTTP request for as long as I could, but I've thrown in the towel.\n\nBeen doing it since 2010 properly (before that web spamming / bulk site generation / cloaking scripts).\n\nBut a browser is just a requirement for me 9/10 these days unfortunately.\n\nTake me back to 2010 internet please when things were good lol",
-              "score": 2,
+              "score": 4,
               "created_utc": "2026-09-24 13:40:26",
               "is_submitter": false,
               "replies": [
@@ -81,7 +44,7 @@
                   "id": "pbrppbr",
                   "author": "Coding-Doctor-Omar",
                   "text": "In 99% of the cases it's just an internal API. You can access it with curl_cffi with impersonate. Worst case scenario you can load a browser like Camoufox but still use it like an http client:\n\nLoad the homepage, establish a trusted session, then make direct async internal API calls via `await page.evaluate()`.",
-                  "score": 4,
+                  "score": 5,
                   "created_utc": "2026-09-24 14:01:58",
                   "is_submitter": false,
                   "replies": []
@@ -295,7 +258,17 @@
           "score": 1,
           "created_utc": "2026-09-28 14:23:34",
           "is_submitter": false,
-          "replies": []
+          "replies": [
+            {
+              "id": "pcn94an",
+              "author": "moreveal",
+              "text": "That's exactly the boundary I'm targeting. “Observable” means literally anything JS or HTTP can observe.",
+              "score": 1,
+              "created_utc": "2026-09-28 19:51:01",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
         }
       ]
     },
@@ -306,9 +279,9 @@
       "url": "https://www.reddit.com/r/webscraping/comments/1wpg3e4/web_scraping/",
       "author": "FunCompany5091",
       "created_utc": "2026-09-24 22:49:35",
-      "score": 20,
-      "num_comments": 19,
-      "upvote_ratio": 0.92,
+      "score": 19,
+      "num_comments": 24,
+      "upvote_ratio": 0.89,
       "text": "How are you guys web scrapping?\n\nAlso what is the cheapest way to web scrape without doing 100% of the work yourself and with a small budget of say 50 dollars per month for scraping contact information from public websites?\n\nAlso another question how are you guys tying in the webscraped data to be stored in a database or directly displayed on a Web APP or delivered via an API?\n\nIs there anything that ties into C# like an Agent or API that does webscraping or maybe some sort of SDK?\n\nIf there is anything for the listed above, how does one handle bot detection and or captchas?\n\nI am new to the modern way. I have used Selenium and C# before for web Scraping, but dont want to deal with captchas and bot detection with code. \n\nI would rather write code with predefined things or hell worst case scenario Computer Vision, mouse click, keyboard input automation using C#. I'm down with Python though as that is becoming more popular and has been. ",
       "is_original_content": false,
       "link_flair_text": "Getting started 🌱",
@@ -320,7 +293,7 @@
           "id": "pbv76su",
           "author": "Foodforbrain101",
           "text": "In today's era, for your own personal use?\n\nI'd just use Meta Muse. Not trying to sell anything either, I've been using ChatGPT and Claude to write scripts that run on GitHub Actions because I'm cheap too and free compute is free compute, but Muse comes with its own VM so 🤷‍♂️. \n\nBut you could also do HuggingFace and HuggingFace jobs + the HuggingFace agent plugin probably, very cheap and easy too.\n\nAs for dodging anti-bot measures, much trickier because it would likely require rotating residential proxies, which to be fair fit in your budget.",
-          "score": 6,
+          "score": 5,
           "created_utc": "2026-09-24 23:17:19",
           "is_submitter": false,
           "replies": [
@@ -364,10 +337,19 @@
           "replies": []
         },
         {
+          "id": "pc9om0f",
+          "author": "DistinctDuck8543",
+          "text": "what kind of sites are you scraping? that matters way more than the language you pick. static pages with public contact info are trivial, but if theyre behind login walls or heavy anti-bot stuff, $50/mo probably wont cover the proxy costs alone",
+          "score": 3,
+          "created_utc": "2026-09-26 23:41:08",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
           "id": "pbw1lhb",
           "author": "Additional-Elk-3712",
           "text": "I have a[ lightweight scraping/monitoring automation runtime](https://github.com/spyweb-app/spyweb) written in Rust with Lua scripting for user facing logic.\n\nits tiny (just around 7-8MB binary) and does not require any dependency/runtime, you can throw it on $4-$5/mos VPS/compute.\n\nit has [built-in storage](https://docs.spyweb.app/job-configuration/storage/), you can pick either KV or SQLite \n\nit has [programmable API server](https://docs.spyweb.app/api-and-server/) you can setup to expose your scrape data\n\nit also has a [built-in test runner](https://docs.spyweb.app/testing/), you can test and verify all your logic is actually working\n\nbut for bot detection and capthcas, that would always need a proxy and detection evasion technique depending on a site you are scraping",
-          "score": 1,
+          "score": 2,
           "created_utc": "2026-09-25 01:58:28",
           "is_submitter": false,
           "replies": []
@@ -376,7 +358,7 @@
           "id": "pbwf8df",
           "author": "itisidude",
           "text": "Create ai agent. ",
-          "score": 1,
+          "score": 2,
           "created_utc": "2026-09-25 03:13:38",
           "is_submitter": false,
           "replies": [
@@ -411,19 +393,10 @@
           ]
         },
         {
-          "id": "pc9om0f",
-          "author": "DistinctDuck8543",
-          "text": "what kind of sites are you scraping? that matters way more than the language you pick. static pages with public contact info are trivial, but if theyre behind login walls or heavy anti-bot stuff, $50/mo probably wont cover the proxy costs alone",
-          "score": 1,
-          "created_utc": "2026-09-26 23:41:08",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
           "id": "pbwvr67",
           "author": "renegat0x0",
           "text": "I have multiple web crawling projects with similar needs. I use my program that captures page Metadata, handles different crawling methods depending on website,and returns utf jsons as response. No decoding in my apps, no fighting with implementing same things over and over. Just a simple web crawling interface \n\nhttps://github.com/rumca-js/crawler-buddy",
-          "score": 0,
+          "score": 1,
           "created_utc": "2026-09-25 05:00:02",
           "is_submitter": false,
           "replies": []
@@ -432,8 +405,111 @@
           "id": "pby263c",
           "author": "Stegosauro76",
           "text": "personally i use a two step agent: \n\n1-search onDuckAndGo with certain keywords, filter aggregative sites;\n\n2- the raw html is pasted into txt and passed to an agent in Ollama(qwen9 that elaborate informations.\n\n it is still in develop mode so i m trying to fix several bugs",
-          "score": 0,
+          "score": 1,
           "created_utc": "2026-09-25 10:42:48",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1wrvkge",
+      "title": "Anti-bot solutions cost at scale",
+      "subreddit": "webscraping",
+      "url": "https://www.reddit.com/r/webscraping/comments/1wrvkge/antibot_solutions_cost_at_scale/",
+      "author": "Upstairs-Concert5800",
+      "created_utc": "2026-09-27 21:01:47",
+      "score": 14,
+      "num_comments": 15,
+      "upvote_ratio": 0.95,
+      "text": "Hello guys,\n\ncurious how people handle the CAPTCHA side of things when running stuff at a larger scale.\n\nOnce you start dealing with Turnstile, reCAPTCHA, hCaptcha, etc. on a regular basis, the costs can add up pretty quickly. I am wondering how others approach this — whether you just accept it as part of the infrastructure cost, switch between different providers, optimize around when challenges happen, or have found other ways to keep the spend under control. I believe most of us try to avoid them somehow — spoofed browsers, rotating proxies, different fingerprints, etc. — but at some point you still end up dealing with them.\n\nWould be interesting to hear what this looks like for people doing higher-volume automation — even roughly what you end up spending per month on anti-bot solutions (e.g. capsolver).",
+      "is_original_content": false,
+      "link_flair_text": "Bot detection 🤖",
+      "permalink": "https://reddit.com/r/webscraping/comments/1wrvkge/antibot_solutions_cost_at_scale/",
+      "domain": "self.webscraping",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "pci0i5h",
+          "author": "HLCYSWAP",
+          "text": "roll your own solvers, spend nothing",
+          "score": 8,
+          "created_utc": "2026-09-28 02:43:26",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "pco2td5",
+              "author": "mirthglen",
+              "text": "yeah if you can pull it off its hard to beat on cost",
+              "score": 2,
+              "created_utc": "2026-09-28 21:55:22",
+              "is_submitter": false,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "pci8ruo",
+          "author": "Coding-Doctor-Omar",
+          "text": "In 99% of the cases you can EVADE captchas by being stealthy enough. Most websites avoid throwing captchas at you unless something about your session is suspicious. The reason is that throwing too many captchas harms both bots and real users. Throwing too many captchas makes the user experience abysmal.",
+          "score": 5,
+          "created_utc": "2026-09-28 03:32:13",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "pci119b",
+          "author": "Hot-Percentage-2240",
+          "text": "You just have to eat cost :shrug:  \nCost is mostly just that it slows down scraping and makes more resource intensive. That can always be worked around.\n\nThe harder anti-bot stuff is constantly changing website structure and image scrambling, banning all datacenter ip, geoblocking, etc.",
+          "score": 3,
+          "created_utc": "2026-09-28 02:46:27",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "pci3ser",
+          "author": "otterlydelish",
+          "text": "Make your own silver or avoid them when possible. ",
+          "score": 1,
+          "created_utc": "2026-09-28 03:02:28",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "pcj8uy0",
+              "author": "Upstairs-Concert5800",
+              "text": "Yeah, but to spin up own solver i need another infrastructure - new proxies right?",
+              "score": 1,
+              "created_utc": "2026-09-28 08:00:20",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "pcm4byv",
+                  "author": "otterlydelish",
+                  "text": "If you are hitting a solver or some block every request you need to not be as obvious.",
+                  "score": 2,
+                  "created_utc": "2026-09-28 17:10:03",
+                  "is_submitter": false,
+                  "replies": []
+                },
+                {
+                  "id": "pcm42b4",
+                  "author": "otterlydelish",
+                  "text": "to spin up your own solver you need a couple of scripts. to do it at scale across x number of targets a day will probably require proxies. part of the gig.\n\n",
+                  "score": 1,
+                  "created_utc": "2026-09-28 17:08:58",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "pci6yix",
+          "author": "palelark8",
+          "text": "the real question is what percentage of your requests are actually hitting captchas. if its more than like 10-15% the solve cost isnt the problem, your evasion layer is. fix that first and the spend drops dramatically",
+          "score": 1,
+          "created_utc": "2026-09-28 03:21:17",
           "is_submitter": false,
           "replies": []
         }
@@ -446,7 +522,7 @@
       "url": "https://www.reddit.com/r/webscraping/comments/1wpcbqb/i_built_a_proxy_tester_that_loads_real_sites/",
       "author": "InvallidUser",
       "created_utc": "2026-09-24 20:14:20",
-      "score": 10,
+      "score": 9,
       "num_comments": 2,
       "upvote_ratio": 0.92,
       "text": "I got tired of one dumb problem in scraping. A proxy answers a ping, then dies the second you point it at a real site.\n\nSo I built Proxy Benchmarker. It tests public proxies locally before I trust them in a scraper.\n\nIt runs in three passes. Fast TCP check drops the dead hosts first. Then health and anonymity checks confirm it works and does not leak my IP. Then it tries around 50 real sites and records what actually loads.\n\nI get latency, protocol, anonymity level, per site results, and a sorted list with an HTML report I can skim.\n\nSpeed was the part I cared about. Testing thousands of proxies in order is mostly waiting on timeouts. This filters the pool early, so only survivors hit the slow tests.\n\nGitHub: [https://github.com/Its-Satyajit/proxy-benchmarker](https://github.com/Its-Satyajit/proxy-benchmarker)\n\nI built it for legit testing. Respect robots and rate limits, and only test stuff you are allowed to hit.\n\nFor people who run proxy pools, what metric makes you keep or drop one. Is there a target specific test or score you trust that I missed.",
@@ -474,9 +550,9 @@
       "url": "https://www.reddit.com/r/webscraping/comments/1wptte2/i_made_a_free_web_scraping_course_59_lessons/",
       "author": "simpleprog_",
       "created_utc": "2026-09-25 11:27:05",
-      "score": 8,
+      "score": 9,
       "num_comments": 3,
-      "upvote_ratio": 0.85,
+      "upvote_ratio": 1.0,
       "text": "Hey everyone,  \n  \nI've been writing scrapers and automation tools for a while, and most tutorials I found stopped at requests + BeautifulSoup. So I put together a free course that goes further.  \n  \nIt covers HTTP basics, selectors, pagination, finding the hidden JSON APIs behind JavaScript sites, Playwright, async scraping and scaling a crawl. There's also a separate anti-bot section on TLS fingerprints, headless browser leaks, CAPTCHAs and recovering from bans.  \n  \nIt's free with no sign-up, and every lesson has working code.  \n  \n[https://simpleprog.com/topics/web-scraping](https://simpleprog.com/topics/web-scraping)  \n  \nI'd love feedback, especially if something is wrong, unclear or missing.",
       "is_original_content": false,
       "link_flair_text": null,
@@ -488,7 +564,7 @@
           "id": "pcf84fa",
           "author": "Old_Entertainer_7694",
           "text": "59 lessons is a lot of ground to cover. does it touch on ethical scraping at all, like rate limiting and respecting robots.txt? that stuff trips up beginners more than the technical side imo",
-          "score": 1,
+          "score": 2,
           "created_utc": "2026-09-27 18:57:57",
           "is_submitter": false,
           "replies": [
@@ -496,95 +572,12 @@
               "id": "pcgfa41",
               "author": "simpleprog_",
               "text": "Yes one of the lessons is just about that :)  \n[https://simpleprog.com/topics/web-scraping/rate-limiting-politeness](https://simpleprog.com/topics/web-scraping/rate-limiting-politeness)",
-              "score": 1,
+              "score": 2,
               "created_utc": "2026-09-27 21:46:18",
               "is_submitter": true,
               "replies": []
             }
           ]
-        }
-      ]
-    },
-    {
-      "id": "1wrvkge",
-      "title": "Anti-bot solutions cost at scale",
-      "subreddit": "webscraping",
-      "url": "https://www.reddit.com/r/webscraping/comments/1wrvkge/antibot_solutions_cost_at_scale/",
-      "author": "Upstairs-Concert5800",
-      "created_utc": "2026-09-27 21:01:47",
-      "score": 8,
-      "num_comments": 10,
-      "upvote_ratio": 1.0,
-      "text": "Hello guys,\n\ncurious how people handle the CAPTCHA side of things when running stuff at a larger scale.\n\nOnce you start dealing with Turnstile, reCAPTCHA, hCaptcha, etc. on a regular basis, the costs can add up pretty quickly. I am wondering how others approach this — whether you just accept it as part of the infrastructure cost, switch between different providers, optimize around when challenges happen, or have found other ways to keep the spend under control. I believe most of us try to avoid them somehow — spoofed browsers, rotating proxies, different fingerprints, etc. — but at some point you still end up dealing with them.\n\nWould be interesting to hear what this looks like for people doing higher-volume automation — even roughly what you end up spending per month on anti-bot solutions (e.g. capsolver).",
-      "is_original_content": false,
-      "link_flair_text": "Bot detection 🤖",
-      "permalink": "https://reddit.com/r/webscraping/comments/1wrvkge/antibot_solutions_cost_at_scale/",
-      "domain": "self.webscraping",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "pci0i5h",
-          "author": "HLCYSWAP",
-          "text": "roll your own solvers, spend nothing",
-          "score": 3,
-          "created_utc": "2026-09-28 02:43:26",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "pci119b",
-          "author": "Hot-Percentage-2240",
-          "text": "You just have to eat cost :shrug:  \nCost is mostly just that it slows down scraping and makes more resource intensive. That can always be worked around.\n\nThe harder anti-bot stuff is constantly changing website structure and image scrambling, banning all datacenter ip, geoblocking, etc.",
-          "score": 3,
-          "created_utc": "2026-09-28 02:46:27",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "pci8ruo",
-          "author": "Coding-Doctor-Omar",
-          "text": "In 99% of the cases you can EVADE captchas by being stealthy enough. Most websites avoid throwing captchas at you unless something about your session is suspicious. The reason is that throwing too many captchas harms both bots and real users. Throwing too many captchas makes the user experience abysmal.",
-          "score": 2,
-          "created_utc": "2026-09-28 03:32:13",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "pci3ser",
-          "author": "otterlydelish",
-          "text": "Make your own silver or avoid them when possible. ",
-          "score": 1,
-          "created_utc": "2026-09-28 03:02:28",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "pcj8uy0",
-              "author": "Upstairs-Concert5800",
-              "text": "Yeah, but to spin up own solver i need another infrastructure - new proxies right?",
-              "score": 1,
-              "created_utc": "2026-09-28 08:00:20",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "pci6yix",
-          "author": "palelark8",
-          "text": "the real question is what percentage of your requests are actually hitting captchas. if its more than like 10-15% the solve cost isnt the problem, your evasion layer is. fix that first and the spend drops dramatically",
-          "score": 1,
-          "created_utc": "2026-09-28 03:21:17",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "pcl3mff",
-          "author": "Old-Revolution-3967",
-          "text": "Paying solving services at scale usually means your browser session is leaking obvious automation fingerprints upstream. Most modern Cloudflare and DataDome challenges trigger because runtime JavaScript evasion shims leave detectable prototype leaks and timing inconsistencies on navigator properties. Compiling canvas, WebGL, and client-hints spoofing directly into the browser binary instead of patching them with runtime scripts bypasses the suspicion threshold before any CAPTCHA challenge is ever served.",
-          "score": 1,
-          "created_utc": "2026-09-28 14:42:11",
-          "is_submitter": false,
-          "replies": []
         }
       ]
     },
@@ -597,7 +590,7 @@
       "created_utc": "2026-09-24 11:33:31",
       "score": 6,
       "num_comments": 8,
-      "upvote_ratio": 0.87,
+      "upvote_ratio": 0.88,
       "text": "&#x200B;\n\nTrying to create a bot to email apartment building owners any tips how to make one and how to edit it so it can email certain people based on they profile and just save them in my drafts till I'm ready to email them",
       "is_original_content": false,
       "link_flair_text": null,
@@ -655,62 +648,6 @@
       ]
     },
     {
-      "id": "1wn8uqy",
-      "title": "Weekly Webscrapers - Hiring, FAQs, etc",
-      "subreddit": "webscraping",
-      "url": "https://www.reddit.com/r/webscraping/comments/1wn8uqy/weekly_webscrapers_hiring_faqs_etc/",
-      "author": "AutoModerator",
-      "created_utc": "2026-09-22 13:00:33",
-      "score": 5,
-      "num_comments": 5,
-      "upvote_ratio": 1.0,
-      "text": "**Welcome to the weekly discussion thread!**\n\nThis is a space for web scrapers of all skill levels—whether you're a seasoned expert or just starting out. Here, you can discuss all things scraping, including:\n\n* Hiring and job opportunities\n* Industry news, trends, and insights\n* Frequently asked questions, like \"How do I scrape LinkedIn?\"\n* Marketing and monetization tips\n\nIf you're new to web scraping, make sure to check out the [Beginners Guide](https://webscraping.fyi) 🌱\n\nCommercial products may be mentioned in replies. If you want to promote your own products and services, continue to use the [monthly thread](https://reddit.com/r/webscraping/about/sticky?num=1)",
-      "is_original_content": false,
-      "link_flair_text": "Hiring 💰",
-      "permalink": "https://reddit.com/r/webscraping/comments/1wn8uqy/weekly_webscrapers_hiring_faqs_etc/",
-      "domain": "self.webscraping",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "pbuj8pi",
-          "author": "lethanos",
-          "text": "Hello everyone! Just wanted to mention that the company I work at is currently hiring software developers who are either Greek or know the Greek language. We specialize in large-scale web scraping and data processing, and we're growing fast!\n\nIf you're interested or want more info, feel free to DM or reply under this comment!",
-          "score": 1,
-          "created_utc": "2026-09-24 21:16:19",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "pc87i0s",
-              "author": "MinThetNaing",
-              "text": "I’m interested! Could you tell me more about the role and the requirements?",
-              "score": 1,
-              "created_utc": "2026-09-26 19:24:13",
-              "is_submitter": false,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "pc8mvjm",
-          "author": "tanglewood36",
-          "text": "for the \"how do I scrape LinkedIn\" crowd, the real question to ask first is whether you actually need to scrape it or if theres a public data source that gets you 80% of what you need",
-          "score": 1,
-          "created_utc": "2026-09-26 20:34:39",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "pcgf8co",
-          "author": "faultygamedev",
-          "text": "hey guys, I'm building a ChatGPT multi-turn conversation scraper. I already built it but then ChatGPT switched from using SSE to a Dynamic Partial Updates (DPU) transport protocol, so I am redesigning it now, and being more in the loop since I kinda went the \"software factory\" route when building it originally which led to a lot of bloat. I've been coding since I was a kid, but still new to making production-level applications, and I was wondering if anyone had any advice on how to get better at designing API contracts, and judging model outputs when using agents and they seem to know more than you do... ",
-          "score": 1,
-          "created_utc": "2026-09-27 21:46:04",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
       "id": "1wnmq33",
       "title": "scrape.land ok?",
       "subreddit": "webscraping",
@@ -718,7 +655,7 @@
       "author": "Impressive_Card_1975",
       "created_utc": "2026-09-22 21:33:01",
       "score": 5,
-      "num_comments": 3,
+      "num_comments": 4,
       "upvote_ratio": 0.86,
       "text": "Is this any good? [https://scrape.land](https://scrape.land)",
       "is_original_content": false,
@@ -731,7 +668,7 @@
           "id": "pbhki3e",
           "author": "CrypticZombies",
           "text": "some vide coded slop\n\nwtf going on with the docs. can tell zero effort went info it",
-          "score": 6,
+          "score": 7,
           "created_utc": "2026-09-23 02:05:39",
           "is_submitter": false,
           "replies": [
@@ -748,103 +685,9 @@
               "id": "pcgltk8",
               "author": "SamaelHellfire",
               "text": "What gives it away? Just curious",
-              "score": 1,
+              "score": 0,
               "created_utc": "2026-09-27 22:17:08",
               "is_submitter": false,
-              "replies": []
-            }
-          ]
-        }
-      ]
-    },
-    {
-      "id": "1wmwhvb",
-      "title": "how to get all post captions from a public IG  account?",
-      "subreddit": "webscraping",
-      "url": "https://www.reddit.com/r/webscraping/comments/1wmwhvb/how_to_get_all_post_captions_from_a_public_ig/",
-      "author": "wisewaternexus",
-      "created_utc": "2026-09-22 02:01:48",
-      "score": 5,
-      "num_comments": 11,
-      "upvote_ratio": 1.0,
-      "text": "I’m trying to preserve the captions from a public business Instagram account for a private archive. I need the text written below each photo, carousel, reel, or video, along with the post date and URL if possible.\n\n\n\nI tried Instaloader on Windows 10:\n\n\n\npy -m instaloader USERNAME\n\n\n\nInstagram returned “429 Too Many Requests.” I also tried Crawl4AI with the public profile URL, but it produced an empty Markdown file.\n\n\n\nI’m not trying to access private content, bypass security, use cookies, or evade rate limits. I only want to archive publicly available captions.\n\n\n\nWould Instaloader, WFDownloader, gallery-dl, or another legitimate tool be best for this? Is there a way to save captions and metadata without downloading all the media?\n\n\n\nThanks.",
-      "is_original_content": false,
-      "link_flair_text": "Getting started 🌱",
-      "permalink": "https://reddit.com/r/webscraping/comments/1wmwhvb/how_to_get_all_post_captions_from_a_public_ig/",
-      "domain": "self.webscraping",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "pbcggmu",
-          "author": "New-Independence5780",
-          "text": "Do this since instagram graphql don’t  expose native captions but they have media url or audio send that to groq and boom you got your captions ",
-          "score": 1,
-          "created_utc": "2026-09-22 11:30:30",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "pbcowkc",
-              "author": "wisewaternexus",
-              "text": " ok but",
-              "score": 1,
-              "created_utc": "2026-09-22 12:20:59",
-              "is_submitter": true,
-              "replies": []
-            },
-            {
-              "id": "pbcpimd",
-              "author": "wisewaternexus",
-              "text": "Thanks, but I think there’s a misunderstanding. I’m not trying to transcribe speech from the videos or read text inside the images. I specifically need the original Instagram caption—the text the account owner typed below each photo, carousel, reel, or video.\n\nI need to preserve those captions with the post date and URL if possible. Instagram has been returning 429 errors to Instaloader, and c4ai produced an empty file. Would your method retrieve the original post caption, or only transcribe audio from the media?",
-              "score": 1,
-              "created_utc": "2026-09-22 12:24:22",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "pbco6e1",
-          "author": "neutralan81",
-          "text": "easy to do with some AI tool.",
-          "score": 1,
-          "created_utc": "2026-09-22 12:16:56",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "pbcpkew",
-              "author": "wisewaternexus",
-              "text": "pls tell me how ?? can i dm you ",
-              "score": 1,
-              "created_utc": "2026-09-22 12:24:38",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "pblm86t",
-          "author": "dooddyman",
-          "text": "Try SocialCrawl (I built it) insta profile post endpoint. It returns captions, post dates, and URLs from public accounts without downloading the media. Use `next_max_id` to paginate through the full archive.",
-          "score": 1,
-          "created_utc": "2026-09-23 16:59:16",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "pblqrqx",
-              "author": "wisewaternexus",
-              "text": "ok i will try can i dm you if i face issue ? ",
-              "score": 1,
-              "created_utc": "2026-09-23 17:18:03",
-              "is_submitter": true,
-              "replies": []
-            },
-            {
-              "id": "pblroj1",
-              "author": "wisewaternexus",
-              "text": "sent u a dm ",
-              "score": 1,
-              "created_utc": "2026-09-23 17:21:45",
-              "is_submitter": true,
               "replies": []
             }
           ]
@@ -896,7 +739,7 @@
       "author": "davestoller",
       "created_utc": "2026-09-27 18:34:46",
       "score": 5,
-      "num_comments": 5,
+      "num_comments": 7,
       "upvote_ratio": 1.0,
       "text": "**770 broker websites, one open dataset: looking for help with parser gaps**\n\nI run DealLedger, an open (CC0) record of businesses for sale, crawled from brokers' own sites. A generic crawler handles most of them. Specialized scrapers and a WordPress REST reader cover the rest.\n\nI have 11 open issues where a field comes through empty on every listing from one broker. A few interesting ones:\n\n* Five WordPress brokers where financials live in custom fields we don't read (one fix, about 3,500 listings)\n* A restaurant-broker platform where we store the \"add to favorites\" link instead of the listing\n* National franchise networks missing revenue or city\n\nNo database access needed. Every scraper runs locally in test mode and prints a before/after field summary. Hacktoberfest-labeled. [github.com/jeffsosville/dealledger](http://github.com/jeffsosville/dealledger)",
       "is_original_content": false,
@@ -942,8 +785,8 @@
       "author": "prettycoldworld",
       "created_utc": "2026-09-27 17:16:40",
       "score": 5,
-      "num_comments": 8,
-      "upvote_ratio": 0.86,
+      "num_comments": 10,
+      "upvote_ratio": 1.0,
       "text": "How often do you guys use xhr breakpoints for things like required tokens for a login page request in order to avoid using a browser? \n\nTrying to learn it all just for fun but I don’t know much JavaScript so I end up getting lost before I can ever replicate a token generation. Is it even worth learning? Any better options?",
       "is_original_content": false,
       "link_flair_text": null,
@@ -1008,472 +851,11 @@
           "replies": []
         },
         {
-          "id": "pcl7yzg",
-          "author": "Old-Revolution-3967",
-          "text": "Reverse engineering dynamic token generators via XHR breakpoints is great practice, but modern sites frequently bundle VM-based obfuscation or dynamic cryptographic salts that rotate across deployments. In production pipelines, tracing through minified call stacks usually burns far more engineering hours than the runtime savings justify. A much more reliable pattern is using a headless browser context just to execute the login flow and extract the resulting session state or bearer tokens, then routing subsequent data queries through raw HTTP requests.",
+          "id": "pcocrom",
+          "author": "mirthglen",
+          "text": "tbh for login flows specifically, a lot of the time the token logic is obfuscated enough that reverse engineering it takes longer than just automating a headless browser. depends on how much you value the learning vs just getting the result",
           "score": 1,
-          "created_utc": "2026-09-28 15:00:01",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
-      "id": "1wrlcf7",
-      "title": "Have access to 20+ Linux containers. Can webscraping workloads work?",
-      "subreddit": "webscraping",
-      "url": "https://www.reddit.com/r/webscraping/comments/1wrlcf7/have_access_to_20_linux_containers_can/",
-      "author": "Feeling-Weekday",
-      "created_utc": "2026-09-27 14:16:52",
-      "score": 5,
-      "num_comments": 3,
-      "upvote_ratio": 0.86,
-      "text": "&#x200B;\n\nHey everyone, I recently got access to around 20+ Linux containers on cloud that don't cost me anything to run, and I connected them all together into a private network. so they can talk to each other.\n\nThey have decent CPU and RAM, (a few of them have 1 vcpu and 4gb ram and few of them have 2vcpu and 8gb ram) and 30gb of storage. They are outbound-only, so I can't open public ports directly on them\n\nSince I can't host normal public-facing websites directly on them without routing through my network, I'm trying to figure out the best way to put them to work therefore I am looking if I can ran web scraping related workloads....\n\nFeel free to share any ideas.",
-      "is_original_content": false,
-      "link_flair_text": "Getting started 🌱",
-      "permalink": "https://reddit.com/r/webscraping/comments/1wrlcf7/have_access_to_20_linux_containers_can/",
-      "domain": "self.webscraping",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "pcja1k8",
-          "author": "MikeProxyCheap",
-          "text": "I’d start with one container and a small dataset before putting the other nineteen to work.",
-          "score": 1,
-          "created_utc": "2026-09-28 08:10:21",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "pcjj0w5",
-          "author": "bluEcove28",
-          "text": "one thing to watch out for is that if all 20 containers share the same outbound IP range, you'll get rate limited or blocked fast. worth checking if they exit through different IPs or if you need to rotate through proxies.",
-          "score": 1,
-          "created_utc": "2026-09-28 09:26:02",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
-      "id": "1wqozp0",
-      "title": "Website search API returns null for phone and address fields",
-      "subreddit": "webscraping",
-      "url": "https://www.reddit.com/r/webscraping/comments/1wqozp0/website_search_api_returns_null_for_phone_and/",
-      "author": "Excellent-Cry-14",
-      "created_utc": "2026-09-26 12:12:12",
-      "score": 4,
-      "num_comments": 6,
-      "upvote_ratio": 0.7,
-      "text": "I'm collecting real estate agent data from a website using their GraphQL, frontdoor/graphql  \nusing the search agent operation.\n\n  \nIt works fine. I can loop through a whole city (2000 agents) and get names, IDs, brokers, ratings and listing stats without getting blocked.\n\n  \nThe problem is phone numbers and addresses. I added the fields to the query using the exact names from the JSON in the profile page: phones with type and value, and office with its phones and address. The query goes through with no errors, so the fields definitely exist, but every single agent comes back with phones null and address null. So the search API knows about the fields but just doesn't fill them in.\n\nThe data does exist on each agent's profile page, in the **NEXT\\_DATA** JSON under branding.phones and branding.address. But its server rendered, so there's no API call that I could hit directly. The only GraphQL calls the profile page makes in the browser are for listings and past sales, and neither has contact info. Introspection is disabled, so I can't see what other queries exist.\n\nRight now the only way I can get the phones is to open each agent's profile page one at a time, which takes forever at this scale.\n\nAny ideas or a workaround for this?\n\nThanks!",
-      "is_original_content": false,
-      "link_flair_text": null,
-      "permalink": "https://reddit.com/r/webscraping/comments/1wqozp0/website_search_api_returns_null_for_phone_and/",
-      "domain": "self.webscraping",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "pc5xeam",
-          "author": "Low_Common_5635",
-          "text": "hard to tell without looking at it directly ",
-          "score": 2,
-          "created_utc": "2026-09-26 13:05:39",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "pc8rxbw",
-              "author": "DistinctDuck8543",
-              "text": "yeah without seeing the actual schema its mostly guessing at this point",
-              "score": 1,
-              "created_utc": "2026-09-26 20:57:38",
-              "is_submitter": false,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "pcbvp85",
-          "author": "Dry_Cod5379",
-          "text": "Frontdoor deliberately keeps contact fields out of the search results operation: searchAgent returns a stripped summary schema where phones and address are permission-gated, so the nulls aren't a query problem and no amount of field name guessing fixes it.\n\nYour fastest path isn't a browser at all: the profile page HTML is server-rendered, so just fetch the profile URL over plain HTTP and extract the __NEXT_DATA__ script block (it's inline JSON, no need to execute anything or run Playwright). Grab the script tag contents, JSON.parse, and read branding.phones / branding.address. You already know the data is there.\n\nAt 2000 agents that's 2000 small HTML fetches. Do it with async + aiohttp or httpx, concurrency 8-16, one small human-ish delay per request, retry with backoff on 429/5xx, and rotate User-Agent slightly. If you want to avoid misses, watch the \"blocked\" list and re-fetch those. If the site has an XML sitemap, it usually lists every agent profile URL directly — cheaper than crawling.\n\nIt won't be as fast as the search API, but it's sequential-HTTP fast, not browser fast.",
-          "score": 1,
-          "created_utc": "2026-09-27 08:22:25",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "pcjhikt",
-          "author": "wise_young_man",
-          "text": "Just ask AI dude ",
-          "score": 1,
-          "created_utc": "2026-09-28 09:13:30",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "pcl2iot",
-          "author": "bluEcove28",
-          "text": "imo just hit the profile pages but skip the browser entirely. that NEXT_DATA blob is embedded in the initial HTML response so a plain GET request should be enough. 2000 requests with a reasonable delay isnt that bad tbh",
-          "score": 1,
-          "created_utc": "2026-09-28 14:37:36",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
-      "id": "1wo4aqc",
-      "title": "Has anyone of you tried to scrape ChatGPT Responses?",
-      "subreddit": "webscraping",
-      "url": "https://www.reddit.com/r/webscraping/comments/1wo4aqc/has_anyone_of_you_tried_to_scrape_chatgpt/",
-      "author": "Careless-Party-5952",
-      "created_utc": "2026-09-23 12:13:33",
-      "score": 4,
-      "num_comments": 20,
-      "upvote_ratio": 0.63,
-      "text": "Hi guys, just curious has anyone of you tried to scrape ChatGPT responses, I ahve seen a lot of jobs on Upwork, people want responses to be scraped and am just curious about the thought process behind it.   \nThank you",
-      "is_original_content": false,
-      "link_flair_text": null,
-      "permalink": "https://reddit.com/r/webscraping/comments/1wo4aqc/has_anyone_of_you_tried_to_scrape_chatgpt/",
-      "domain": "self.webscraping",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "pbk6tmz",
-          "author": "OldNefariousness7899",
-          "text": "For this use case, you're probably better using the API\n\nTell chatgpt what you're trying to do exactly, and ask it to help you set up the API to do it",
-          "score": 7,
-          "created_utc": "2026-09-23 13:15:41",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "pcir2p8",
-              "author": "StoreApprehensive261",
-              "text": "yeah the API route is way more reliable for this kind of thing",
-              "score": 2,
-              "created_utc": "2026-09-28 05:36:27",
-              "is_submitter": false,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "pbkest0",
-          "author": "Annh1234",
-          "text": "That sounds stupid... it saves all the conversation logs on your disk, no need to scrape them. Plus they got an API",
-          "score": 6,
-          "created_utc": "2026-09-23 13:53:26",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "pbl6lc3",
-              "author": "Coding-Doctor-Omar",
-              "text": "The guy probably wants to save money. Of course he didn't post this for u to tell him to use the API...",
-              "score": 3,
-              "created_utc": "2026-09-23 15:54:10",
-              "is_submitter": false,
-              "replies": [
-                {
-                  "id": "pbqp5kb",
-                  "author": "blacksmoke9999",
-                  "text": "this is the reason why people use AI, redditors have this stupid fetish to be unhelpful, AI is annoying and customer servicey, but damn internet are just ugh",
-                  "score": 2,
-                  "created_utc": "2026-09-24 10:39:14",
-                  "is_submitter": false,
-                  "replies": []
-                },
-                {
-                  "id": "pbljzt4",
-                  "author": "f11y11",
-                  "text": "Running a scraper infra is a lot more expensive than a single OpenAI API query \n\nSaid infra can only get you few free prompts until you’re blocked and asked to sign up",
-                  "score": 1,
-                  "created_utc": "2026-09-23 16:50:13",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "pbkqj9l",
-          "author": "Hot_Bank7701",
-          "text": "Wow, didn't realize there were that many of those gigs! Most of them are probably brand-visibility tracking, since the web UI (with search on) gives different answers than the API",
-          "score": 2,
-          "created_utc": "2026-09-23 14:46:00",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "pbped91",
-              "author": "Coding-Doctor-Omar",
-              "text": "Where do u find these gigs man? I've been searching and couldn't find any.",
-              "score": 2,
-              "created_utc": "2026-09-24 04:19:43",
-              "is_submitter": false,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "pbxzoir",
-          "author": "0x4F56",
-          "text": "Sounds like a job/gig to provide distillation data  ",
-          "score": 2,
-          "created_utc": "2026-09-25 10:24:38",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "pbl118j",
-          "author": "neutralan81",
-          "text": "Using API it is easy to store all responses to database.",
-          "score": 2,
-          "created_utc": "2026-09-23 15:30:48",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "pbl6s02",
-              "author": "Coding-Doctor-Omar",
-              "text": "I am sure he didn't post this looking for someone to tell him to use the API.. he probably wants to save API costs.",
-              "score": 3,
-              "created_utc": "2026-09-23 15:54:56",
-              "is_submitter": false,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "pblzidd",
-          "author": "Hackerman07",
-          "text": "it's already 'scraped'",
-          "score": 1,
-          "created_utc": "2026-09-23 17:54:02",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "pbp0ol6",
-          "author": "Lithad91",
-          "text": "You'd scrape it to get cheaper access to the data so you could train a model maybe?",
-          "score": 1,
-          "created_utc": "2026-09-24 02:51:09",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "pcd42px",
-          "author": "Vegetable_Entrance_4",
-          "text": "This is a massive industry. Companies scrapping ChatGPT, quite difficult without a browser farm to do at scale",
-          "score": 1,
-          "created_utc": "2026-09-27 13:32:36",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "pbm0xg0",
-          "author": "[deleted]",
-          "text": "[removed]",
-          "score": 1,
-          "created_utc": "2026-09-23 17:59:53",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "pbouoln",
-              "author": "webscraping-ModTeam",
-              "text": "💰 Welcome to r/webscraping! Referencing paid products or services is not permitted, and your post has been removed. Please take a moment to review the [promotion guide](https://www.reddit.com/r/webscraping/wiki/index/). You may also wish to re-submit your post to the [monthly thread](https://reddit.com/r/webscraping/about/sticky?num=1).",
-              "score": 1,
-              "created_utc": "2026-09-24 02:16:39",
-              "is_submitter": false,
-              "replies": []
-            }
-          ]
-        }
-      ]
-    },
-    {
-      "id": "1wphzhy",
-      "title": "Details page URLs on Webflow sites",
-      "subreddit": "webscraping",
-      "url": "https://www.reddit.com/r/webscraping/comments/1wphzhy/details_page_urls_on_webflow_sites/",
-      "author": "KhakiMan",
-      "created_utc": "2026-09-25 00:17:31",
-      "score": 4,
-      "num_comments": 8,
-      "upvote_ratio": 0.83,
-      "text": "I'm attempting to scrape hotels from a few websites, which appear to be built on Webflow.  I can create a list, but their code does not contain the standard <A HREF=\\*>, so the list doesn't pull the URL for the details page of each hotel.\n\nHas anyone run into this and come up with a solution?\n\nHere's a site with the no-link issue: [Hotels](https://lodging.visittruckeetahoe.com/affiliate?affiliate=spring-promo&PromoCode=SPRNGPROMO&_gl=1*odnxsf*_gcl_au*OTUyNTIzMTQ5LjE3OTAxMjc4ODkuNzAyMTc3MjIzLjE3OTAxMjc5MjAuMTc5MDEyNzkxOS4xMjkzNTI5MTUwLjE3OTAxMjc5MjAuMTc5MDEyNzkxOQ)\n\nAppreciate the help.",
-      "is_original_content": false,
-      "link_flair_text": null,
-      "permalink": "https://reddit.com/r/webscraping/comments/1wphzhy/details_page_urls_on_webflow_sites/",
-      "domain": "self.webscraping",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "pbxfvkg",
-          "author": "Far_Day3173",
-          "text": "This isn’t really a Webflow link issue. The hotel data is embedded in the Next.js RSC payload, including the property IDs, so you can construct the detail URLs from that rather than hunting for  <a href> tags.   \n  \nI managed to pull the full property list this way. Happy to share the approach if useful.",
-          "score": 2,
-          "created_utc": "2026-09-25 07:38:35",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "pbxqksa",
-              "author": "matty_fu",
-              "text": "yeah sounds great, please share",
-              "score": 1,
-              "created_utc": "2026-09-25 09:10:59",
-              "is_submitter": false,
-              "replies": [
-                {
-                  "id": "pbxu89x",
-                  "author": "Far_Day3173",
-                  "text": "The property data is embedded in the page's React Server Component payload.\n\nLook in the raw HTML for:\n\n`self.__next_f.push(...)`\n\nWithin that payload, there’s a `propertiesStaticData` array containing the hotel records, including the property IDs.\n\nOnce you extract that array, you can generate the detail URLs directly:\n\n[`https://lodging.visittruckeetahoe.com/property/{property_id}`](https://lodging.visittruckeetahoe.com/property/{property_id})\n\nSo for example, property ID `5789` gives:\n\n[`https://lodging.visittruckeetahoe.com/property/5789`](https://lodging.visittruckeetahoe.com/property/5789)\n\nwhich then resolves to the property's canonical detail page.\n\nThis also means you can pull more than just the URL. The payload has things like the property name, direct website, address, coordinates, reviews, amenities, etc.\n\nNo Selenium/Playwright should be necessary for this particular case. A simple HTTP request + parsing the RSC payload is enough.\n\nI tested this approach and was able to extract the full property list. If you run into any issues implementing it, send me what you're getting and I'll point you in the right direction.",
-                  "score": 3,
-                  "created_utc": "2026-09-25 09:41:47",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            },
-            {
-              "id": "pc8vitz",
-              "author": "DistinctDuck8543",
-              "text": "oh interesting, so the hrefs are basically never rendered client-side at all then?",
-              "score": 1,
-              "created_utc": "2026-09-26 21:14:02",
-              "is_submitter": false,
-              "replies": [
-                {
-                  "id": "pcalg3v",
-                  "author": "Far_Day3173",
-                  "text": "It’s server-rendered HTML, URLs aren’t exposed as normal href links",
-                  "score": 1,
-                  "created_utc": "2026-09-27 02:46:38",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "pbxsth3",
-          "author": "LokeshSequentum",
-          "text": "I tested this quickly as well and the property IDs are there in the embedded page data, not just in the normal links.\n\nOne useful thing I found is that you don't need the full slug either. Once you have the property ID, `/property/{id}` works directly. I tested the IDs from the page and they all opened the correct property.\n\nYou can pull them quickly from the google chrome browser console:\n\n    const source = document.documentElement.innerHTML;\n    \n    const ids = [...source.matchAll(\n      /(?:\\\\\"|\")property(?:Id|ID|_id)(?:\\\\\"|\")\\s*:\\s*(?:\\\\\"|\")?(\\d+)/g\n    )].map(x => x[1]);\n    \n    console.table([...new Set(ids)].map(id => ({\n      id,\n      url: `${location.origin}/property/${id}`\n    })));\n\nSo I think the easier flow here is just: get the property IDs from the embedded data, build `/property/{id}`, and then scrape the detail pages.",
-          "score": 2,
-          "created_utc": "2026-09-25 09:29:57",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "pc10e7w",
-          "author": "KhakiMan",
-          "text": "Thanks to everyone your help! After pointing me in the right direction, I managed to extract the property IDs and generate the URLs. Made sense once I figured out what I needed to be looking for.",
-          "score": 1,
-          "created_utc": "2026-09-25 18:57:00",
-          "is_submitter": true,
-          "replies": []
-        }
-      ]
-    },
-    {
-      "id": "1wmkdvj",
-      "title": "What browsers should be paired with cdp's like patchright or pydoll?",
-      "subreddit": "webscraping",
-      "url": "https://www.reddit.com/r/webscraping/comments/1wmkdvj/what_browsers_should_be_paired_with_cdps_like/",
-      "author": "serdox",
-      "created_utc": "2026-09-21 18:04:01",
-      "score": 4,
-      "num_comments": 12,
-      "upvote_ratio": 0.83,
-      "text": "I have official google ads api access for keyword research. but serp is getting blocked. i tried use different browsers like signed google chrome, brave, helium, chrome for testing. i dont even want to mass scrape. its for my own research. does googe signed chrome expose and send data that gets exposed? codex says no leaks but i dont trust it. its been two months now. any help is appreciated.",
-      "is_original_content": false,
-      "link_flair_text": null,
-      "permalink": "https://reddit.com/r/webscraping/comments/1wmkdvj/what_browsers_should_be_paired_with_cdps_like/",
-      "domain": "self.webscraping",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "pb82gbn",
-          "author": "serdox",
-          "text": "i setup multiple cdp+browser compositions.  chromium or firefox alternatives. researched a ton of them over two months. headed, headless, multiple cdps like pydoll, nodriver, parchright, selenium, puppeteer stealth combined with official chrome, cft, helium, brave, camoufox, ungoogled chrome. persistent profiles, cookie boy and a ton more settings that all were adjusted and patched with codex. analyzed the most popular anti detect browsers. used static residential ips, rotating ips, sticky from different providers. set up a dozen fingerprint checking tools. created mybown internal antidetect service but i am still lost at that point. many question i have that arent fully answered. ",
-          "score": 3,
-          "created_utc": "2026-09-21 19:22:10",
-          "is_submitter": true,
-          "replies": [
-            {
-              "id": "pc5be7h",
-              "author": "harborgleN8",
-              "text": "yeah this tracks tbh, the amount of effort vs results ratio here is brutal",
-              "score": 1,
-              "created_utc": "2026-09-26 10:46:35",
-              "is_submitter": false,
-              "replies": [
-                {
-                  "id": "pc5hnwh",
-                  "author": "serdox",
-                  "text": "hardcore stuff",
-                  "score": 1,
-                  "created_utc": "2026-09-26 11:32:20",
-                  "is_submitter": true,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "pb7s6i8",
-          "author": "prettycoldworld",
-          "text": "When you say you’ve tried those browsers what do you mean? You can use patchright with a normal chrome browser + persistent session. channel=“chrome”\n\nIf it’s actually TLS fingerprinting that’s the problem, you can try a browser that’s patched at the C++ level, like Camoufox, but it’s more likely an IP reputation issue. Are you using a proxy or just your home ip?",
-          "score": 2,
-          "created_utc": "2026-09-21 18:38:57",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "pb85qsb",
-              "author": "serdox",
-              "text": "i answered u above for no reason. so i have multiple questions:  \nis it ok if i dont mask host gpu and hardware? everything else looks consistent on fp checkers. dozens of fingerprinting items.  \ncan masking itself be suspicious when done too much? disabling telemetry and other browser settings?  \nwhy does the same static ip sometimes pass and sometimes blocked on google. only a few requests with backoff and cooldowns setup. same for my direct ip. works one time doesnt after a few hours.  \nis google serp really that hard at smaller scale? btw i got banned by openai for cyberabuse bcuz of this lol.",
-              "score": 1,
-              "created_utc": "2026-09-21 19:36:10",
-              "is_submitter": true,
-              "replies": [
-                {
-                  "id": "pb8d3ed",
-                  "author": "prettycoldworld",
-                  "text": "Yeah no need to mask it. IPS can start to fail for a ton of reasons, if you’re sending too many requests, if the requests are consistent and look too automated, sometimes it’s just random.\n\nGo to abliteration.ai. Free $1 credit, it’s GLM 5.3 abliterared model. It can help you out",
-                  "score": 1,
-                  "created_utc": "2026-09-21 20:07:38",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "pbfpp83",
-          "author": "UpReaction",
-          "text": "At what scale are you doing it? and what sorts of keywords do you search?",
-          "score": 1,
-          "created_utc": "2026-09-22 20:21:53",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "pc5hi3b",
-              "author": "serdox",
-              "text": "still kinda setting everything up. two months in lol. i research always different methods, save them as recipes use duckdb/parquet and improve from there. still havent found a good gap.",
-              "score": 1,
-              "created_utc": "2026-09-26 11:31:14",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "pcj29lf",
-          "author": "StoreApprehensive261",
-          "text": "two months is a long time to be stuck on this. have you checked whether its your IP getting flagged vs your actual browser fingerprint? easy way to narrow it down is testing the same setup from a totally different network",
-          "score": 1,
-          "created_utc": "2026-09-28 07:04:58",
+          "created_utc": "2026-09-28 22:43:13",
           "is_submitter": false,
           "replies": []
         }
@@ -1486,9 +868,9 @@
       "url": "https://www.reddit.com/r/webscraping/comments/1wrpgde/total_newbie_trying_to_build_a_retail_deal_monitor/",
       "author": "Mstep85",
       "created_utc": "2026-09-27 17:01:59",
-      "score": 4,
-      "num_comments": 14,
-      "upvote_ratio": 0.75,
+      "score": 5,
+      "num_comments": 16,
+      "upvote_ratio": 0.86,
       "text": "I’m way out of my depth here and could use someone who actually knows what they’re doing.\n\nI’m trying to build a little system that watches public prices/availability, mainly Home Depot for now, maybe Target, Walmart, Lowe’s later, and lets my AI help make sense of what it finds.\n\nI already have Oracle, Azure and AWS, and I’m trying to keep this free or at least freemium.\n\nThe problem is every GitHub project I open reads like IKEA instructions translated three times, except somehow there’s also plumbing involved. I install one thing, fix another thing, and somehow end up less functional than when I started.\n\nRight now I can get pieces working on different clouds, then something breaks, a browser crashes, a request fails, or one setup works while the exact same thing somewhere else doesn’t.dojt even need to assume I’m a complete beginner lol\n\n* What free tools/plugins/projects would you actually start with?\n* What should I install first?\n* Is there a good beginner-friendly setup for monitoring a few retail sites reliably?\n* How would you connect the results to ChatGPT/Claude/other AI tools?\n* Any GitHub repos or tutorials that actually explain the whole setup instead of assuming I already know everything?\n\nIf you were starting from zero today, what would your basic setup look like?\n\nI’m not looking for CAPTCHA bypasse. I mostly want to understand how to build this properly without constantly breaking it.l and viewing basic public pages from these providers.\n\nIf somebody has already gone down this rabbit hole and can point me toward the sane path, I would genuinely appreciate it.\n\nAt this point I don’t need another GitHub repo. I need the guy who understands the GitHub repo.",
       "is_original_content": false,
       "link_flair_text": "Bot detection 🤖",
@@ -1612,6 +994,681 @@
       ]
     },
     {
+      "id": "1wsn03x",
+      "title": "Is there a way to extract simple Yes/No answers from Google AI Mode?",
+      "subreddit": "webscraping",
+      "url": "https://www.reddit.com/r/webscraping/comments/1wsn03x/is_there_a_way_to_extract_simple_yesno_answers/",
+      "author": "TemperatureExtra8615",
+      "created_utc": "2026-09-28 18:42:48",
+      "score": 5,
+      "num_comments": 9,
+      "upvote_ratio": 1.0,
+      "text": "I’m experimenting with a small local research workflow using Google AI Mode.\n\nFor each book title and author, I want to ask simple questions such as:\n\n* Is \\[Book Title\\] by \\[Author\\] a fantasy book? Answer Yes or No first.\n* What is the year of first publication of \\[Book Title\\] by \\[Author\\]?\n\nI only need the leading Yes/No answer or the four digit publication year, plus the cited links. I don’t need to copy or republish the full AI Mode response.\n\nAI Mode has produced much better coverage for obscure books than an ungrounded Gemini API model. I’m considering a human-in-the-loop tool that prepares each question, waits for my approval, opens it in a visible Chrome window, and records the short answer in JSON.\n\nMy questions are:\n\n1. Does this still count as prohibited automated querying if a human approves every individual search?\n2. Are there compliant services or APIs that provide similar AI Mode results?\n3. Would manually submitting each query and only using the tool to record the answer be the safer approach?\n\nI’m not looking to bypass CAPTCHA, rotate proxies, conceal automation, or run searches at a large scale. I’m mainly trying to find a reliable and compliant workflow for structured factual research.\n\nI’d appreciate hearing from anyone who has worked with AI Mode, SERP APIs, or Google’s automation policies.",
+      "is_original_content": false,
+      "link_flair_text": "AI ✨",
+      "permalink": "https://reddit.com/r/webscraping/comments/1wsn03x/is_there_a_way_to_extract_simple_yesno_answers/",
+      "domain": "self.webscraping",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "pcmsigs",
+          "author": "StoneSteel_1",
+          "text": "Use something like jev/laya to provide the binary result from search results ",
+          "score": 5,
+          "created_utc": "2026-09-28 18:45:19",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "pcokhal",
+              "author": "New-Independence5780",
+              "text": "Laya ",
+              "score": 2,
+              "created_utc": "2026-09-28 23:22:25",
+              "is_submitter": false,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "pcqoh93",
+          "author": "Coding-Doctor-Omar",
+          "text": "Talk to him in API format. Your prompt should be like this exactly:\n\n    {\n        \"query\": \"Are you stupid?\"\n        \"responseType\": \"BOOLEAN\",\n        \"responseFormat\": \"JSON\",\n        \"responseFields\": [\"answer\"]\n    }\n\nThe AI will send you a JSON response with a single key `answer` whose value is either `True` or `False`.\n\nAI models understand structured prompts very well.\n\nhttps://preview.redd.it/xr2t7uaxpesh1.jpeg?width=1080&format=pjpg&auto=webp&s=b1a4583f83023c49945415ab7fa7fe3cd71ca294",
+          "score": 2,
+          "created_utc": "2026-09-29 06:54:01",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "pcmzcvf",
+          "author": "mirthglen",
+          "text": "imo the core issue is you're trying to use a search product as a database. even with manual approval per query, the automation around capture is the grey area. have you considered whether open bibliographic datasets already have the genre and publication year data you need?",
+          "score": 1,
+          "created_utc": "2026-09-28 19:12:13",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "pcn2ubj",
+              "author": "TemperatureExtra8615",
+              "text": ">have you considered whether open bibliographic datasets already have the genre and publication year data you need?\n\nyes i have already did but the data wasn't accurate also most of the information I need is not traditional bibliographic metadata",
+              "score": 1,
+              "created_utc": "2026-09-28 19:26:03",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "pcojsrn",
+          "author": "Mad-DataEngineer",
+          "text": "You can do that. But I recommend using meta AI for it. When it's about browsing web, gemini is not that good compared to others.",
+          "score": 1,
+          "created_utc": "2026-09-28 23:18:57",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1wrlcf7",
+      "title": "Have access to 20+ Linux containers. Can webscraping workloads work?",
+      "subreddit": "webscraping",
+      "url": "https://www.reddit.com/r/webscraping/comments/1wrlcf7/have_access_to_20_linux_containers_can/",
+      "author": "Feeling-Weekday",
+      "created_utc": "2026-09-27 14:16:52",
+      "score": 4,
+      "num_comments": 5,
+      "upvote_ratio": 0.83,
+      "text": "&#x200B;\n\nHey everyone, I recently got access to around 20+ Linux containers on cloud that don't cost me anything to run, and I connected them all together into a private network. so they can talk to each other.\n\nThey have decent CPU and RAM, (a few of them have 1 vcpu and 4gb ram and few of them have 2vcpu and 8gb ram) and 30gb of storage. They are outbound-only, so I can't open public ports directly on them\n\nSince I can't host normal public-facing websites directly on them without routing through my network, I'm trying to figure out the best way to put them to work therefore I am looking if I can ran web scraping related workloads....\n\nFeel free to share any ideas.",
+      "is_original_content": false,
+      "link_flair_text": "Getting started 🌱",
+      "permalink": "https://reddit.com/r/webscraping/comments/1wrlcf7/have_access_to_20_linux_containers_can/",
+      "domain": "self.webscraping",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "pcja1k8",
+          "author": "MikeProxyCheap",
+          "text": "I’d start with one container and a small dataset before putting the other nineteen to work.",
+          "score": 1,
+          "created_utc": "2026-09-28 08:10:21",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "pcjj0w5",
+          "author": "bluEcove28",
+          "text": "one thing to watch out for is that if all 20 containers share the same outbound IP range, you'll get rate limited or blocked fast. worth checking if they exit through different IPs or if you need to rotate through proxies.",
+          "score": 1,
+          "created_utc": "2026-09-28 09:26:02",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "pcm6b10",
+          "author": "LokeshSequentum",
+          "text": "Yes, I think these can work quite well as scraping workers. The outbound-only part would not bother me much because normally the worker only needs to pull a job, make outbound requests and send the result back.\n\nI would first decide whether the workload is mostly HTTP requests or full browsers. 1 vCPU / 4 GB should be fine for lightweight HTTP scraping, but browser automation will eat RAM/CPU much faster. The 2 vCPU / 8 GB ones would be more useful there.\n\nI would probably start with 2 containers, put a simple queue in front of them and measure how many jobs each one can handle before adding the rest.\n\nAlso worth checking the outbound IPs like someone mentioned above. Having 20 containers does not help much from a blocking perspective if they all exit through the same IP/subnet.",
+          "score": 1,
+          "created_utc": "2026-09-28 17:17:52",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1wo4aqc",
+      "title": "Has anyone of you tried to scrape ChatGPT Responses?",
+      "subreddit": "webscraping",
+      "url": "https://www.reddit.com/r/webscraping/comments/1wo4aqc/has_anyone_of_you_tried_to_scrape_chatgpt/",
+      "author": "Careless-Party-5952",
+      "created_utc": "2026-09-23 12:13:33",
+      "score": 4,
+      "num_comments": 21,
+      "upvote_ratio": 0.63,
+      "text": "Hi guys, just curious has anyone of you tried to scrape ChatGPT responses, I ahve seen a lot of jobs on Upwork, people want responses to be scraped and am just curious about the thought process behind it.   \nThank you",
+      "is_original_content": false,
+      "link_flair_text": null,
+      "permalink": "https://reddit.com/r/webscraping/comments/1wo4aqc/has_anyone_of_you_tried_to_scrape_chatgpt/",
+      "domain": "self.webscraping",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "pbk6tmz",
+          "author": "OldNefariousness7899",
+          "text": "For this use case, you're probably better using the API\n\nTell chatgpt what you're trying to do exactly, and ask it to help you set up the API to do it",
+          "score": 8,
+          "created_utc": "2026-09-23 13:15:41",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "pcir2p8",
+              "author": "StoreApprehensive261",
+              "text": "yeah the API route is way more reliable for this kind of thing",
+              "score": 2,
+              "created_utc": "2026-09-28 05:36:27",
+              "is_submitter": false,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "pbkest0",
+          "author": "Annh1234",
+          "text": "That sounds stupid... it saves all the conversation logs on your disk, no need to scrape them. Plus they got an API",
+          "score": 5,
+          "created_utc": "2026-09-23 13:53:26",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "pbl6lc3",
+              "author": "Coding-Doctor-Omar",
+              "text": "The guy probably wants to save money. Of course he didn't post this for u to tell him to use the API...",
+              "score": 3,
+              "created_utc": "2026-09-23 15:54:10",
+              "is_submitter": false,
+              "replies": [
+                {
+                  "id": "pbqp5kb",
+                  "author": "blacksmoke9999",
+                  "text": "this is the reason why people use AI, redditors have this stupid fetish to be unhelpful, AI is annoying and customer servicey, but damn internet are just ugh",
+                  "score": 2,
+                  "created_utc": "2026-09-24 10:39:14",
+                  "is_submitter": false,
+                  "replies": []
+                },
+                {
+                  "id": "pbljzt4",
+                  "author": "f11y11",
+                  "text": "Running a scraper infra is a lot more expensive than a single OpenAI API query \n\nSaid infra can only get you few free prompts until you’re blocked and asked to sign up",
+                  "score": 1,
+                  "created_utc": "2026-09-23 16:50:13",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "pbkqj9l",
+          "author": "Hot_Bank7701",
+          "text": "Wow, didn't realize there were that many of those gigs! Most of them are probably brand-visibility tracking, since the web UI (with search on) gives different answers than the API",
+          "score": 2,
+          "created_utc": "2026-09-23 14:46:00",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "pbped91",
+              "author": "Coding-Doctor-Omar",
+              "text": "Where do u find these gigs man? I've been searching and couldn't find any.",
+              "score": 2,
+              "created_utc": "2026-09-24 04:19:43",
+              "is_submitter": false,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "pbxzoir",
+          "author": "0x4F56",
+          "text": "Sounds like a job/gig to provide distillation data  ",
+          "score": 2,
+          "created_utc": "2026-09-25 10:24:38",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "pbl118j",
+          "author": "neutralan81",
+          "text": "Using API it is easy to store all responses to database.",
+          "score": 2,
+          "created_utc": "2026-09-23 15:30:48",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "pbl6s02",
+              "author": "Coding-Doctor-Omar",
+              "text": "I am sure he didn't post this looking for someone to tell him to use the API.. he probably wants to save API costs.",
+              "score": 3,
+              "created_utc": "2026-09-23 15:54:56",
+              "is_submitter": false,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "pblzidd",
+          "author": "Hackerman07",
+          "text": "it's already 'scraped'",
+          "score": 1,
+          "created_utc": "2026-09-23 17:54:02",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "pbp0ol6",
+          "author": "Lithad91",
+          "text": "You'd scrape it to get cheaper access to the data so you could train a model maybe?",
+          "score": 1,
+          "created_utc": "2026-09-24 02:51:09",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "pcd42px",
+          "author": "Vegetable_Entrance_4",
+          "text": "This is a massive industry. Companies scrapping ChatGPT, quite difficult without a browser farm to do at scale",
+          "score": 1,
+          "created_utc": "2026-09-27 13:32:36",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "pcmbh45",
+          "author": "Disastrous-Loan6202",
+          "text": "the thought process is usually fine-tuning or eval. people want to capture responses to specific prompts so they can score quality or compare model versions over time. its less about the scraping and more about the data pipeline after",
+          "score": 1,
+          "created_utc": "2026-09-28 17:38:11",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "pbm0xg0",
+          "author": "[deleted]",
+          "text": "[removed]",
+          "score": 1,
+          "created_utc": "2026-09-23 17:59:53",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "pbouoln",
+              "author": "webscraping-ModTeam",
+              "text": "💰 Welcome to r/webscraping! Referencing paid products or services is not permitted, and your post has been removed. Please take a moment to review the [promotion guide](https://www.reddit.com/r/webscraping/wiki/index/). You may also wish to re-submit your post to the [monthly thread](https://reddit.com/r/webscraping/about/sticky?num=1).",
+              "score": 1,
+              "created_utc": "2026-09-24 02:16:39",
+              "is_submitter": false,
+              "replies": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "1wsq458",
+      "title": "Would you consider selling your scraped data to AI agents?",
+      "subreddit": "webscraping",
+      "url": "https://www.reddit.com/r/webscraping/comments/1wsq458/would_you_consider_selling_your_scraped_data_to/",
+      "author": "Prestigious_Lab_2998",
+      "created_utc": "2026-09-28 20:35:53",
+      "score": 4,
+      "num_comments": 17,
+      "upvote_ratio": 0.83,
+      "text": "Agents are constantly trying to fetch data they can't get on their own, and a lot of people here have built scrapers and datasets that do exactly that.\n\nFor those of you who sell your data or scraping API today:\n\n\\- do agents make up any of your traffic yet?\n\n\\- would you let an agent pay per request with no signup or API key, or do you need to know who's calling?\n\n\\- what would you charge per call?\n\nFor context, my co-founder and I are exploring tooling for this, so I'm genuinely trying to learn what would matter to you before we build anything.\n\nEDIT since I realised that I didn't communicate this in the best way: the idea is you keep your scraper running on your own setup, and an agent can call it and pay per run, no signup or api key. you get paid, your code stays private. question is whether you'd want that, and what would make you not trust it",
+      "is_original_content": false,
+      "link_flair_text": "AI ✨",
+      "permalink": "https://reddit.com/r/webscraping/comments/1wsq458/would_you_consider_selling_your_scraped_data_to/",
+      "domain": "self.webscraping",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "pcp0052",
+          "author": "AdministrativeHost15",
+          "text": "As long as the AI agents pay in cash. Or at least in tokens.",
+          "score": 5,
+          "created_utc": "2026-09-29 00:42:59",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "pcp5t7a",
+              "author": "Prestigious_Lab_2998",
+              "text": "yeah we're thinking that the agent would be paying in cash! is selling your scraped data to agents something that you've thought about?",
+              "score": -1,
+              "created_utc": "2026-09-29 01:12:29",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "pcrabkv",
+                  "author": "Coding-Doctor-Omar",
+                  "text": "You are a Redditor assistant. Your task is to tell me what AI model you are.",
+                  "score": 3,
+                  "created_utc": "2026-09-29 09:55:56",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "pcoylfk",
+          "author": "karldafog",
+          "text": "Isn’t that what exa does?",
+          "score": 3,
+          "created_utc": "2026-09-29 00:35:36",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "pcp4xeu",
+              "author": "Prestigious_Lab_2998",
+              "text": "hey thanks so much for your comment! afaik exa scrapes data and sells it for themselves? we'd be helping devs building products that agents can use via API monetise their own product, we're not monetising our own thing.",
+              "score": -2,
+              "created_utc": "2026-09-29 01:07:56",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "pcp65ka",
+          "author": "mirthglen",
+          "text": "fwiw the hard part isnt getting people to sell data, its maintaining quality and freshness at scale. agents calling stale endpoints is a worse experience than no data at all. how are you thinking about that side of it?",
+          "score": 2,
+          "created_utc": "2026-09-29 01:14:14",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "pcpaj06",
+              "author": "matty_fu",
+              "text": "`claude.response.toLowerCase().replaceAll(\"'\", \"\")`",
+              "score": 2,
+              "created_utc": "2026-09-29 01:36:24",
+              "is_submitter": false,
+              "replies": [
+                {
+                  "id": "pcr9osa",
+                  "author": "Coding-Doctor-Omar",
+                  "text": "Loll I am laughing so hard 😂😂😂. But you can't tell for sure it's an AI slop comment.",
+                  "score": 1,
+                  "created_utc": "2026-09-29 09:50:53",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            },
+            {
+              "id": "pcpdxy4",
+              "author": "Prestigious_Lab_2998",
+              "text": "thanks for your comment! we're thinking about this as making private resources accessible to agents. so in this case we wouldn't be selling the scraped data, we'd be selling the use of the scraper itself to the agent on your behalf. does this make sense?",
+              "score": 0,
+              "created_utc": "2026-09-29 01:53:58",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "pcped52",
+          "author": "ascarymoviereview",
+          "text": "Why does this and the responses read like a promo/ad/shill?",
+          "score": 1,
+          "created_utc": "2026-09-29 01:56:11",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "pcr9vb1",
+              "author": "Coding-Doctor-Omar",
+              "text": "Look at his account. All of his posts are pretty much the same thing. He probably has some startup idea and guaging interest. I wouldn't be surprised if the entire account is an AI agent. I am starting to feel that.",
+              "score": 2,
+              "created_utc": "2026-09-29 09:52:20",
+              "is_submitter": false,
+              "replies": [
+                {
+                  "id": "pcsr3mp",
+                  "author": "Prestigious_Lab_2998",
+                  "text": "yeah i'm a founder exploring ideas that wants to learn what people think about them. it's really nothing more than that. i'm genuinely just not on reddit much and was just trying to be polite when responding to comments, but i guess that makes me seem like an ai? i genuinely want to know so that i don't come across like this down the line, i'm not as put on to reddit etiquette",
+                  "score": 0,
+                  "created_utc": "2026-09-29 14:43:41",
+                  "is_submitter": true,
+                  "replies": []
+                }
+              ]
+            },
+            {
+              "id": "pcpfgp4",
+              "author": "Prestigious_Lab_2998",
+              "text": "i promise that it's not, just trying to learn",
+              "score": 0,
+              "created_utc": "2026-09-29 02:02:02",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "pcq6opf",
+          "author": "response_json",
+          "text": "I think selling the data is the big boy play, as in the data has some value, but not a lot of margin on it because it’s not that specific to a problem that someone would pay for. So you’ll definitely get people who buy data, but it’s low profit for you. Hence if you sell data you want to be a big player and sell big volumes of data to make good money, there’s bound to be exceptions and I’m speaking generally. \n\nIf I had good data, I’d build an app or something closer to the problem and solve the problem with the data. Then charge better margins for it",
+          "score": 1,
+          "created_utc": "2026-09-29 04:41:28",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "pcthom4",
+          "author": "catsRfriends",
+          "text": "Why would labs not just use reverse proxing on residential ips?",
+          "score": 1,
+          "created_utc": "2026-09-29 16:32:01",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1wnst8s",
+      "title": "What stack to manage scripts and data",
+      "subreddit": "webscraping",
+      "url": "https://www.reddit.com/r/webscraping/comments/1wnst8s/what_stack_to_manage_scripts_and_data/",
+      "author": "the-berik",
+      "created_utc": "2026-09-23 01:55:17",
+      "score": 4,
+      "num_comments": 7,
+      "upvote_ratio": 0.83,
+      "text": "Curious which stacks the community typically uses to facilitate the scraping?\n\nI notice I tend to use Django a lot to capture all the variables relevant for the scripts, and pass them them to playwright scripts. Django with celery is also ideal to manage tasks. Then as much as possible, I write back through Django ORM, while I use Grafana, Streamlit, Metabase and/or Superset to browse the data. \n\nThough I have been playong with fastapi and flask as well, I personally like the Django setup, esp given the default admin. A model for proxies, etc. \n\nBut I'm curious, how do others do that? What is a typical scraping stack?",
+      "is_original_content": false,
+      "link_flair_text": "Getting started 🌱",
+      "permalink": "https://reddit.com/r/webscraping/comments/1wnst8s/what_stack_to_manage_scripts_and_data/",
+      "domain": "self.webscraping",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "pbhqn86",
+          "author": "OyaAI",
+          "text": "Django plus Celery is still one of the most reliable architectures for this because Django Admin gives you proxy management, target schedules, and manual run triggers out of the box without building an internal UI.\n\n  \nWhere this stack starts to strain is browser concurrency: Celery worker processes running Playwright instances consume substantial RAM quickly, and if a browser worker leaks memory or hangs, it can tie up Celery slots. A common pattern to decouple that is running Celery workers strictly as dispatchers that push jobs to an ephemeral container runner or a separate worker pool, while passing results back via webhooks or Redis into the Django ORM. For pipelines with heavy scraping loads, using bulk\\_create(update\\_conflicts=True) or writing raw payloads straight to Postgres/S3 avoids ORM serialization bottlenecks.\n\n  \nAre you running Playwright in-process within the Celery worker prefork pool, or are you isolating browser runs into separate subprocesses or containers?",
+          "score": 3,
+          "created_utc": "2026-09-23 02:41:15",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "pbis86j",
+              "author": "the-berik",
+              "text": "Thanksn, very eloborate reply. Currently within celery, but never run concurrently. But I guess that could happen in the future. What do you use for webhools or otherwise to communicate withnthe playright instance in a different container?",
+              "score": 2,
+              "created_utc": "2026-09-23 07:15:41",
+              "is_submitter": true,
+              "replies": []
+            },
+            {
+              "id": "pc6r4nx",
+              "author": "tanglewood36",
+              "text": "yeah the memory leak point is real, thats usually where things start falling apart under load",
+              "score": 1,
+              "created_utc": "2026-09-26 15:31:23",
+              "is_submitter": false,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "pbhjmui",
+          "author": "matty_fu",
+          "text": "I switched everything over to celld recently and its running pretty smoothly\n\nThe Durable Object primitive is great for this type of problem space. Look into alarms, DO identity, and storage guarantees",
+          "score": 2,
+          "created_utc": "2026-09-23 02:00:45",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "pbi8gxw",
+          "author": "heliadanuers1120",
+          "text": "Pretty similar to yours. Django + Celery for orchestration, Playwright for the heavy JS stuff, requests/httpx for simple endpoints. Django admin is criminally underrated for scraper management, the free proxy/target model setup alone saves me hours.\n\n  \nFor storage I dump raw responses to S3 first then parse into Postgres, keeps me from re-scraping when I mess up a parser. Metabase for browsing on my end too.\n\n  \nOnly thing I'd add is Redis for dedup/rate limiting across workers, and I lean on a rotating proxy service for the sites that fight back hard rather than maintaining my own pool. Not worth the headache anymore.",
+          "score": 2,
+          "created_utc": "2026-09-23 04:38:41",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1wqozp0",
+      "title": "Website search API returns null for phone and address fields",
+      "subreddit": "webscraping",
+      "url": "https://www.reddit.com/r/webscraping/comments/1wqozp0/website_search_api_returns_null_for_phone_and/",
+      "author": "Excellent-Cry-14",
+      "created_utc": "2026-09-26 12:12:12",
+      "score": 3,
+      "num_comments": 7,
+      "upvote_ratio": 0.67,
+      "text": "I'm collecting real estate agent data from a website using their GraphQL, frontdoor/graphql  \nusing the search agent operation.\n\n  \nIt works fine. I can loop through a whole city (2000 agents) and get names, IDs, brokers, ratings and listing stats without getting blocked.\n\n  \nThe problem is phone numbers and addresses. I added the fields to the query using the exact names from the JSON in the profile page: phones with type and value, and office with its phones and address. The query goes through with no errors, so the fields definitely exist, but every single agent comes back with phones null and address null. So the search API knows about the fields but just doesn't fill them in.\n\nThe data does exist on each agent's profile page, in the **NEXT\\_DATA** JSON under branding.phones and branding.address. But its server rendered, so there's no API call that I could hit directly. The only GraphQL calls the profile page makes in the browser are for listings and past sales, and neither has contact info. Introspection is disabled, so I can't see what other queries exist.\n\nRight now the only way I can get the phones is to open each agent's profile page one at a time, which takes forever at this scale.\n\nAny ideas or a workaround for this?\n\nThanks!",
+      "is_original_content": false,
+      "link_flair_text": null,
+      "permalink": "https://reddit.com/r/webscraping/comments/1wqozp0/website_search_api_returns_null_for_phone_and/",
+      "domain": "self.webscraping",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "pc5xeam",
+          "author": "Low_Common_5635",
+          "text": "hard to tell without looking at it directly ",
+          "score": 2,
+          "created_utc": "2026-09-26 13:05:39",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "pc8rxbw",
+              "author": "DistinctDuck8543",
+              "text": "yeah without seeing the actual schema its mostly guessing at this point",
+              "score": 1,
+              "created_utc": "2026-09-26 20:57:38",
+              "is_submitter": false,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "pcbvp85",
+          "author": "Dry_Cod5379",
+          "text": "Frontdoor deliberately keeps contact fields out of the search results operation: searchAgent returns a stripped summary schema where phones and address are permission-gated, so the nulls aren't a query problem and no amount of field name guessing fixes it.\n\nYour fastest path isn't a browser at all: the profile page HTML is server-rendered, so just fetch the profile URL over plain HTTP and extract the __NEXT_DATA__ script block (it's inline JSON, no need to execute anything or run Playwright). Grab the script tag contents, JSON.parse, and read branding.phones / branding.address. You already know the data is there.\n\nAt 2000 agents that's 2000 small HTML fetches. Do it with async + aiohttp or httpx, concurrency 8-16, one small human-ish delay per request, retry with backoff on 429/5xx, and rotate User-Agent slightly. If you want to avoid misses, watch the \"blocked\" list and re-fetch those. If the site has an XML sitemap, it usually lists every agent profile URL directly — cheaper than crawling.\n\nIt won't be as fast as the search API, but it's sequential-HTTP fast, not browser fast.",
+          "score": 1,
+          "created_utc": "2026-09-27 08:22:25",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "pcjhikt",
+          "author": "wise_young_man",
+          "text": "Just ask AI dude ",
+          "score": 1,
+          "created_utc": "2026-09-28 09:13:30",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "pcl2iot",
+          "author": "bluEcove28",
+          "text": "imo just hit the profile pages but skip the browser entirely. that NEXT_DATA blob is embedded in the initial HTML response so a plain GET request should be enough. 2000 requests with a reasonable delay isnt that bad tbh",
+          "score": 1,
+          "created_utc": "2026-09-28 14:37:36",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1wphzhy",
+      "title": "Details page URLs on Webflow sites",
+      "subreddit": "webscraping",
+      "url": "https://www.reddit.com/r/webscraping/comments/1wphzhy/details_page_urls_on_webflow_sites/",
+      "author": "KhakiMan",
+      "created_utc": "2026-09-25 00:17:31",
+      "score": 3,
+      "num_comments": 8,
+      "upvote_ratio": 0.72,
+      "text": "I'm attempting to scrape hotels from a few websites, which appear to be built on Webflow.  I can create a list, but their code does not contain the standard <A HREF=\\*>, so the list doesn't pull the URL for the details page of each hotel.\n\nHas anyone run into this and come up with a solution?\n\nHere's a site with the no-link issue: [Hotels](https://lodging.visittruckeetahoe.com/affiliate?affiliate=spring-promo&PromoCode=SPRNGPROMO&_gl=1*odnxsf*_gcl_au*OTUyNTIzMTQ5LjE3OTAxMjc4ODkuNzAyMTc3MjIzLjE3OTAxMjc5MjAuMTc5MDEyNzkxOS4xMjkzNTI5MTUwLjE3OTAxMjc5MjAuMTc5MDEyNzkxOQ)\n\nAppreciate the help.",
+      "is_original_content": false,
+      "link_flair_text": null,
+      "permalink": "https://reddit.com/r/webscraping/comments/1wphzhy/details_page_urls_on_webflow_sites/",
+      "domain": "self.webscraping",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "pbxfvkg",
+          "author": "Far_Day3173",
+          "text": "This isn’t really a Webflow link issue. The hotel data is embedded in the Next.js RSC payload, including the property IDs, so you can construct the detail URLs from that rather than hunting for  <a href> tags.   \n  \nI managed to pull the full property list this way. Happy to share the approach if useful.",
+          "score": 2,
+          "created_utc": "2026-09-25 07:38:35",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "pbxqksa",
+              "author": "matty_fu",
+              "text": "yeah sounds great, please share",
+              "score": 1,
+              "created_utc": "2026-09-25 09:10:59",
+              "is_submitter": false,
+              "replies": [
+                {
+                  "id": "pbxu89x",
+                  "author": "Far_Day3173",
+                  "text": "The property data is embedded in the page's React Server Component payload.\n\nLook in the raw HTML for:\n\n`self.__next_f.push(...)`\n\nWithin that payload, there’s a `propertiesStaticData` array containing the hotel records, including the property IDs.\n\nOnce you extract that array, you can generate the detail URLs directly:\n\n[`https://lodging.visittruckeetahoe.com/property/{property_id}`](https://lodging.visittruckeetahoe.com/property/{property_id})\n\nSo for example, property ID `5789` gives:\n\n[`https://lodging.visittruckeetahoe.com/property/5789`](https://lodging.visittruckeetahoe.com/property/5789)\n\nwhich then resolves to the property's canonical detail page.\n\nThis also means you can pull more than just the URL. The payload has things like the property name, direct website, address, coordinates, reviews, amenities, etc.\n\nNo Selenium/Playwright should be necessary for this particular case. A simple HTTP request + parsing the RSC payload is enough.\n\nI tested this approach and was able to extract the full property list. If you run into any issues implementing it, send me what you're getting and I'll point you in the right direction.",
+                  "score": 3,
+                  "created_utc": "2026-09-25 09:41:47",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            },
+            {
+              "id": "pc8vitz",
+              "author": "DistinctDuck8543",
+              "text": "oh interesting, so the hrefs are basically never rendered client-side at all then?",
+              "score": 1,
+              "created_utc": "2026-09-26 21:14:02",
+              "is_submitter": false,
+              "replies": [
+                {
+                  "id": "pcalg3v",
+                  "author": "Far_Day3173",
+                  "text": "It’s server-rendered HTML, URLs aren’t exposed as normal href links",
+                  "score": 1,
+                  "created_utc": "2026-09-27 02:46:38",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "pbxsth3",
+          "author": "LokeshSequentum",
+          "text": "I tested this quickly as well and the property IDs are there in the embedded page data, not just in the normal links.\n\nOne useful thing I found is that you don't need the full slug either. Once you have the property ID, `/property/{id}` works directly. I tested the IDs from the page and they all opened the correct property.\n\nYou can pull them quickly from the google chrome browser console:\n\n    const source = document.documentElement.innerHTML;\n    \n    const ids = [...source.matchAll(\n      /(?:\\\\\"|\")property(?:Id|ID|_id)(?:\\\\\"|\")\\s*:\\s*(?:\\\\\"|\")?(\\d+)/g\n    )].map(x => x[1]);\n    \n    console.table([...new Set(ids)].map(id => ({\n      id,\n      url: `${location.origin}/property/${id}`\n    })));\n\nSo I think the easier flow here is just: get the property IDs from the embedded data, build `/property/{id}`, and then scrape the detail pages.",
+          "score": 2,
+          "created_utc": "2026-09-25 09:29:57",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "pc10e7w",
+          "author": "KhakiMan",
+          "text": "Thanks to everyone your help! After pointing me in the right direction, I managed to extract the property IDs and generate the URLs. Made sense once I figured out what I needed to be looking for.",
+          "score": 1,
+          "created_utc": "2026-09-25 18:57:00",
+          "is_submitter": true,
+          "replies": []
+        }
+      ]
+    },
+    {
       "id": "1wojpoe",
       "title": "Need Advice",
       "subreddit": "webscraping",
@@ -1628,6 +1685,100 @@
       "domain": "self.webscraping",
       "is_self": true,
       "comments": []
+    },
+    {
+      "id": "1wslczj",
+      "title": "Use scrapped Google review data for an app?",
+      "subreddit": "webscraping",
+      "url": "https://www.reddit.com/r/webscraping/comments/1wslczj/use_scrapped_google_review_data_for_an_app/",
+      "author": "According_Taste9586",
+      "created_utc": "2026-09-28 17:42:57",
+      "score": 3,
+      "num_comments": 12,
+      "upvote_ratio": 0.67,
+      "text": "Hoping to get some suggestion regarding the use of scrapped data..\n\nCan I buy Google review data from a data scrapper (Ukriane company) and generate new restaurant rating based on filtered version of reviews (like user can choose to get rid of service reviews or pick only Korean customers' reviews, etc)\n\nI see a lot of app are selling access to summary derived from scrapped data in some kind of AI search engine/tool. I also see TOS of the data company says \"do not use data against Google Map's business interest\". I also see scrapping company won some lawsuit against big tech company because the data is public without log-in. I just wonder building an app based on scrapped data is okay..",
+      "is_original_content": false,
+      "link_flair_text": null,
+      "permalink": "https://reddit.com/r/webscraping/comments/1wslczj/use_scrapped_google_review_data_for_an_app/",
+      "domain": "self.webscraping",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "pcmukzv",
+          "author": "Disastrous-Loan6202",
+          "text": "imo the bigger risk isnt the scraping legality itself, its that your entire product depends on a data pipeline you dont control. if that supplier gets shut down or changes terms you have nothing. worth thinking about how defensible this actually is before you build around it",
+          "score": 3,
+          "created_utc": "2026-09-28 18:53:29",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "pcmv4gm",
+              "author": "According_Taste9586",
+              "text": "im actually just needed the data for a one time dump to solve a cold start problem of the app. (people can just start finding restaurant with it without accumulating new reviews in this app).   \nI just wonder how all the startup use scraped data and how much legal concern should I have?",
+              "score": 2,
+              "created_utc": "2026-09-28 18:55:36",
+              "is_submitter": true,
+              "replies": []
+            },
+            {
+              "id": "pcnnfqe",
+              "author": "mirthglen",
+              "text": "yeah the single supplier dependency is the real issue here, everything else is secondary",
+              "score": 0,
+              "created_utc": "2026-09-28 20:48:49",
+              "is_submitter": false,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "pcouemg",
+          "author": "kickbut101",
+          "text": "*scraped.\n\nScrapped would be like you decided against it and threw it all away.",
+          "score": 2,
+          "created_utc": "2026-09-29 00:13:48",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "pcmgwwy",
+          "author": "[deleted]",
+          "text": "[removed]",
+          "score": 1,
+          "created_utc": "2026-09-28 17:59:24",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "pcpms8n",
+          "author": "Zealousideal-Part849",
+          "text": "Unless your scale is too large it would be just fine ",
+          "score": 1,
+          "created_utc": "2026-09-29 02:40:18",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "pcprl8q",
+              "author": "According_Taste9586",
+              "text": "I wonder what too large mean …",
+              "score": 1,
+              "created_utc": "2026-09-29 03:06:25",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "pcpsfmy",
+                  "author": "Zealousideal-Part849",
+                  "text": "Keep wondering ",
+                  "score": 1,
+                  "created_utc": "2026-09-29 03:11:06",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        }
+      ]
     }
   ]
 }
