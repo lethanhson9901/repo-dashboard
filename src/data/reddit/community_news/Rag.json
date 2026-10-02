@@ -1,12 +1,280 @@
 {
   "metadata": {
-    "last_updated": "2026-10-01 05:49:57",
+    "last_updated": "2026-10-02 05:38:28",
     "time_filter": "week",
     "subreddit": "Rag",
     "total_items": 20,
     "total_comments": 105
   },
   "items": [
+    {
+      "id": "1wt64cy",
+      "title": "How we built an OCR pipeline that survives a 50,000-page workload",
+      "subreddit": "Rag",
+      "url": "https://www.reddit.com/r/Rag/comments/1wt64cy/how_we_built_an_ocr_pipeline_that_survives_a/",
+      "author": "hncvj",
+      "created_utc": "2026-09-29 10:04:24",
+      "score": 67,
+      "num_comments": 32,
+      "upvote_ratio": 0.89,
+      "text": "*Disclaimer: enhanced with Claude for readability. Numbers and lessons are from a live enterprise project under NDA, rounded and generalized. No vendor pitch.*\n\nSome context so the constraints make sense. We run OCR + analysis over a large regulated corpus. 40M+ documents, 500+ new jobs a month. And here's the part that breaks naive designs: a single job isn't one file, it's a bundle of many PDFs (plus images and other formats) that together add up to anywhere from 5,000 to 50,000 pages. Think dozens to a few hundred PDFs landing at once, some of them a handful of pages, some of them a few thousand, all belonging to one unit of work that a user uploaded this morning and expects answers on.\n\nSo when I say \"a 40,000-page job,\" I don't mean one absurd PDF. I mean a stack of ordinary PDFs that combine to 40,000 pages and have to be processed together. If you've only built OCR for tidy 20-page files, almost every instinct you have is wrong at this size. Here's what broke, in the order it broke, and what we did about it.\n\n# First instinct: one OCR job per PDF. This detonates immediately.\n\nThe obvious design is a task that takes a PDF, OCRs it, done. Works beautifully in the demo. Then a job shows up with 300 PDFs, one of which is 4,000 pages on its own, and that single task runs for hours, holds memory the whole time, and if anything hiccups near the end, you lose the entire run. All-or-nothing on a job that takes hours is a special kind of pain. And \"one task per PDF\" doesn't save you either, because now a handful of giant PDFs in the bundle become their own multi-hour, all-or-nothing bombs.\n\nSo we stopped treating the PDF as the unit. We split every PDF in the bundle into pages up front and fan out one OCR unit per page. Thousands of small, independent, retryable jobs across the whole batch, instead of a few giant fragile ones. Simple idea. And it immediately created a new problem we didn't see coming.\n\n# The workers wouldn't scale. And the reason took us embarrassingly long to find.\n\nWe had autoscaling on the OCR workers. We dumped 40,000 page-jobs into the queue and watched. The backlog just sat there. The workers did not scale up. Two of them chewing through a mountain while six more could have spun up and didn't.\n\nWe stared at CPU. It was sitting around 10 to 15%. And that was the whole problem, right there in plain sight. **We were autoscaling on CPU, and LLM-based OCR is not CPU-bound, it's IO-bound.** Each page-job spends its life waiting on a network call to the model, not burning CPU. So CPU stays flat while the queue is on fire, and a CPU-triggered autoscaler concludes everything is fine and does nothing.\n\nThe fix was to scale on **queue depth** instead. Backlog goes up, add workers. That's the metric that actually reflects the work. (Bonus landmine: our first attempt scaled on a queue metric we thought we were publishing but weren't, so it silently never fired. If you autoscale on a custom metric, prove the metric is actually being emitted before you trust it. Ask me how I know.)\n\nLesson that generalizes: **pick the scaling signal that matches the bottleneck.** For LLM work that's almost never CPU.\n\n# Then someone shipped a deploy while a 40,000-page job was mid-OCR.\n\nRolling the workers mid-run means in-flight page jobs get interrupted and redelivered. Fine, they retry. But it raised the real question: what happens on any restart, crash, or redeploy partway through a batch that takes hours? Do we start over and re-OCR the 30,000 pages we already did?\n\nNo. The pipeline is idempotent and resumable. Every page is content-hashed, and a page that's already been extracted is skipped, not redone. A re-run walks the batch, sees what's already complete across all those PDFs, and only does the missing work. So a deploy, a crash, an autoscale event, none of them cost you the pages you already have. At this scale, \"safe to restart\" isn't a nice-to-have, it's the difference between a blip and a re-run that burns hours and real money.\n\n# Next suspense: the job that would never finish.\n\nOut of 40,000 pages spread across hundreds of PDFs, a handful will fail no matter what. A corrupt page in one file, a transient model error, a rate limit at the wrong moment. If your rule is \"the job is done when 100% of pages succeed,\" then a big batch will basically never hit 100% on the first pass, and you've built a system that hangs on its largest, most important inputs.\n\nSo the pipeline ships at a coverage threshold (we use \\~95%) and then re-drives the stragglers separately instead of blocking the whole job on them. Work moves forward, the missing pages get retried in the background, and coverage climbs. The lesson: **at scale, \"done\" is a threshold plus a repair loop, not a demand for perfection.** Perfection-as-a-gate is how you get jobs stuck for days.\n\nOne important caveat we learned the hard way: don't let a soft-fail quietly hide *lost* pages. There's a world of difference between \"95% done, 5% retrying\" and \"95% done because 5% silently vanished.\" Coverage has to be measured against the real page count across every PDF in the bundle, or your gate becomes a blindfold. (That's its own war story for another post.)\n\n# And the last one: the watchdog killed a perfectly healthy job.\n\nWe have a watchdog that fails jobs stuck too long in a stage, so nothing hangs forever. Reasonable. Except splitting and OCRing hundreds of PDFs into tens of thousands of pages genuinely takes a while, longer than the watchdog's patience, so the watchdog looked at a completely healthy job that was making steady progress and killed it for being \"stuck.\"\n\nTwo fixes. The split emits a heartbeat as it works, so the watchdog can tell \"actively grinding through a huge batch\" apart from \"wedged and dead.\" And the timeouts are **sized by the work**, not fixed. A monitor that allows a flat 4 hours is nonsense when a job can legitimately need far longer, so the budget scales with page count, within sane floors and ceilings. Lesson: **a timeout that's right for your median input will murder your largest one.** Size your patience to the job.\n\n# What I'd tell someone building this from scratch\n\n* Stop treating the file as the unit. Split every PDF into pages and process small, independent, retryable units. Big atomic jobs, whether it's one huge PDF or one huge batch, are where hours of progress go to die.\n* Scale on the signal that matches your bottleneck. For LLM/IO work, queue depth, not CPU. And verify your scaling metric is actually emitted.\n* Make it idempotent and resumable from day one. Content-hash the pages, skip what's done. Assume you will restart mid-run, because you will.\n* Define \"done\" as a coverage threshold plus a background repair loop, not 100%. But measure coverage against the true total so the gate can't hide loss.\n* Size timeouts and watchdogs to the *largest* plausible input, not the median, and give long jobs a heartbeat so liveness checks don't mistake slow for dead.\n\nNone of this is exotic. It's the same handful of distributed-systems ideas applied to a workload most people first meet at demo scale, a clean 20-page PDF. The 50,000-page batch is just the thing that finds every corner you cut.\n\nHappy to go deeper on the resume/idempotency design or the queue-depth autoscaling if useful. What's the biggest batch your pipeline has had to swallow in one go, and what broke first?",
+      "is_original_content": false,
+      "link_flair_text": "Discussion",
+      "permalink": "https://reddit.com/r/Rag/comments/1wt64cy/how_we_built_an_ocr_pipeline_that_survives_a/",
+      "domain": "self.Rag",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "pcrv5g3",
+          "author": "WillingnessQuick5074",
+          "text": "Thank you for this. We learned a little something, and fixed a little something. The gotcha for us was the part where 100 page doc would fail and we'd do it all over again on next retry, would \"fail\" again because it just took longer than it was allowed to... And finally marked as failed. \n\nNow we implemented the heartbeat system and it's all a very nice breath of fresh-air.\n\nThanks again for this detailed analysis on this!",
+          "score": 5,
+          "created_utc": "2026-09-29 12:12:02",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "pcrvgms",
+              "author": "hncvj",
+              "text": "I'm glad the technique helped you.",
+              "score": 2,
+              "created_utc": "2026-09-29 12:13:44",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "pcs9e1m",
+          "author": "SpockDeathGrip",
+          "text": "Can I ask why you don't (by the sounds of it) have a determistic route first before off loading to a model for images and scanned docs? ",
+          "score": 2,
+          "created_utc": "2026-09-29 13:23:50",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "pcsar5b",
+              "author": "hncvj",
+              "text": "Good question, and the short answer is we do, just not where you might expect.   \n  \nThe first route is deterministic. Every page gets classified, and anything with a real, meaningful text layer (native or hybrid pages) skips the model entirely and gets extracted directly. At such scale of pages that native-vs-scanned split is the single biggest cost lever we have, so nothing goes to a model that doesn't have to. \n\nWhere we deliberately don't do a deterministic first pass is the genuinely scanned/image pages, and it's a document-mix decision. A classic OCR-then-escalate cascade only pays off if most of your scanned pages are clean printed text that the cheap engine nails. In our world the pages that arrive as images are disproportionately the hard ones, doctor's handwriting, nurse notes, checkboxes, hand written text filled on printed tables, degraded faxes, multi-column medical tables, which is exactly what traditional OCR is worst at. So the cheap pass had a low hit rate, and worse, classic OCR confidence scores are unreliable on that kind of input, so you can't cleanly decide \"this was good enough\" to gate on. We'd have paid for two passes and still sent most pages to the model. If your scanned mix skewed toward clean printed text I'd absolutely put Tesseract first and only escalate the low-confidence ones, that's the cheaper design, it just didn't survive contact with our specific documents mix. \n\nI hope this answers your question :)",
+              "score": 1,
+              "created_utc": "2026-09-29 13:30:13",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "pcsiwiu",
+                  "author": "SpockDeathGrip",
+                  "text": "I actually worded my question poorly. I meant to say *excluding images and scanned docs, as they are naturally harder to deterministically parse. \n\nBut yes, those routes seem more conventional. Did you roll your own pdf parser or use an oss package? I've tried a couple different ones but all come with disadvantages. As pdfs are so versatile, its a double edged sword, great for users, nightmare to parse. Different dimensions, only tells you the font size not say h1, h2, etc. You end up creating heuristics which naturally comes with edge cases. ",
+                  "score": 1,
+                  "created_utc": "2026-09-29 14:07:57",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "pcspodj",
+          "author": "OkFlan504",
+          "text": "At 95%, “searchable” seems a more useful status than “complete,” with the missing pages still visible to the user. That keeps an operational success threshold from becoming a claim that the evidence behind an answer is complete.",
+          "score": 2,
+          "created_utc": "2026-09-29 14:37:37",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "pcsq0a6",
+              "author": "hncvj",
+              "text": "Agreed.",
+              "score": 1,
+              "created_utc": "2026-09-29 14:39:03",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "pcy8yih",
+          "author": "reujea0",
+          "text": "Imo rapidocr with gpu is an order of magnitude faster",
+          "score": 2,
+          "created_utc": "2026-09-30 06:26:24",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "pdb1ja7",
+              "author": "cipga",
+              "text": "I also use Pymupdf and rapidOCR and about of 18 other little fixing scripts. Mostly run in parallel to fix the output /delinters and such ",
+              "score": 1,
+              "created_utc": "2026-10-01 23:18:37",
+              "is_submitter": false,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "pcykywo",
+          "author": "Potential-Wrangler58",
+          "text": "The content-hash-per-page plus coverage-threshold combo is the most transferable lesson here, not just for OCR. One question on the background repair loop: what happens to pages that keep failing and never will (a genuinely corrupted scan, say)? Without a retry cap and a separate dead-letter path, that \"5% still retrying\" bucket can quietly become a mix of slow-but-fine and never-going-to-pass, and the coverage gate can't tell the two apart.\n\nI work at Anyformat, this is pretty much the exact scale problem we deal with daily (queue-depth autoscaling, idempotent reprocessing, the works), so nice to see it solved well with your own stack 😄 ",
+          "score": 1,
+          "created_utc": "2026-09-30 08:01:31",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "pcyuqh4",
+              "author": "hncvj",
+              "text": "Spot on, that's exactly the hole a naive coverage gate leaves. Two things fix it for us. We classify the error before retrying like transient failures (rate limit, timeout, 5xx) go back on the queue with backoff and a cap, while deterministic ones (corrupt bytes, unreadable page) get dead-lettered on first detection instead of burning 20 retries pretending they'll heal. And a page that exhausts retries or is classified permanent leaves the \"retrying\" bucket for a terminal quarantine state, so it's never conflated with slow-but-fine. Coverage is measured against recoverable pages, with terminal failures surfaced explicitly (\"3 pages unrecoverable, here's why\") rather than silently padding the 5% or blocking the case forever.   \n  \nWill try Anyformat in our next eval round. Do you auto-quarantine the terminal bucket or keep a human in the loop?",
+              "score": 1,
+              "created_utc": "2026-09-30 09:22:12",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "pcyxa0l",
+                  "author": "Potential-Wrangler58",
+                  "text": "It's up to the client. Some of ours review every terminal case, others don't review any of it, that's why we show a calibrated confidence score: each client sets their own threshold. You can wire up a review interface (we have one ready if you want it) or skip it entirely and resolve it via API against that confidence score. We also have free credits if you want to test it, and if you've already got your pipeline set up, just tell your agent to run it against our API to replicate it, should be quick. Ping me if you need anything! ☺️",
+                  "score": 2,
+                  "created_utc": "2026-09-30 09:42:38",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "pd1ls4i",
+          "author": "[deleted]",
+          "text": "[removed]",
+          "score": 0,
+          "created_utc": "2026-09-30 17:31:02",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "pd1oux9",
+              "author": "hncvj",
+              "text": "Could have done the same under 1min. \nAnyway, looks like it isn't the same problem being addressed. ",
+              "score": 1,
+              "created_utc": "2026-09-30 17:43:39",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "pd3qd8c",
+          "author": "Puzzleheaded_Tap_188",
+          "text": "did you use Reducto? if you didn't you should consider giving them a try. They are the best in the business!",
+          "score": 1,
+          "created_utc": "2026-09-30 23:10:41",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "pd402un",
+              "author": "hncvj",
+              "text": "Tried it. Failed in our Eval rounds. Doesn't work well with hand written doctor notes. ",
+              "score": 1,
+              "created_utc": "2026-10-01 00:04:26",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "pd5ro3e",
+          "author": "nachtzeit",
+          "text": "Stretching the definition of « Enhanced » and « readability » here. \n\nYou didn’t say «  clean up my text but leave the tone of voice intact ». You scorched earth your text. ",
+          "score": 1,
+          "created_utc": "2026-10-01 06:34:46",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "pd5s1jk",
+              "author": "hncvj",
+              "text": "I'm sorry about that. I understand your point",
+              "score": 1,
+              "created_utc": "2026-10-01 06:37:48",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "pd62stt",
+                  "author": "nachtzeit",
+                  "text": "I did learn something though so that’s a plus ",
+                  "score": 2,
+                  "created_utc": "2026-10-01 08:08:55",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "pda6i1u",
+          "author": "cipga",
+          "text": "We all build the same tool over and over ",
+          "score": 1,
+          "created_utc": "2026-10-01 20:45:09",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "pdagf1u",
+              "author": "hncvj",
+              "text": "Yup. 100%.\n\nThe only difference is how we tackle a new variant of the problem with a new variant of solution.  ",
+              "score": 1,
+              "created_utc": "2026-10-01 21:30:36",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "pdb15rm",
+                  "author": "cipga",
+                  "text": "I also split my 3000 page books. ",
+                  "score": 1,
+                  "created_utc": "2026-10-01 23:16:36",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "pcrelv9",
+          "author": "Dyln_D0g",
+          "text": "The biggest batch on my side is nothing like yours, a few hundred pages at a time, so I can't add much on queue depth. The first thing that broke for me was a secret, long before any question of scale. I pasted an OCR API key into wrangler through a PowerShell pipe and it went in with a UTF-8 BOM in front of it. The provider answered 401, my code mapped that to a 503 with a \"service not configured\" message, and the health check I trusted never saw it because it hit the rate limiter and returned 429 before ever calling upstream. Scanned PDFs were broken in production for two days while everything looked green. What I took from it is close to your coverage point: a check only counts if it goes all the way to a real 200 on a real scan, anything that stops earlier is a blindfold. Now the post-deploy smoke test uploads an actual scanned page and reads the markdown back. The other thing I'd add is triage before OCR. A lot of what gets called a scanned PDF is a hybrid, text layer on most pages and images on a few. Last week I was patching a RAG library that re-ran OCR over a whole 42-page IPCC report because two pages were blank and fell under its fifty-word threshold. Classifying page by page first, native, scanned or hybrid, cut my OCR bill more than any batching trick did.",
+          "score": -2,
+          "created_utc": "2026-09-29 10:28:15",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "pcrfi9x",
+              "author": "hncvj",
+              "text": "That BOM-in-the-key story is the whole post in one incident, a 401 dressed up as a 503 that the rate limiter answered before it ever hit upstream, which is exactly why our smoke test uploads a real scanned page and asserts real text comes back, not just a 200-shaped lie. Your triage point is the one I'd underline twice: at 40M+ pages we classify every page as native, scanned or hybrid before anything touches OCR, and the hybrid case (clean text layer on most pages, images on a few) is a bigger cost lever than any batching trick, exactly like you found. The one scar I'll add is that \"has a text layer\" isn't \"has a good text layer\", we've hit PDFs with empty vector glyphs or a bad one-time OCR baked in years ago, so we check the layer is actually meaningful before trusting it, otherwise you cheerfully extract junk and skip the page that genuinely needed OCR.   \n  \nHow do you decide a text layer is trustworthy vs needs re-OCR? That threshold is still the fiddly part for me.",
+              "score": 1,
+              "created_utc": "2026-09-29 10:34:44",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "pcybbu1",
+                  "author": "nitish-kmr",
+                  "text": "On trusting a text layer, what helped was to stop treating it as a threshold and start measuring it.\n\nWord count is the wrong signal, which is what the IPCC case shows, because a blank page and a badly extracted page look the same to it. The cheap per-page checks that do work: what share of extracted glyphs fail to map to a character at all, fonts carrying no usable mapping, and text box area against the area of the page that has ink on it. A page that is mostly ink with almost no text boxes is a scan with a caption layer, whatever its word count says.\n\nRather than tune those, sample. Re-OCR a random slice of the pages you classified as trustworthy and diff against what you extracted. That gives you a false-trust rate instead of a guessed threshold.\n\nAnd it matters more than it looks. A page you wrongly trust never fails, so it never enters the 5% you retry. It goes into the 95% as junk, where your coverage number cannot see it.",
+                  "score": 1,
+                  "created_utc": "2026-09-30 06:44:41",
+                  "is_submitter": false,
+                  "replies": []
+                },
+                {
+                  "id": "pcysegu",
+                  "author": "Dyln_D0g",
+                  "text": "Honestly, mine is cruder than it should be. Per page I look at three things: whether there are at least 15 non-whitespace characters, what share of them come out as U+FFFD, and whether a single raster image covers 70% or more of the page. Text sitting on top of a full-page image I treat as someone's old OCR and don't trust it, whatever it says. More than 5% replacement characters, same thing. Everything else counts as native. \n\nWhere it fails is the case that passes all three. A Census report I was fixing last week had an Illustrator font subset re-encoded by glyph order, so the digits came out as control characters and stray symbols like ¡ and ª. Real characters, no U+FFFD, no image behind them, and my triage called it clean. I ended up detecting that garble inside the extraction step instead of in triage, which works for that font pattern and nothing else. \n\nSo I'd take nitish-kmr's sampling idea over tuning my thresholds. Re-OCR a slice of the pages you trusted and diff. I don't do that yet.",
+                  "score": 1,
+                  "created_utc": "2026-09-30 09:03:18",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
     {
       "id": "1wpo86h",
       "title": "GraphRAG - which problems does it actually solve?",
@@ -15,7 +283,7 @@
       "author": "Early_Protection6814",
       "created_utc": "2026-09-25 05:42:12",
       "score": 63,
-      "num_comments": 23,
+      "num_comments": 24,
       "upvote_ratio": 0.99,
       "text": "Seeing a lot of “just use GraphRAG” comments lately, so I thought it was worth separating what it’s genuinely useful for from what gets overstated.\n\n**What it actually helps with:**\n\n* **Multi-hop questions.** Vector RAG retrieves chunks that are semantically similar to a query. That can struggle when the answer requires connecting facts spread across multiple documents. A graph gives you explicit entities and relationships that can be traversed or expanded across those connections.\n* **Global or corpus-level questions.** Something like “What are the main themes across these 500 reports?” is difficult for straightforward top-k retrieval because the answer may depend on information distributed across the entire corpus. Microsoft Research’s GraphRAG approach uses community detection and generated summaries to make this kind of query more tractable. That corpus-level summarization is arguably one of the more interesting parts of the approach, not simply “put your documents in a graph.”\n* **Entity disambiguation.** Think “Apple” the company vs. “apple” the fruit, or the same person appearing under different names, titles, or references. A well-built knowledge graph can consolidate these references and improve retrieval across related information.\n* **Relationship-aware retrieval.** This is probably the biggest practical advantage. If the question depends on *how* entities are connected rather than just whether a chunk is semantically similar, graph structure gives the retrieval system another signal to work with.\n\n**What it doesn't magically fix:**\n\n* **Simple fact lookup.** If the answer is clearly stated in one paragraph, standard vector or keyword retrieval may be faster and cheaper. Building a graph for every query is unnecessary overhead.\n* **Hallucinations.** GraphRAG can reduce some retrieval errors, but it doesn't eliminate hallucination. LLMs can introduce errors during entity/relation extraction, graph construction, or answer generation. Garbage extraction can still produce a garbage graph.\n* **Cost.** Turning a large unstructured corpus into a knowledge graph can require substantial LLM processing for entity and relationship extraction. And if the underlying data changes frequently, maintaining that structure becomes an ongoing cost.\n* **Being a drop-in replacement for vector RAG.** In practice, many systems described as “GraphRAG” use hybrid approaches—vector retrieval, graph traversal, entity expansion, reranking, or some combination. It isn't necessarily a choice between “vectors” and “graphs.”\n\n**My takeaway:**\n\nGraphRAG makes the most sense when the relationships between pieces of information are themselves important to the question.\n\nFor straightforward point lookups, adding a graph can be unnecessary complexity.\n\nThe interesting question isn't really “graph vs. vectors?”\n\nIt's:\n\n**“Does the structure of my data contain information that semantic similarity alone can't reliably capture?”**\n\nIf yes, GraphRAG becomes much more interesting. If not, you may just be adding a considerably heavier ingestion and maintenance pipeline, ",
       "is_original_content": false,
@@ -28,7 +296,7 @@
           "id": "pbx555u",
           "author": "recro69",
           "text": "I think the maintenance cost is probably the part that gets underestimated. The maintenance cost can become almost as important as getting the graph right if the source documents change often. A stale graph can be worse, than retrieving the latest chunks.",
-          "score": 15,
+          "score": 14,
           "created_utc": "2026-09-25 06:11:31",
           "is_submitter": false,
           "replies": [
@@ -56,7 +324,7 @@
           "id": "pbx775y",
           "author": "DorkyMcDorky",
           "text": "It solves the problem of your Azure bill being too small.  By adding everything under the sun for your company's lunch menu, you can learn a lot about the kitchen.  Make sure the document has providence for receipts or else they may hallucinate or order specials from yesterday. ",
-          "score": 8,
+          "score": 9,
           "created_utc": "2026-09-25 06:27:41",
           "is_submitter": false,
           "replies": [
@@ -75,7 +343,7 @@
           "id": "pbxgkr1",
           "author": "softwaredoug",
           "text": "I think almost nobody actually needs a knowledge graph for search.\n\nWhen people think they need a knowledge graph, what they almost always want is to organize entities. What that probably means is more of a managed taxonomy to organize entities hierarchically. That's the[ real competition to vectors for semantic search](https://softwaredoug.com/blog/2026/01/08/semantic-search-without-embeddings)",
-          "score": 11,
+          "score": 12,
           "created_utc": "2026-09-25 07:44:39",
           "is_submitter": false,
           "replies": [
@@ -91,7 +359,7 @@
                   "id": "pbxhn56",
                   "author": "softwaredoug",
                   "text": "Yes in the same way a linked list is also technically a tree  😊",
-                  "score": 3,
+                  "score": 2,
                   "created_utc": "2026-09-25 07:53:52",
                   "is_submitter": false,
                   "replies": []
@@ -217,216 +485,15 @@
           "created_utc": "2026-09-29 05:59:14",
           "is_submitter": false,
           "replies": []
-        }
-      ]
-    },
-    {
-      "id": "1wt64cy",
-      "title": "How we built an OCR pipeline that survives a 50,000-page workload",
-      "subreddit": "Rag",
-      "url": "https://www.reddit.com/r/Rag/comments/1wt64cy/how_we_built_an_ocr_pipeline_that_survives_a/",
-      "author": "hncvj",
-      "created_utc": "2026-09-29 10:04:24",
-      "score": 63,
-      "num_comments": 25,
-      "upvote_ratio": 0.89,
-      "text": "*Disclaimer: enhanced with Claude for readability. Numbers and lessons are from a live enterprise project under NDA, rounded and generalized. No vendor pitch.*\n\nSome context so the constraints make sense. We run OCR + analysis over a large regulated corpus. 40M+ documents, 500+ new jobs a month. And here's the part that breaks naive designs: a single job isn't one file, it's a bundle of many PDFs (plus images and other formats) that together add up to anywhere from 5,000 to 50,000 pages. Think dozens to a few hundred PDFs landing at once, some of them a handful of pages, some of them a few thousand, all belonging to one unit of work that a user uploaded this morning and expects answers on.\n\nSo when I say \"a 40,000-page job,\" I don't mean one absurd PDF. I mean a stack of ordinary PDFs that combine to 40,000 pages and have to be processed together. If you've only built OCR for tidy 20-page files, almost every instinct you have is wrong at this size. Here's what broke, in the order it broke, and what we did about it.\n\n# First instinct: one OCR job per PDF. This detonates immediately.\n\nThe obvious design is a task that takes a PDF, OCRs it, done. Works beautifully in the demo. Then a job shows up with 300 PDFs, one of which is 4,000 pages on its own, and that single task runs for hours, holds memory the whole time, and if anything hiccups near the end, you lose the entire run. All-or-nothing on a job that takes hours is a special kind of pain. And \"one task per PDF\" doesn't save you either, because now a handful of giant PDFs in the bundle become their own multi-hour, all-or-nothing bombs.\n\nSo we stopped treating the PDF as the unit. We split every PDF in the bundle into pages up front and fan out one OCR unit per page. Thousands of small, independent, retryable jobs across the whole batch, instead of a few giant fragile ones. Simple idea. And it immediately created a new problem we didn't see coming.\n\n# The workers wouldn't scale. And the reason took us embarrassingly long to find.\n\nWe had autoscaling on the OCR workers. We dumped 40,000 page-jobs into the queue and watched. The backlog just sat there. The workers did not scale up. Two of them chewing through a mountain while six more could have spun up and didn't.\n\nWe stared at CPU. It was sitting around 10 to 15%. And that was the whole problem, right there in plain sight. **We were autoscaling on CPU, and LLM-based OCR is not CPU-bound, it's IO-bound.** Each page-job spends its life waiting on a network call to the model, not burning CPU. So CPU stays flat while the queue is on fire, and a CPU-triggered autoscaler concludes everything is fine and does nothing.\n\nThe fix was to scale on **queue depth** instead. Backlog goes up, add workers. That's the metric that actually reflects the work. (Bonus landmine: our first attempt scaled on a queue metric we thought we were publishing but weren't, so it silently never fired. If you autoscale on a custom metric, prove the metric is actually being emitted before you trust it. Ask me how I know.)\n\nLesson that generalizes: **pick the scaling signal that matches the bottleneck.** For LLM work that's almost never CPU.\n\n# Then someone shipped a deploy while a 40,000-page job was mid-OCR.\n\nRolling the workers mid-run means in-flight page jobs get interrupted and redelivered. Fine, they retry. But it raised the real question: what happens on any restart, crash, or redeploy partway through a batch that takes hours? Do we start over and re-OCR the 30,000 pages we already did?\n\nNo. The pipeline is idempotent and resumable. Every page is content-hashed, and a page that's already been extracted is skipped, not redone. A re-run walks the batch, sees what's already complete across all those PDFs, and only does the missing work. So a deploy, a crash, an autoscale event, none of them cost you the pages you already have. At this scale, \"safe to restart\" isn't a nice-to-have, it's the difference between a blip and a re-run that burns hours and real money.\n\n# Next suspense: the job that would never finish.\n\nOut of 40,000 pages spread across hundreds of PDFs, a handful will fail no matter what. A corrupt page in one file, a transient model error, a rate limit at the wrong moment. If your rule is \"the job is done when 100% of pages succeed,\" then a big batch will basically never hit 100% on the first pass, and you've built a system that hangs on its largest, most important inputs.\n\nSo the pipeline ships at a coverage threshold (we use \\~95%) and then re-drives the stragglers separately instead of blocking the whole job on them. Work moves forward, the missing pages get retried in the background, and coverage climbs. The lesson: **at scale, \"done\" is a threshold plus a repair loop, not a demand for perfection.** Perfection-as-a-gate is how you get jobs stuck for days.\n\nOne important caveat we learned the hard way: don't let a soft-fail quietly hide *lost* pages. There's a world of difference between \"95% done, 5% retrying\" and \"95% done because 5% silently vanished.\" Coverage has to be measured against the real page count across every PDF in the bundle, or your gate becomes a blindfold. (That's its own war story for another post.)\n\n# And the last one: the watchdog killed a perfectly healthy job.\n\nWe have a watchdog that fails jobs stuck too long in a stage, so nothing hangs forever. Reasonable. Except splitting and OCRing hundreds of PDFs into tens of thousands of pages genuinely takes a while, longer than the watchdog's patience, so the watchdog looked at a completely healthy job that was making steady progress and killed it for being \"stuck.\"\n\nTwo fixes. The split emits a heartbeat as it works, so the watchdog can tell \"actively grinding through a huge batch\" apart from \"wedged and dead.\" And the timeouts are **sized by the work**, not fixed. A monitor that allows a flat 4 hours is nonsense when a job can legitimately need far longer, so the budget scales with page count, within sane floors and ceilings. Lesson: **a timeout that's right for your median input will murder your largest one.** Size your patience to the job.\n\n# What I'd tell someone building this from scratch\n\n* Stop treating the file as the unit. Split every PDF into pages and process small, independent, retryable units. Big atomic jobs, whether it's one huge PDF or one huge batch, are where hours of progress go to die.\n* Scale on the signal that matches your bottleneck. For LLM/IO work, queue depth, not CPU. And verify your scaling metric is actually emitted.\n* Make it idempotent and resumable from day one. Content-hash the pages, skip what's done. Assume you will restart mid-run, because you will.\n* Define \"done\" as a coverage threshold plus a background repair loop, not 100%. But measure coverage against the true total so the gate can't hide loss.\n* Size timeouts and watchdogs to the *largest* plausible input, not the median, and give long jobs a heartbeat so liveness checks don't mistake slow for dead.\n\nNone of this is exotic. It's the same handful of distributed-systems ideas applied to a workload most people first meet at demo scale, a clean 20-page PDF. The 50,000-page batch is just the thing that finds every corner you cut.\n\nHappy to go deeper on the resume/idempotency design or the queue-depth autoscaling if useful. What's the biggest batch your pipeline has had to swallow in one go, and what broke first?",
-      "is_original_content": false,
-      "link_flair_text": "Discussion",
-      "permalink": "https://reddit.com/r/Rag/comments/1wt64cy/how_we_built_an_ocr_pipeline_that_survives_a/",
-      "domain": "self.Rag",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "pcrv5g3",
-          "author": "WillingnessQuick5074",
-          "text": "Thank you for this. We learned a little something, and fixed a little something. The gotcha for us was the part where 100 page doc would fail and we'd do it all over again on next retry, would \"fail\" again because it just took longer than it was allowed to... And finally marked as failed. \n\nNow we implemented the heartbeat system and it's all a very nice breath of fresh-air.\n\nThanks again for this detailed analysis on this!",
-          "score": 3,
-          "created_utc": "2026-09-29 12:12:02",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "pcrvgms",
-              "author": "hncvj",
-              "text": "I'm glad the technique helped you.",
-              "score": 2,
-              "created_utc": "2026-09-29 12:13:44",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
         },
         {
-          "id": "pcs9e1m",
-          "author": "SpockDeathGrip",
-          "text": "Can I ask why you don't (by the sounds of it) have a determistic route first before off loading to a model for images and scanned docs? ",
-          "score": 2,
-          "created_utc": "2026-09-29 13:23:50",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "pcsar5b",
-              "author": "hncvj",
-              "text": "Good question, and the short answer is we do, just not where you might expect.   \n  \nThe first route is deterministic. Every page gets classified, and anything with a real, meaningful text layer (native or hybrid pages) skips the model entirely and gets extracted directly. At such scale of pages that native-vs-scanned split is the single biggest cost lever we have, so nothing goes to a model that doesn't have to. \n\nWhere we deliberately don't do a deterministic first pass is the genuinely scanned/image pages, and it's a document-mix decision. A classic OCR-then-escalate cascade only pays off if most of your scanned pages are clean printed text that the cheap engine nails. In our world the pages that arrive as images are disproportionately the hard ones, doctor's handwriting, nurse notes, checkboxes, hand written text filled on printed tables, degraded faxes, multi-column medical tables, which is exactly what traditional OCR is worst at. So the cheap pass had a low hit rate, and worse, classic OCR confidence scores are unreliable on that kind of input, so you can't cleanly decide \"this was good enough\" to gate on. We'd have paid for two passes and still sent most pages to the model. If your scanned mix skewed toward clean printed text I'd absolutely put Tesseract first and only escalate the low-confidence ones, that's the cheaper design, it just didn't survive contact with our specific documents mix. \n\nI hope this answers your question :)",
-              "score": 1,
-              "created_utc": "2026-09-29 13:30:13",
-              "is_submitter": true,
-              "replies": [
-                {
-                  "id": "pcsiwiu",
-                  "author": "SpockDeathGrip",
-                  "text": "I actually worded my question poorly. I meant to say *excluding images and scanned docs, as they are naturally harder to deterministically parse. \n\nBut yes, those routes seem more conventional. Did you roll your own pdf parser or use an oss package? I've tried a couple different ones but all come with disadvantages. As pdfs are so versatile, its a double edged sword, great for users, nightmare to parse. Different dimensions, only tells you the font size not say h1, h2, etc. You end up creating heuristics which naturally comes with edge cases. ",
-                  "score": 1,
-                  "created_utc": "2026-09-29 14:07:57",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "pcspodj",
-          "author": "OkFlan504",
-          "text": "At 95%, “searchable” seems a more useful status than “complete,” with the missing pages still visible to the user. That keeps an operational success threshold from becoming a claim that the evidence behind an answer is complete.",
-          "score": 2,
-          "created_utc": "2026-09-29 14:37:37",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "pcsq0a6",
-              "author": "hncvj",
-              "text": "Agreed.",
-              "score": 1,
-              "created_utc": "2026-09-29 14:39:03",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "pcy8yih",
-          "author": "reujea0",
-          "text": "Imo rapidocr with gpu is an order of magnitude faster",
+          "id": "pd7lm6i",
+          "author": "AlexAtOracleAIDB",
+          "text": "It's mainly useful for questions where the answer depends on how entities connect. On the freshness point, a lot rides on where the graph data comes from, in my experience.  \n  \nIf the entities already live in relational tables, I've defined the graph over those tables directly. Some databases support this as a SQL property graph that works like a view. Because the data isn't copied, inserts and updates show up in the graph without a separate sync job.  \n  \nThe stale graph risk I've run into stays with LLM extraction from unstructured docs, since a changed doc has to be re-extracted before the graph catches up.",
           "score": 1,
-          "created_utc": "2026-09-30 06:26:24",
+          "created_utc": "2026-10-01 14:05:42",
           "is_submitter": false,
           "replies": []
-        },
-        {
-          "id": "pcykywo",
-          "author": "Potential-Wrangler58",
-          "text": "The content-hash-per-page plus coverage-threshold combo is the most transferable lesson here, not just for OCR. One question on the background repair loop: what happens to pages that keep failing and never will (a genuinely corrupted scan, say)? Without a retry cap and a separate dead-letter path, that \"5% still retrying\" bucket can quietly become a mix of slow-but-fine and never-going-to-pass, and the coverage gate can't tell the two apart.\n\nI work at Anyformat, this is pretty much the exact scale problem we deal with daily (queue-depth autoscaling, idempotent reprocessing, the works), so nice to see it solved well with your own stack 😄 ",
-          "score": 1,
-          "created_utc": "2026-09-30 08:01:31",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "pcyuqh4",
-              "author": "hncvj",
-              "text": "Spot on, that's exactly the hole a naive coverage gate leaves. Two things fix it for us. We classify the error before retrying like transient failures (rate limit, timeout, 5xx) go back on the queue with backoff and a cap, while deterministic ones (corrupt bytes, unreadable page) get dead-lettered on first detection instead of burning 20 retries pretending they'll heal. And a page that exhausts retries or is classified permanent leaves the \"retrying\" bucket for a terminal quarantine state, so it's never conflated with slow-but-fine. Coverage is measured against recoverable pages, with terminal failures surfaced explicitly (\"3 pages unrecoverable, here's why\") rather than silently padding the 5% or blocking the case forever.   \n  \nWill try Anyformat in our next eval round. Do you auto-quarantine the terminal bucket or keep a human in the loop?",
-              "score": 1,
-              "created_utc": "2026-09-30 09:22:12",
-              "is_submitter": true,
-              "replies": [
-                {
-                  "id": "pcyxa0l",
-                  "author": "Potential-Wrangler58",
-                  "text": "It's up to the client. Some of ours review every terminal case, others don't review any of it, that's why we show a calibrated confidence score: each client sets their own threshold. You can wire up a review interface (we have one ready if you want it) or skip it entirely and resolve it via API against that confidence score. We also have free credits if you want to test it, and if you've already got your pipeline set up, just tell your agent to run it against our API to replicate it, should be quick. Ping me if you need anything! ☺️",
-                  "score": 2,
-                  "created_utc": "2026-09-30 09:42:38",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "pd1ls4i",
-          "author": "[deleted]",
-          "text": "[removed]",
-          "score": 1,
-          "created_utc": "2026-09-30 17:31:02",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "pd1oux9",
-              "author": "hncvj",
-              "text": "Could have done the same under 1min. \nAnyway, looks like it isn't the same problem being addressed. ",
-              "score": 1,
-              "created_utc": "2026-09-30 17:43:39",
-              "is_submitter": true,
-              "replies": [
-                {
-                  "id": "pd1p4k1",
-                  "author": "BluebirdMiddle5121",
-                  "text": "you can OCR 163G of zipped PDF's in 1min?",
-                  "score": 1,
-                  "created_utc": "2026-09-30 17:44:45",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "pd3qd8c",
-          "author": "Puzzleheaded_Tap_188",
-          "text": "did you use Reducto? if you didn't you should consider giving them a try. They are the best in the business!",
-          "score": 1,
-          "created_utc": "2026-09-30 23:10:41",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "pd402un",
-              "author": "hncvj",
-              "text": "Tried it. Failed in our Eval rounds. Doesn't work well with hand written doctor notes. ",
-              "score": 1,
-              "created_utc": "2026-10-01 00:04:26",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "pcrelv9",
-          "author": "Dyln_D0g",
-          "text": "The biggest batch on my side is nothing like yours, a few hundred pages at a time, so I can't add much on queue depth. The first thing that broke for me was a secret, long before any question of scale. I pasted an OCR API key into wrangler through a PowerShell pipe and it went in with a UTF-8 BOM in front of it. The provider answered 401, my code mapped that to a 503 with a \"service not configured\" message, and the health check I trusted never saw it because it hit the rate limiter and returned 429 before ever calling upstream. Scanned PDFs were broken in production for two days while everything looked green. What I took from it is close to your coverage point: a check only counts if it goes all the way to a real 200 on a real scan, anything that stops earlier is a blindfold. Now the post-deploy smoke test uploads an actual scanned page and reads the markdown back. The other thing I'd add is triage before OCR. A lot of what gets called a scanned PDF is a hybrid, text layer on most pages and images on a few. Last week I was patching a RAG library that re-ran OCR over a whole 42-page IPCC report because two pages were blank and fell under its fifty-word threshold. Classifying page by page first, native, scanned or hybrid, cut my OCR bill more than any batching trick did.",
-          "score": -2,
-          "created_utc": "2026-09-29 10:28:15",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "pcrfi9x",
-              "author": "hncvj",
-              "text": "That BOM-in-the-key story is the whole post in one incident, a 401 dressed up as a 503 that the rate limiter answered before it ever hit upstream, which is exactly why our smoke test uploads a real scanned page and asserts real text comes back, not just a 200-shaped lie. Your triage point is the one I'd underline twice: at 40M+ pages we classify every page as native, scanned or hybrid before anything touches OCR, and the hybrid case (clean text layer on most pages, images on a few) is a bigger cost lever than any batching trick, exactly like you found. The one scar I'll add is that \"has a text layer\" isn't \"has a good text layer\", we've hit PDFs with empty vector glyphs or a bad one-time OCR baked in years ago, so we check the layer is actually meaningful before trusting it, otherwise you cheerfully extract junk and skip the page that genuinely needed OCR.   \n  \nHow do you decide a text layer is trustworthy vs needs re-OCR? That threshold is still the fiddly part for me.",
-              "score": 1,
-              "created_utc": "2026-09-29 10:34:44",
-              "is_submitter": true,
-              "replies": [
-                {
-                  "id": "pcybbu1",
-                  "author": "nitish-kmr",
-                  "text": "On trusting a text layer, what helped was to stop treating it as a threshold and start measuring it.\n\nWord count is the wrong signal, which is what the IPCC case shows, because a blank page and a badly extracted page look the same to it. The cheap per-page checks that do work: what share of extracted glyphs fail to map to a character at all, fonts carrying no usable mapping, and text box area against the area of the page that has ink on it. A page that is mostly ink with almost no text boxes is a scan with a caption layer, whatever its word count says.\n\nRather than tune those, sample. Re-OCR a random slice of the pages you classified as trustworthy and diff against what you extracted. That gives you a false-trust rate instead of a guessed threshold.\n\nAnd it matters more than it looks. A page you wrongly trust never fails, so it never enters the 5% you retry. It goes into the 95% as junk, where your coverage number cannot see it.",
-                  "score": 1,
-                  "created_utc": "2026-09-30 06:44:41",
-                  "is_submitter": false,
-                  "replies": []
-                },
-                {
-                  "id": "pcysegu",
-                  "author": "Dyln_D0g",
-                  "text": "Honestly, mine is cruder than it should be. Per page I look at three things: whether there are at least 15 non-whitespace characters, what share of them come out as U+FFFD, and whether a single raster image covers 70% or more of the page. Text sitting on top of a full-page image I treat as someone's old OCR and don't trust it, whatever it says. More than 5% replacement characters, same thing. Everything else counts as native. \n\nWhere it fails is the case that passes all three. A Census report I was fixing last week had an Illustrator font subset re-encoded by glyph order, so the digits came out as control characters and stray symbols like ¡ and ª. Real characters, no U+FFFD, no image behind them, and my triage called it clean. I ended up detecting that garble inside the extraction step instead of in triage, which works for that font pattern and nothing else. \n\nSo I'd take nitish-kmr's sampling idea over tuning my thresholds. Re-OCR a slice of the pages you trusted and diff. I don't do that yet.",
-                  "score": 1,
-                  "created_utc": "2026-09-30 09:03:18",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
         }
       ]
     },
@@ -437,9 +504,9 @@
       "url": "https://www.reddit.com/r/Rag/comments/1wraoc8/drag_a_pdf_in_get_ragready_markdown_out_free/",
       "author": "Minute_Teaching6339",
       "created_utc": "2026-09-27 04:25:53",
-      "score": 37,
+      "score": 34,
       "num_comments": 9,
-      "upvote_ratio": 0.91,
+      "upvote_ratio": 0.87,
       "text": "Hey r/Rag 👋\n\nSharing something a friend of mine built, because I think it fits this sub well.\n\nWe all know the boring first step of every RAG pipeline: getting documents into clean text. Tables come out mangled, multi-column PDFs get scrambled, and you don't always want to upload private files to some API.\n\nInkDoc is a small desktop app (Windows / macOS / Linux) that turns documents into clean Markdown on your own machine.\n\nHow it works:\n\n\\* Drop a file, a folder or a URL → you get a .md file in your Downloads. That's it.\n\n\\* 3 engines under the hood:\n\n   \\- MarkItDown (Microsoft) for Word, Excel,  PowerPoint and HTML\n\n\\- Docling (IBM) for hard PDFs: layout analysis, OCR, and tables that stay tables\n\n   \\- Markit for EPUB, Jupyter notebooks and similar\n\n\\* Documents are converted locally, nothing gets uploaded\n\n\\* It also has a local REST API if you want to plug it into a pipeline\n\nFree and open source (MIT):  https://github.com/AbdoslamB/InkDoc\n\nIt's a brand-new v1.0.0, and he's looking for \n\nfeedback: what breaks, which documents give you trouble, and what you'd want next. I'll pass everything on, or feel free to open an issue on GitHub directly!",
       "is_original_content": false,
       "link_flair_text": "Tools & Resources",
@@ -497,7 +564,7 @@
           "id": "pckeeig",
           "author": "Future_AGI",
           "text": "clean extraction is the half of RAG everyone underestimates, so this is useful. The catch is that clean markdown in doesn't guarantee grounded answers out: once the tables survive, the next failure is retrieval pulling the wrong chunk or the model answering past what it retrieved. We open-sourced eval for that side (groundedness and context-relevance scoring on the actual retrieved passages) so you can tell whether a parsing win moved answer quality: [https://github.com/future-agi/future-agi](https://github.com/future-agi/future-agi)",
-          "score": 1,
+          "score": 2,
           "created_utc": "2026-09-28 12:50:19",
           "is_submitter": false,
           "replies": [
@@ -539,9 +606,9 @@
       "url": "https://www.reddit.com/r/Rag/comments/1wu4s45/introducing_embed_5_coheres_newest_sota_embed/",
       "author": "Cohere",
       "created_utc": "2026-09-30 13:20:15",
-      "score": 27,
-      "num_comments": 3,
-      "upvote_ratio": 0.99,
+      "score": 30,
+      "num_comments": 5,
+      "upvote_ratio": 0.97,
       "text": "Hi there! El from Cohere again. We recently announced our Parse 5 launch here (see that post [here](https://www.reddit.com/r/Rag/comments/1vztlqw/introducing_parse_coheres_vision_parsing_model/)), and we’re following it up with Embed 5, our SOTA family of embeddings models. It consists of two different models: \n\nEmbed 5 Pro: This is our most powerful embedding model yet. It got the strongest average score on ViDoRe V3 (ahead of Voyage 4, Gemini Embedding 2, and Jina Embeddings v5). It’s particularly good at financial documents, but is really optimized for all enterprise documents, from images to stuff in different languages (it’s trained on over 100). Try it out on SEC filings, slide decks, privacy policies, or honestly whatever you want - we’re interested in how you’re using it and how it’s performing.\n\nEmbed 5 Fast: This is a lighter weight model that’s built for low latency, low cost, and high volume. It outperforms models of its class like Voyage 4 nano and even some bigger ones like Qwen3-VL-Embedding-2B. \n\nBoth of these models share a single embedding space, so you can index with Pro and query with either model without re-indexing. Send us any feedback, we’d love to hear it. \n\n**One more thing:** Embed 5 is the first model family evaluated with RCP-nDCG@10, which is our latest retrieval methodology which improves upon assessing real-world retrieval quality. If you want to hear more about it, along with Parse 5, Embed 5, and where we’re going with search and embeddings next, join us for our webinar on October 8 on X Live. \n\nRead more: [https://cohere.com/blog/embed-5](https://cohere.com/blog/embed-5)\n\n",
       "is_original_content": false,
       "link_flair_text": "Showcase",
@@ -572,10 +639,134 @@
           "id": "pd1knrs",
           "author": "faileon",
           "text": "Does it support late chunking?",
-          "score": 1,
+          "score": 2,
           "created_utc": "2026-09-30 17:26:28",
           "is_submitter": false,
+          "replies": [
+            {
+              "id": "pd8h2ys",
+              "author": "Cohere",
+              "text": "It does not",
+              "score": 1,
+              "created_utc": "2026-10-01 16:25:17",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "pd8tz2r",
+                  "author": "faileon",
+                  "text": "Thanks for the reply. That's unfortunate, it's one of the reasons we like Jina models, it has proven to be quiet useful in our use cases.",
+                  "score": 1,
+                  "created_utc": "2026-10-01 17:19:04",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "1wv356m",
+      "title": "We benchmarked 18 RAG pipelines against an agent loop on Google's FRAMES. The best pipeline hit 78.9%. Our agent loop hit 92.7%.",
+      "subreddit": "Rag",
+      "url": "https://www.reddit.com/r/Rag/comments/1wv356m/we_benchmarked_18_rag_pipelines_against_an_agent/",
+      "author": "Effective-Ad2060",
+      "created_utc": "2026-10-01 15:54:51",
+      "score": 28,
+      "num_comments": 9,
+      "upvote_ratio": 0.98,
+      "text": "Hybrid search, reranking, query decomposition, and query expansion are often treated as must-haves for good RAG. We wanted to see how much each actually helped, so we tested them. Same model, same embeddings, same documents, across all 824 multi-hop questions in FRAMES.\n\nWe built 18 pipeline variants. The best one scored 78.9%. Our agent loop (with retrieval tools) that could read the results and search again scored 92.7%—roughly the same as giving the model the right articles upfront.\n\nThe reranker results might surprise you. A small reranker dropped rag pipeline’s accuracy by 9 percentage points, while a larger one barely helped. I’d already suspected reranking wouldn’t help much here, but wanted to test that assumption.\n\nAnother thing we noticed: models sometimes fill in gaps from memory, even when you explicitly tell them to stick to the retrieved documents. Those answers can still be full of citations. We ended up checking every correct answer against what the system had actually read.\n\nHere’s the write-up if you’re interested:  \n[Agentic RAG vs. traditional RAG on FRAMES](https://pipeshub.com/blog/agentic-rag-vs-traditional-rag-frames-benchmark)\n\nFull disclosure: I work on PipesHub, which is open source. The benchmark code and runbook are in the repo: [https://github.com/pipeshub-ai/pipeshub-ai/tree/frames](https://github.com/pipeshub-ai/pipeshub-ai/tree/frames)\n\nQuick note on what the numbers mean: they're end-to-end answer accuracy, not retrieval scores. Every answer was graded by an LLM judge (Claude Sonnet 5) using the FRAMES paper's own grading prompt, and independently by a second judge (Gemini Flash 3.8). The two agreed on almost every answer (Cohen's κ 0.93–0.98). We also checked each correct answer against the text the system was actually shown, so answers that came from the model's memory don't count as retrieval wins.",
+      "is_original_content": false,
+      "link_flair_text": "Showcase",
+      "permalink": "https://reddit.com/r/Rag/comments/1wv356m/we_benchmarked_18_rag_pipelines_against_an_agent/",
+      "domain": "self.Rag",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "pd94irw",
+          "author": "autognome",
+          "text": "Which model were you using? Are you using a frontier model? HR gets to 90% with qwen3.8 and 87 with glimmer. What model and which embeddings? \n\nhttps://ggozad.github.io/haiku.rag/benchmarks/#retrieval-map_3\n\nCongrats! Super interested to see this comparison.",
+          "score": 2,
+          "created_utc": "2026-10-01 18:03:15",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "pd95tfz",
+              "author": "Effective-Ad2060",
+              "text": "Thanks! We used gpt-5.6-luna (reasoning effort high), which is a smaller model rather than a frontier one, with text-embedding-3-small for embeddings. That isn't the strongest embedding model around either. Every system on the board used the same model and the same embeddings, so the gaps come from how each system retrieves and reasons, not from the stack underneath.\n\nI'd be careful comparing the numbers directly, though. From the link, your 90% looks like a retrieval metric (MAP@3). Our 92.7% is end-to-end answer accuracy: an LLM judge grades the final answer against the FRAMES gold answer, and a second check confirms each correct answer is supported by the text the system actually read. The corpus is also harder than the gold articles alone: about 12.4k Wikipedia articles, of which roughly 10k are distractors.\n\nRunning FRAMES with a stronger model and a better embedding model is a great next step. We're already re-running the same board with Claude Sonnet 5.5 and will share the numbers when it's done.",
+              "score": 2,
+              "created_utc": "2026-10-01 18:08:43",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "pd8cmhw",
+          "author": "polandtown",
+          "text": "sweet!",
+          "score": 1,
+          "created_utc": "2026-10-01 16:06:09",
+          "is_submitter": false,
           "replies": []
+        },
+        {
+          "id": "pd9i6i1",
+          "author": "OkFlan504",
+          "text": "The interesting difference is that the agent can change what it looks for after seeing the first results. A reranker can improve the ordering, but it can’t bring in evidence that never made it into the candidate set. That seems useful when one answer requires several connected facts.",
+          "score": 1,
+          "created_utc": "2026-10-01 19:00:35",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "pd9ns2a",
+          "author": "No-Pangolin-8105",
+          "text": "Hi! I’m planning to introduce PipesHub in our company as an on-premise knowledge assistant for our technicians. The idea is to give them a central support tool for finding information in our technical documentation, while keeping the documents and data on-prem instead of moving everything to the cloud.\n\nWe’ll probably start the actual installation in 2027, but I wanted to ask: would it be okay to reach out to you directly if we run into any issues or have questions during the setup?  \nI’m really looking forward to trying it out!",
+          "score": 1,
+          "created_utc": "2026-10-01 19:24:17",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "pd9oyzr",
+              "author": "Effective-Ad2060",
+              "text": "Yes absolutely. Please feel free to reach out to us over Discord or email. Happy to help 😄 ",
+              "score": 1,
+              "created_utc": "2026-10-01 19:29:19",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "pd9p1it",
+          "author": "No-Afternoon-4057",
+          "text": "Congratulations. I get 80% at #1 and 99.7% up to @ 20 on a 500 queries test suite on my 10 million codebase/document base.\n\nThe embeddings stack you are using is VERY weak, you should consider testing many other. After a dozen tested, mDenseOn + mLateOn is by far the best i found. Close second is BGE-M3, but much heavier/slower.",
+          "score": 1,
+          "created_utc": "2026-10-01 19:29:38",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "pd9pxda",
+              "author": "Effective-Ad2060",
+              "text": "Thanks! Agreed, text-embedding-3-small is far from the strongest option. We chose it on purpose as a common default, and every system on the board used the same one, so the comparison holds even if the absolute numbers would rise with a better model.\n\nFor context, the retrieval side is less of a bottleneck here than it might look. On PipesHub's first search for the raw question, the top result is a needed article 88% of the time, and one is in the top 10 for 99.9% of questions. What's hard about FRAMES is that each question needs 2 to 6 different articles, and they all have to reach the model. Every needed article is in the top 50 for only 82% of questions. The articles for later hops often look nothing like the question (\"who was the 15th first lady's mother\" doesn't resemble the article about her mother). A better embedding model helps the first hop; the later hops need another search informed by what the first one found. That's where most of the 14-point gap between the agent loop and the best pipeline comes from.\n\nThat said, I'd like to run it. PipesHub can use local Hugging Face embedding models, so BGE-M3 is an easy test, and it would be interesting to see how much a stronger embedder lifts the pipelines vs the loop. I hadn't come across mDenseOn + mLateOn. Do you have a link? Happy to add both to the board.",
+              "score": 1,
+              "created_utc": "2026-10-01 19:33:25",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "pda610l",
+                  "author": "No-Afternoon-4057",
+                  "text": "Sure!\n\n[https://huggingface.co/blog/lightonai/mdenseon-mlateon](https://huggingface.co/blog/lightonai/mdenseon-mlateon)\n\nBGE-M3 is sparse/dense/ColBERT...it is very strong on the ColBERT side.  \nmLateOn and mDenseOn do not have the sparse embedding (i use BM25), but they do have dense (very strong) and late interaction as well. BGE i think tops at 4096t with 1024d for the late interaction and mLate 8192t with 128d. mDense is (almost) as good as mLate and i have switched to mLate/mDense after some 15 months using BGE, because they were the first to beat (and they are pretty recent, end of july). Nothing ever came even close on my benchmarks. This combo craps on \"Jevs\" head for classification/reranking (Jev brought my scores down from 99.7% to 60% - 75% and was quickly discarded).\n\n",
+                  "score": 1,
+                  "created_utc": "2026-10-01 20:43:03",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
         }
       ]
     },
@@ -586,9 +777,9 @@
       "url": "https://www.reddit.com/r/Rag/comments/1ws47et/what_are_the_best_alternatives_to_aws_textract/",
       "author": "Kind_Taste_3985",
       "created_utc": "2026-09-28 03:48:51",
-      "score": 24,
-      "num_comments": 17,
-      "upvote_ratio": 0.97,
+      "score": 25,
+      "num_comments": 18,
+      "upvote_ratio": 0.95,
       "text": "I work at an document AI company.\n\nWe had to move off Textract because our documents cannot leave our own cloud. After a couple of weeks of testing, here is my shortlist of self-hosted options, with where each one fits:  \n  \ndocling (IBM): turns digital PDFs into clean markdown, great for ingestion, weaker on scans and handwriting.\n\nPaddleOCR-VL: handles messy multilingual layouts and stays small enough for a modest GPU.\n\nMinerU: the strongest of the ones I tried on formula-heavy scientific PDFs.\n\nSIE (Superlinked): lets you run these OCR models behind one endpoint and swap them by ID instead of standing up a server per model.  \n  \nThe thing I keep hitting is that the top models score close enough that testing on your own documents matters more than the leaderboard. If there is one I have obviously missed, throw it in.",
       "is_original_content": false,
       "link_flair_text": "Tools & Resources",
@@ -616,7 +807,7 @@
                   "id": "pcj5ei7",
                   "author": "caprica71",
                   "text": "That’s when a llm pays off.   Sometimes I start with an ocr then get a llm to check the original image and fix the ocr.    Depending on the number of corrections you might need to check again and again and again\n\nIt took me 2.5 repeats on average on some messy documents formatted as brochures",
-                  "score": 4,
+                  "score": 3,
                   "created_utc": "2026-09-28 07:30:55",
                   "is_submitter": false,
                   "replies": []
@@ -698,6 +889,15 @@
           "replies": []
         },
         {
+          "id": "pd7nkq9",
+          "author": "AlexAtOracleAIDB",
+          "text": "Your list covers the OCR step, and the gap I'd add sits right after it. If the docs can't leave your cloud, the extracted text can't either. If the restriction covers document contents, keep the extracted text in the same environment too; an embedding endpoint outside your cloud would send the text there.  \n  \nI run chunking and embedding in SQL with an ONNX embedding model loaded locally, which keeps the text in the same place as the docs.  \n  \nThat doesn't replace your OCR pick, though. The database's own document filters don't OCR scans, since a scanned page tends to be just an image, so the OCR model still runs first.",
+          "score": 1,
+          "created_utc": "2026-10-01 14:14:51",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
           "id": "pciddcs",
           "author": "Scary_Tour4227",
           "text": "What about llamaparse ?",
@@ -729,181 +929,15 @@
       ]
     },
     {
-      "id": "1woxtbv",
-      "title": "How are you handling RAG when the documents can’t leave your infrastructure?",
-      "subreddit": "Rag",
-      "url": "https://www.reddit.com/r/Rag/comments/1woxtbv/how_are_you_handling_rag_when_the_documents_cant/",
-      "author": "Motor-Implement-462",
-      "created_utc": "2026-09-24 10:17:24",
-      "score": 21,
-      "num_comments": 20,
-      "upvote_ratio": 0.83,
-      "text": "I’ve been looking into RAG setups for cases where the source documents are sensitive and sending them to a hosted AI service isn’t an option.\n\nThe part I find interesting is that the retrieval pipeline itself is only one piece. You still have to deal with PDF/OCR processing, document structure, indexing, retrieval quality, citations, and the model running locally.\n\nI’ve been looking at LM-Kit as one approach to this. It combines local AI with RAG and document processing, so I’m interested in how it compares with more modular setups built around tools like LlamaIndex, Haystack, or RAGFlow.\n\nFor people running RAG locally or on-premises, what does your current stack look like?\n\nEspecially interested in what you’re using for document ingestion, retrieval, reranking, and local inference.",
-      "is_original_content": false,
-      "link_flair_text": "Discussion",
-      "permalink": "https://reddit.com/r/Rag/comments/1woxtbv/how_are_you_handling_rag_when_the_documents_cant/",
-      "domain": "self.Rag",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "pbr51vt",
-          "author": "Lumpy_Fisherman_5352",
-          "text": "Self-hosted stack that's held up for me: Docling (or unstructured.io) for ingestion - handles PDF layout/tables far better than PyPDF and keeps page/bbox metadata for citations. Layout-aware chunking so you don't split mid-table. Qdrant or pgvector, both on-prem. Reranking with bge-reranker-v2-m3 or Jina on a single GPU (a 3090 handles reranking fine, unlike generation). vLLM for concurrency, Ollama for low-volume. Biggest gotcha: citations break if you don't carry chunk-level source+page metadata through the rerank step - most rerankers return just text+score and drop metadata unless you re-attach after.",
-          "score": 14,
-          "created_utc": "2026-09-24 12:19:33",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "pbreqiv",
-          "author": "recro69",
-          "text": "The part people sometimes overlook is that keeping the LLM local is not enough if your embedding or reranking service is hosted. I would keep ingestion, embeddings, retrieval/reranking and inference inside the boundary. Then I would benchmark retrieval quality separately from the generation model.",
-          "score": 3,
-          "created_utc": "2026-09-24 13:10:15",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "pbvgfzz",
-              "author": "kyngston",
-              "text": "get an enterprise zdr account",
-              "score": 1,
-              "created_utc": "2026-09-25 00:07:26",
-              "is_submitter": false,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "pbqmy1a",
-          "author": "Headz0r",
-          "text": "I used Haystack a while ago for a similar project. But you would need a host with a GPU on premise. ",
-          "score": 1,
-          "created_utc": "2026-09-24 10:22:35",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "pbrnr1k",
-          "author": "ai_hedge_fund",
-          "text": "What number of users and what scale of document store?",
-          "score": 1,
-          "created_utc": "2026-09-24 13:53:03",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "pbsjkpj",
-          "author": "EducatorSalt1280",
-          "text": "Yeah, I feel like the difficult part with local RAG is that it’s not just about running the model locally. You also have to handle the whole thing like document processing, embeddings, retrieval, reranking, citations etc within your own infrastructure.\n\nI’ve also been confused about whether it’s better to use something more all-in-one like LM-Kit/RAGFlow or build everything separately with LlamaIndex or Haystack. The modular approach gives more control but at the same time there’s just a lot more things to manage.",
-          "score": 1,
-          "created_utc": "2026-09-24 16:10:53",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "pbso9sa",
-          "author": "Convergent-Tech",
-          "text": "Define \"your infrastructure.\"   Do you mean hardware in a DC you own?  Hardware you own in a CoLo?  Hardware someone else owns but you rent?  Virtual Private Cloud?  A full isolated enclave on a cloud provider?  \n\n\nThe scope of what is \"your infrastructure\" is not as simple as it might seem. ",
-          "score": 1,
-          "created_utc": "2026-09-24 16:30:22",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "pbu0nq7",
-          "author": "Educational_Cup9809",
-          "text": "I build the whole RAG architecture that be deployed anywhere https://akurion.ai",
-          "score": 1,
-          "created_utc": "2026-09-24 19:54:44",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "pbwk174",
-          "author": "ProtectionOk80",
-          "text": "GoodMem - GoodMem.ai deploys fully air-gapped ",
-          "score": 1,
-          "created_utc": "2026-09-25 03:42:38",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "pc18ddb",
-          "author": "Greedy_Aside516",
-          "text": "My stack is as follows: Document ingestion: embedding models <1GB, retrieval via Semantic/Vector Search, reranking: Reciprocal Rank Fusion (RRF) and inference via 8B LLM locally.",
-          "score": 1,
-          "created_utc": "2026-09-25 19:32:16",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "pcabsx3",
-          "author": "bear_with_a_beer",
-          "text": "we seal our rag playbooks before sending to vertexai",
-          "score": 1,
-          "created_utc": "2026-09-27 01:50:23",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "pckn31l",
-          "author": "LawfulnessOptimal597",
-          "text": "This is one of the central features of CoreQuarry: the ability to be 100% hosted on bare metal/edge.  \n\nMost “AI-powered search” today means sending your documents somewhere else (a hosted vector database, an LLM provider’s API, etc.) for chunking and embedding. Which means your data crosses infrastructure you don’t control, sits under legal jurisdictions you might not have chosen, and depends on a vendor’s pricing and API both staying the same.\n\nCoreQuarry can run the full hybrid retrieval stack, keyword, structural, and semantic, on a laptop. It’s C++ (and Apache 2.0 Open Source) without any Python dependencies. It’s ingests all kinds of formats including ODF, PDF, XML, JSON, TAGML, … most directly with the few exceptions like PDF and the Office Formats that need to be rendered into an intermediate format that it can directly ingest. It’s HNSW implementation supports both pre-quantised GGUF models as well as provides it’s own quantisation including RaBitQ (and it’s extended variant). Since the models run under ggml we support  Metal (Apple), CUDA, Vulkan .. \n\nhttps://CoreQuarry.com",
-          "score": 1,
-          "created_utc": "2026-09-28 13:30:46",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "pd4bi05",
-          "author": "wodaxia",
-          "text": "We've built a fair number of on-prem RAG systems, and they usually break down into three core pieces: an ingestion pipeline, a query/retrieval layer, and a local model inference component. In practice, we've ended up combining several open-source projects—LightRAG, CocoIndex, and Ollama/ONNX etc—depending on the use case.\n\nThe biggest lesson after all that: getting the system to \"work\" is the easy part. The real challenge is making the query results reliable enough—specifically, hitting an acceptable recall ratio. That's where most projects live or die.\n\nAnd that reliability almost always comes down to three things: data quality, better knowledge extraction, and being able to adapt to the JSON structure that local models actually return (which is often messier than what you get from cloud APIs).",
-          "score": 1,
-          "created_utc": "2026-10-01 01:05:48",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "pbsaf42",
-          "author": "Cyb3erDudu",
-          "text": "I built my own stack for this — it's called axiom, open source here: [https://github.com/Cyb3rDudu/axiom](https://github.com/Cyb3rDudu/axiom)\n\nI use it daily for research in my academic work. My corpus is around 370 academic books, and the whole point was that none of it leaves my machine. A Go service does the orchestration and API, a Python worker does the heavy document work, and everything runs locally. For writing I run a Gemma 4 MoE model locally, so even the generation step never sees a cloud.\n\nOn the storage side PostgreSQL with pgvector is the canonical store for everything — documents, chunks, embeddings, entities and OpenSearch handles the BM25 arm. Retrieval is hybrid: dense plus sparse plus BM25, then a reranker, and there's a graph arm on top where GLiNER extracts entities, they land in a knowledge graph, and corroboration feeds back into ranking. That combination turned out to matter a lot for  academic text where exact terminology beats fuzzy similarity.\n\nIngestion is honestly where most of the effort went, not the retrieval. The pipeline does structure-aware chunking for PDF and EPUB, keeps sections and figure captions attached to the chunks, and tracks page locators properly — verified against printed folios where they exist, interpolated where they don't. If a citation comes back with the wrong page number, the whole system is worthless for academic work, so I treated locators as a first-class problem.\n\nOCR runs through ocrmypdf and tesseract bundled in a repair worker. The part I care about is the lifecycle: a scan without a text layer gets flagged as repairable at preflight, healed automatically on all cores, and the recovered text is written back into the stored file itself — so the book stays annotatable in the library, not just searchable.\n\nThat library layer is Zotero, which acts as the bibliographic source of truth. Everything downstream consumes versioned revisions from it, and notes get written back with provenance.\n\nIf I had to sum up the lesson compared to stitching together LlamaIndex or Haystack: retrieval was maybe 20% of the work. The other 80% is document lifecycle — repair, retention, citation-grade locators, metadata provenance. Nobody demos that part, but it's what makes the answers trustworthy.",
-          "score": 0,
-          "created_utc": "2026-09-24 15:32:22",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "pcdpn3t",
-              "author": "divyeshkamalanaban",
-              "text": "How do you handle semantic dilution in the ingestion phase? How do you make sure you get what you query especially when you have so many documents of the same structure? Breadcrumbs saturate over multiple documents of same structure, so coming up with a good chunking + metadata strategy for ingestion is the toughest part. And why didn't you try docling for ingestion?",
-              "score": 1,
-              "created_utc": "2026-09-27 15:15:20",
-              "is_submitter": false,
-              "replies": [
-                {
-                  "id": "pck55qv",
-                  "author": "Cyb3erDudu",
-                  "text": "Semantic dilution is real, and it bites hardest with same-structure corpora. A few things that work for me:\n\nChunks carry their own context. Every chunk keeps its section trail as attached metadata, and figure captions stay bound to their chunk. For material that lives in a running context — lecture transcripts, course docs - chunks get a generated prefix naming the course or module they belong to. That's the move against breadcrumb saturation: two identically structured documents stop producing interchangeable chunks, because the frame travels with the text.\n\nRetrieval doesn't lean on embeddings alone. Dense vectors dilute exactly the way you describe. So the hybrid setup does the heavy lifting: sparse embeddings and BM25 anchor exact terminology, a reranker cleans up the fusion, and a graph arm helps across books - entities consolidate on canonical form, and corroboration counts stabilize what's actually consistent across the corpus instead of per-chunk noise. There's also a per-book cap on results, so one repetitive document can't flood a query.\n\nAnd corpus discipline, which is unfashionable but does a lot of work. It's a curated library, not a scrape. Everything gets repaired before indexing - OCR junk is embedding poison - and retention prunes superseded generations. My dilution problem was never really structure, it was garbage in the index. So the pipeline spends its effort keeping the index clean instead of making it cleverer.\n\nOn docling: the current Python runner was lifted from an earlier proof of concept, and I kept what already worked there rather than swapping the parsing layer mid-build. The plan is to move processing into the Go side eventually, and docling is the intended parser for that migration - it fits better there than bolting it onto the inherited pipeline now. The honest reason is sequencing, not superiority. My 80% problem was lifecycle anyway: repair, provenance, retention, verified page locators. Parsing was never where the trust was won or lost.",
-                  "score": 1,
-                  "created_utc": "2026-09-28 12:01:12",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        }
-      ]
-    },
-    {
       "id": "1wtwv9b",
       "title": "Updated my memory system to use jev as a reranker 97% on LongMemEval*",
       "subreddit": "Rag",
       "url": "https://www.reddit.com/r/Rag/comments/1wtwv9b/updated_my_memory_system_to_use_jev_as_a_reranker/",
       "author": "turlockmike",
       "created_utc": "2026-09-30 05:41:24",
-      "score": 16,
+      "score": 21,
       "num_comments": 5,
-      "upvote_ratio": 0.9,
+      "upvote_ratio": 0.92,
       "text": "[https://github.com/turlockmike/deep-recall](https://github.com/turlockmike/deep-recall)\n\n my general thesis is that memory is really a search problem with tight constraints. The goal is to find the right context. With that in mind, I started with a hybrid vector and graph search. Adding jev made a massive difference. Just wanted to share and get feedback.\n\n",
       "is_original_content": false,
       "link_flair_text": "Showcase",
@@ -967,9 +1001,9 @@
       "url": "https://www.reddit.com/r/Rag/comments/1wt3rzj/building_a_corrective_rag_crag_compliance/",
       "author": "Affectionate_Slip654",
       "created_utc": "2026-09-29 07:36:04",
-      "score": 14,
+      "score": 16,
       "num_comments": 2,
-      "upvote_ratio": 0.86,
+      "upvote_ratio": 0.88,
       "text": "Most RAG chatbots will confidently answer with whatever they retrieved — even if it's irrelevant, even if it's wrong. In compliance, that's not a minor bug, it's real regulatory exposure.\n\n* **YouTube walkthrough:** [https://www.youtube.com/watch?v=NxY93are\\_H8](https://www.youtube.com/watch?v=NxY93are_H8)\n\nIn this video, I build the Veltra Pay Compliance Assistant — a Corrective RAG (CRAG) + Self-Correcting RAG Agent that checks its own work before it ever shows you an answer. It grades its own retrieved documents, rewrites its own search when retrieval is weak, and validates its own generated answer for grounding, hallucination risk, and completeness — retrying itself when it fails, and honestly saying \"I don't know\" when it genuinely can't answer from the source material.\n\n* ✅ The difference between a normal RAG pipeline and Corrective RAG (CRAG)\n* ✅ How CRAG grades retrieved documents as relevant/irrelevant and rewrites the search query when retrieval is weak\n* ✅ How a Self-Correcting RAG Agent validates its own generated answer — grounding, hallucination risk, completeness, and retrieval sufficiency\n\nTECH STACK:\n\n* 🛠️ Python\n* 🛠️ LangGraph (StateGraph — nodes, conditional edges, bounded retry loops)\n* 🛠️ Qdrant (vector database)\n* 🛠️ PDF ingestion & chunking (pdfplumber, overlapping chunks)\n* 🛠️ LLM-based document grading, query rewriting & answer validation\n* 🛠️ Streaming backend (Server-Sent Events) for live pipeline progress\n* 🛠️ Web dashboard for real-time visualization\n* **GitHub repository:** [https://github.com/saurabhkamal/Building-Corrective-RAG-CRAG-Pipeline-Self-Correcting-RAG-Agent](https://github.com/saurabhkamal/Building-Corrective-RAG-CRAG-Pipeline-Self-Correcting-RAG-Agent)\n* **YouTube walkthrough:** [https://www.youtube.com/watch?v=NxY93are\\_H8](https://www.youtube.com/watch?v=NxY93are_H8)\n* **Connect on LinkedIn:** [linkedin.com/in/saurabh-kamal](https://www.linkedin.com/in/saurabh-kamal/)\n\n[ Building a Corrective RAG (CRAG) Compliance Research Assistant](https://www.youtube.com/watch?v=NxY93are_H8&t=5s)",
       "is_original_content": false,
       "link_flair_text": "Tutorial",
@@ -1006,7 +1040,7 @@
       "created_utc": "2026-09-27 23:38:01",
       "score": 13,
       "num_comments": 4,
-      "upvote_ratio": 0.93,
+      "upvote_ratio": 0.89,
       "text": "Hey everyone 👋 About 7 months ago, I joined this subreddit to keep up with the RAG discussion and have since been a quiet observer whilst building my own RAG-based application.\n\nEven after all the advancements in LLMs, the ever-increasing context windows and the hype around OKF and Jev etc I've stuck with and am still a big believer in \"old school\" vector-based RAG for AI knowledge work.\n\nAs I've followed this subreddit and learning the techniques shared by everyone here, I've tried applying them to my application to varying degrees of success but some of my most notable results from keeping to RAG are:\n\n* Efficiency - reading from a 500 page document remains least wasteful\n* Speed - searching through 1000s of docs in a knowledgebase remains super fast\n* Cost - embedding tokens costs remains some of the cheapest around\n\nMy stack: Voyage 4, Gemini multimodal, Qdrant (hybrid search), Jev for rerank (new and still evaluating effectiveness)\n\nSo yeah, sort of a nothing post but thanks again for the discussions! I hope to continue to learn from this community, particularly interested in multimodal embeddings 🙏",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -1055,40 +1089,120 @@
       ]
     },
     {
-      "id": "1wpa6xb",
-      "title": "BaryGraph: A Relational Geometry for Cognitive AI",
+      "id": "1wuysk0",
+      "title": "Our masking layer passed every test we wrote and compliance still would not sign it off",
       "subreddit": "Rag",
-      "url": "https://www.reddit.com/r/Rag/comments/1wpa6xb/barygraph_a_relational_geometry_for_cognitive_ai/",
-      "author": "adseipsum",
-      "created_utc": "2026-09-24 18:52:07",
+      "url": "https://www.reddit.com/r/Rag/comments/1wuysk0/our_masking_layer_passed_every_test_we_wrote_and/",
+      "author": "Fragrant-Cheek-4273",
+      "created_utc": "2026-10-01 12:59:56",
       "score": 12,
-      "num_comments": 2,
-      "upvote_ratio": 0.93,
-      "text": "BaryGraph is a recursively constructed relational vector architecture for AI memory and reasoning. Starting from a flat semantic substrate, it forms triadic objects in which two concepts are joined by a stored relational vector. These objects then become the building blocks of higher-order structures, propagating meaning upward through a hierarchy entirely in vector space.\n\nThe result is a deterministic, navigable semantic landscape: a structured latent memory of language movement, where concepts, bridges, tensions, contradictions, and relations of relations become retrievable coordinates. A model enters with a semantic query and traverses this landscape through coordinated message passing, exiting with a bounded semantic construction rather than merely the most fluent continuation.\n\nBaryGraph introduces structured resistance into cognition: distant connections and unresolved tensions can interrupt familiar associations and function as a de-cliché mechanism without acting as an external supervisor. This creates a framework for investigating a deeper question: whether persistent relational memory and self-consistent navigation can become foundations for world-model formation, personality projection, autonomous goal formation, and eventually more realistic forms of agency.\n\nBaryGraph does not claim to produce consciousness. It offers an architecture for experimentally studying the representational and memory conditions that might precede it.\n\n[https://oleksiy-perepelytsya.github.io/bary-graph](https://oleksiy-perepelytsya.github.io/bary-graph)",
+      "num_comments": 12,
+      "upvote_ratio": 1.0,
+      "text": "We run a RAG setup over a client's case files, a mid-sized firm that is understandably twitchy about anything leaving their network. Retrieval and embeddings run on their side against the raw text. Only generation goes out to an API, so we put a masking layer in front of it. A small local model tags names and account numbers, swaps them for placeholders before the chunks leave, and maps them back when the answer comes home.\n\nWe tested it properly, or thought we had. Ran a few thousand queries, searched the outbound logs for every client name in the system, found nothing.\n\nThen their compliance lead sat with those same logs for an afternoon and came back having identified a couple of clients anyway, from what was left around the placeholders. Job titles and towns were still there, and in one case the month the dispute started. Client A stops being anonymous when the chunk also says finance director at a haulage firm in a small town. We had only ever searched for names.\n\nMasking the quasi-identifiers as well is where it gets ugly. Strip enough context to make it safe and the model stops being able to answer, because half the questions they ask depend on exactly that context. We ran a middle setting for a week and the answers went vague in a way the lawyers noticed before we did. \n\nGeneration has been on glm-5.3-flash for the last few weeks, and because it is an open weight model the conversation has turned to hosting it inside their environment and dropping the masking altogether. Compliance likes that far more than anything we built. The argument now is about the hardware, and that has not been settled.",
       "is_original_content": false,
-      "link_flair_text": "Showcase",
-      "permalink": "https://reddit.com/r/Rag/comments/1wpa6xb/barygraph_a_relational_geometry_for_cognitive_ai/",
+      "link_flair_text": "Discussion",
+      "permalink": "https://reddit.com/r/Rag/comments/1wuysk0/our_masking_layer_passed_every_test_we_wrote_and/",
       "domain": "self.Rag",
       "is_self": true,
       "comments": [
         {
-          "id": "pbuzjgi",
-          "author": "Otherwise_Wave9374",
-          "text": "The recursive geometry is interesting, but the practical question is whether it improves retrieval or reasoning beyond a well-tuned graph plus embeddings. I would publish an ablation that holds the corpus, embedding model, context budget, and reranker constant, then removes each geometric component. Measure multi-hop accuracy, contradiction handling, update cost, and sensitivity to noisy edges. https://www.neurakeep.com is relevant as a comparison point for persistent AI memory, though independent replication and clear failure cases would make the architectural claim much easier to evaluate.",
+          "id": "pd7qby0",
+          "author": "Fast_Sherbert3066",
+          "text": "Quasi-identifiers are what kill every masking setup I have seen. We did the same thing on medical notes and a reviewer re-identified a patient from a rare condition plus a postcode district, no name anywhere near it. After that we stopped treating masking as a privacy control and started treating it as a way to reduce exposure, which is a much weaker claim and the one legal was actually willing to sign.",
           "score": 2,
-          "created_utc": "2026-09-24 22:36:38",
+          "created_utc": "2026-10-01 14:27:31",
           "is_submitter": false,
-          "replies": [
-            {
-              "id": "pbz7gi8",
-              "author": "adseipsum",
-              "text": "Thanks, better retrival not the claim for the schema, but abstract coordinates for a model to rely on in reasoning. It genuinely hard to evaluate such things but with the human-in-the-loop approach. Another option is actually a model freely processing the graph, analysing retrivals and creates its own bridges to include in the graph, providing self-learning loop and to evaluate this model reasoning with retrivals on more cognitive like tests, rather than pure retrival relevancy evaluation.\n",
-              "score": 1,
-              "created_utc": "2026-09-25 14:22:07",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
+          "replies": []
+        },
+        {
+          "id": "pd7aj2q",
+          "author": "notAllBits",
+          "text": "That is such a sketchy scaffolding. I would reject direct API calls, one shot toxicity detection, no HITL processing of existentially penalized processing. \n\nI would work with structured data after extraction from sensitive documents. JeV and open alternatives from GitHub or huggingface help you stabilize both extraction, retrieval, ranking, data scope and reach controls, process monitoring and governance, and with policies (mcp/API call) and guardrails. \n\nBoth GDPR and EU AI Act should be understood by developers or a very close by squad",
+          "score": 1,
+          "created_utc": "2026-10-01 13:12:23",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "pd7cumi",
+          "author": "megdiamante",
+          "text": "Testing by grepping for the names you removed is how we all start. It only proves the removal worked.",
+          "score": 1,
+          "created_utc": "2026-10-01 13:23:52",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "pd7r04d",
+          "author": "marintkael",
+          "text": "The step after that is usually generalizing instead of masking. Finance director at a haulage firm in a small town becomes senior staff, logistics, the county, and the month the dispute started becomes the quarter. That's the k-anonymity idea, and there's often a level where the model still has enough to answer while the combination stops pointing at one person. The questions that really need the exact context are probably the ones to keep on a local model, even if it answers worse. And keep your compliance lead's afternoon as the test, someone who knows the client list reading the outbound logs and trying to name people.",
+          "score": 1,
+          "created_utc": "2026-10-01 14:30:35",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "pd7scsj",
+          "author": "remosito",
+          "text": "Currently in the process of implementing a PoC. we are gonna put major focus on testing how low we can go model size and quantization wise. to open up local model hosting options.\n\ntakes all those concerns away.\n\nnew qwen preview with smart arch that puts quite a chunk in ram looks really intriguing. ram isnt exactly cheap these days either. but nothing compared to vram....\n\nworst we shelf the PoC until AI bubble pops and hw can be had for waaay less. and o live then.",
+          "score": 1,
+          "created_utc": "2026-10-01 14:36:48",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "pd7z32w",
+          "author": "nomad-link-id",
+          "text": "This is the failure mode where the test suite and the threat model quietly drift apart.\n\nGrepping outbound logs for the names you remembered to mask only proves removal of those strings. Compliance found clients from what was left around the placeholders — job title + town + timing is enough to re-identify in a small professional circle. The ugly trade you hit next (strip quasi-identifiers → answers go vague) is real; it doesn't make the original green suite a privacy proof.\n\nPractical check before calling masking \"tested\": do any cases assert that a held-out re-identification attempt using remaining fields fails, or only that listed PII tokens are absent?",
+          "score": 1,
+          "created_utc": "2026-10-01 15:07:03",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "pd86fo0",
+          "author": "padrino121",
+          "text": "Completely agree, you cannot reliably use a public model endpoint.. Corvex Token Factory or another enterprise certified product (SOC Type II, HIPPA, etc) is a good approach ",
+          "score": 1,
+          "created_utc": "2026-10-01 15:39:28",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "pd94yzv",
+          "author": "_goofballer",
+          "text": "Why not get ZDR from a model hosting provider so you don’t have this problem? ",
+          "score": 1,
+          "created_utc": "2026-10-01 18:05:09",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "pd9hylk",
+          "author": "OkFlan504",
+          "text": "The vague answers belong in the hardware cost comparison too. If people have to reopen the source documents to recover the missing detail, the hosted option may be shifting cost from inference to review. That could change which setup is actually cheaper.",
+          "score": 1,
+          "created_utc": "2026-10-01 18:59:40",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "pd9mh40",
+          "author": "JuanPardilla",
+          "text": "For the hardware decision, I'd replay real questions against candidate local setups and measure answer quality, response time, and peak concurrent load. Include the questions that went vague under stronger masking so you're comparing the tradeoff that actually blocked the project. I'd also trace outbound traffic from ingestion through monitoring before concluding that the whole workflow stays inside the client's network.",
+          "score": 1,
+          "created_utc": "2026-10-01 19:18:43",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "pd7vk8o",
+          "author": "LawfulnessOptimal597",
+          "text": "There is no such thing as complete anonymisation .. having in my youth designed opinion research studies you’d be surprised how easy it is to identify people.. \n\nA dangerous trend has emerged where software solutions marketed as \"on-premise\" operate on a compromised hybrid architecture. For organizations bound by strict privacy mandates, these hidden network egress dependencies represent a critical vulnerability. Passing sensitive data to a third-party API or hosting it in a multi-tenant cloud layer completely invalidates the compliance, confidentiality, and security benefits of an on-premise deployment.\n\nTo maintain absolute data and infrastructure integrity, a system cannot rely on cloud-tethered shortcuts. The entire pipeline—document ingestion, lexical parsing, text chunking, local weight embedding generation, vector path storage, and large language model (LLM) inference—must run completely contained within the secure, local perimeter.\n\nSo if they want to make sure data does not leak and keep things air gapped they just need to fully self host (again following good governance and best practices). It’s one of the main use cases I designed by engine for: bare metal and edge. ",
+          "score": 0,
+          "created_utc": "2026-10-01 14:51:17",
+          "is_submitter": false,
+          "replies": []
         }
       ]
     },
@@ -1101,7 +1215,7 @@
       "created_utc": "2026-09-25 22:47:38",
       "score": 10,
       "num_comments": 15,
-      "upvote_ratio": 0.82,
+      "upvote_ratio": 0.86,
       "text": "Our RAG relevance average looked solid until we sliced queries containing exact product codes, error IDsand version strings. Embedding similarity smoothed away the literal tokens, an over weighted semantic score buried the BM25 match and the reranker still produced plausible passages. Recall at k looked fine in aggregate because the demo questions were written like natural prose (apparently nobody asks a support bot about ERR-8492 in a demo).\n\nWe are testing reciprocal rank fusion, per-query score normalization and a separate slice for heavier identifier requests. The hard part is choosing weights without trading one long tail for another, especially when overlapping chunks inflate the top results. How are people tuning hybrid search for exact identifiers and which slice metrics catch a collapse before the average moves?",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -1232,7 +1346,7 @@
       "author": "OwlZealousideal4779",
       "created_utc": "2026-09-26 07:15:45",
       "score": 9,
-      "num_comments": 4,
+      "num_comments": 6,
       "upvote_ratio": 0.91,
       "text": "  \nAs RAG applications grow, I've been wondering how people are separating document storage from the retrieval layer itself.  \n  \nFor a small project, keeping PDFs, source documents, datasets, and generated files on the same machine can be pretty straightforward. But once you have multiple ingestion workers, different environments, or a growing document collection, having a shared storage layer starts to become more important.  \n  \nI've been looking at RustFS, an open-source S3-compatible object storage project, and it got me thinking about this architecture.  \nFor those running RAG in production or on larger datasets, what are you using for the original documents and other files behind the retrieval pipeline?  \n  \nDo you typically use S3/object storage, local volumes, a cloud storage service, or something else? And how do you handle things like versioning, backups, and keeping the stored documents consistent with the embeddings/index?",
       "is_original_content": false,
@@ -1245,7 +1359,7 @@
           "id": "pc4uecv",
           "author": "hncvj",
           "text": "Let me share my experience. In one of our large scale project, the biggest thing that made large pipelines sane for us: the object storage is one source of truth for the raw bytes, and everything downstream (vectors, graph, search index) is disposable and rebuildable from it. We're currently roughly at at 40M+ source documents across multiple regions, single cases (We cater Law firms working in Medical Industry) in the tens of thousands of pages, mixed PDF/DICOM/video/audio, so object store yes (S3, or any other S3-compatible like RustFS/MinIO for self-host works), but the bytes never live with the retrieval layer. The DB only holds pointers, an object key, a content hash, page metadata, region, not the files. Once you treat the index as a cache and not a record, you can re-chunk, re-embed, even swap your vector DB under a live system and nothing's at risk, you just rebuild from the store. In our case, the buckets are regional too, so each tenant's docs physically stay in-region for data-residency (We're under compliances).\n\nFor keeping storage and index consistent, we key embeddings to a content hash of the source (doc, page, hash), so a changed doc changes the hash and only that doc re-embeds, idempotent upserts, never blind reinserts. That turns \"is the index in sync\" into a cheap hash diff instead of a leap of faith.\n\nFor us the versioning is append-only with the pointer in the DB, and we lean on the object store's durability plus object-lock/WORM for retention, so derived layers don't even need backups. \n\nI'm curious how others handle drift, do you actively reconcile store vs index (hash diffing), or just rebuild on a schedule and hope? That's where I've seen the most silent breakage.",
-          "score": 3,
+          "score": 4,
           "created_utc": "2026-09-26 08:22:07",
           "is_submitter": false,
           "replies": []
@@ -1266,7 +1380,17 @@
           "score": 1,
           "created_utc": "2026-09-26 07:55:19",
           "is_submitter": false,
-          "replies": []
+          "replies": [
+            {
+              "id": "pd5qun6",
+              "author": "LawfulnessOptimal597",
+              "text": "I’m confused. Don’t understand.  With cheap 4TB NVME disks (despite the price increase still under $800) you can store as a local cache quite a few PDFs and datasets. Unless you are a large library (the Library of Congress has PB of data in their digital collection) a few TB of storage is quite a large document cache.  The entire internal corporate knowledge base of 99% of companies typically fits on a single 1-4TB SSD. With RAG we can also have multiple distributed search nodes since the amount of I/O needed for passages in not large and we’re long out of the yellow cable world (home networks these days often have 10GB/s Ethernet). I don’t see the sweat. Distributed object stores like S3/Minio are to address very different needs. So why do some people run Minio ? Their tooling is designed for cloud and S3. So many of these systems come with production-ready connectors for S3 storage. Building on local AI like ggml this is kind of backwards for 2026 where we want to move away from the cloud to bare metal rather than design locally to shift to the cloud.",
+              "score": 1,
+              "created_utc": "2026-10-01 06:28:11",
+              "is_submitter": false,
+              "replies": []
+            }
+          ]
         },
         {
           "id": "pctmb6x",
@@ -1276,54 +1400,15 @@
           "created_utc": "2026-09-29 16:50:19",
           "is_submitter": false,
           "replies": []
-        }
-      ]
-    },
-    {
-      "id": "1wpmbjw",
-      "title": "CORTEX RAG just crossed 2,000 GitHub stars — so we figured we'd finally introduce ourselves",
-      "subreddit": "Rag",
-      "url": "https://www.reddit.com/r/Rag/comments/1wpmbjw/cortex_rag_just_crossed_2000_github_stars_so_we/",
-      "author": "Overall_Mission_1781",
-      "created_utc": "2026-09-25 03:55:23",
-      "score": 9,
-      "num_comments": 3,
-      "upvote_ratio": 0.8,
-      "text": "CORTEX RAG just crossed 2,000 GitHub stars 🎉\n\nWebsite: [https://cortex-rag-beta.vercel.app/](https://cortex-rag-beta.vercel.app/)\n\nWe started building it because we wanted a RAG system that could run locally, keep documents on your own infrastructure, and expose the retrieval pipeline instead of hiding everything behind a hosted API.\n\nThe project has grown quite a bit since then:\n\n• Contextual Retrieval  \n• RAG-Fusion + RRF  \n• GraphRAG  \n• Corrective RAG  \n• Neural reranking  \n• HyDE  \n• Semantic caching  \n• Chat memory  \n• Source-aware answers\n\nThe goal was never to make another “chat with your PDF” demo.\n\nWe wanted to experiment with what a more complete retrieval pipeline could look like while keeping it open source and something people can actually run, inspect and modify.\n\nGitHub:  \n[https://github.com/SaiAkhil066/CORTEX-AI-SUPER-RAG](https://github.com/SaiAkhil066/CORTEX-AI-SUPER-RAG)\n\nWe’ve also started getting requests from people who want similar systems built around their own data, permissions or infrastructure. We’re open to those conversations too, while keeping CORTEX RAG itself open source.\n\nReally curious what other people here are building with RAG right now, especially anything beyond basic vector search.",
-      "is_original_content": false,
-      "link_flair_text": "Showcase",
-      "permalink": "https://reddit.com/r/Rag/comments/1wpmbjw/cortex_rag_just_crossed_2000_github_stars_so_we/",
-      "domain": "self.Rag",
-      "is_self": true,
-      "comments": [
+        },
         {
-          "id": "pbzgjua",
-          "author": "alexpran",
-          "text": "Nine techniques in one pipeline is the interesting part, and the question I'd ask is how you know each one earned its place. Contextual Retrieval, Fusion, GraphRAG and a reranker all touch what reaches the model, so adding one can quietly undo another on a slice of queries while the average holds. Did you keep a fixed question set with the results from before each addition, or was it more \"it felt better\"? Genuinely asking, I've never seen anyone publish that for a pipeline this size.",
-          "score": 2,
-          "created_utc": "2026-09-25 15:01:00",
+          "id": "pd8ltc9",
+          "author": "LawfulnessOptimal597",
+          "text": "After some contemplation I think NFSv4 + FS-Cache is probably a good solution .. ",
+          "score": 1,
+          "created_utc": "2026-10-01 16:45:01",
           "is_submitter": false,
-          "replies": [
-            {
-              "id": "pc5urpb",
-              "author": "Overall_Mission_1781",
-              "text": "u/alexpran Yeah, honestly, we didn't start with a proper benchmark for every step.\n\nA lot of the early work was pretty practical, we'd try something on a set of queries, compare the retrieval/results with what we had before, and if it was consistently helping, we'd keep it.\n\nBut your point about the average hiding things is spot on. We've seen cases where something improves the overall result but makes certain types of queries worse.\n\nWe haven't done a proper component-by-component ablation and published the numbers yet. That's something we want to do next though, especially breaking the queries into different types instead of just looking at one overall score.\n\nSo yeah, it's been more \"test it, compare it, see if it actually helps\" so far than a perfectly controlled experiment. Your question is actually a good push for us to formalize that.",
-              "score": 2,
-              "created_utc": "2026-09-26 12:51:36",
-              "is_submitter": true,
-              "replies": [
-                {
-                  "id": "pc5wuay",
-                  "author": "alexpran",
-                  "text": "That's a more useful answer than most published tables, and \"we've seen something improve the overall result but make certain query types worse\" is already the finding.\n\nTwo things from having built the boring version of this. Group the queries by type and report per group, never as one number, because that's the only way the thing you just described shows up at all. And before any ablation, run the same set two or three times with nothing changed and keep the spread, otherwise half the component deltas sit inside it and you keep or drop techniques by luck.\n\nIf you do formalise it I'd offer a hand: the comparison and noise floor part is what I build (digline, open source, reference committed in the repo). A suite of twenty questions in the repo, with the results from before each addition, would make every PR that adds a technique show what it cost. Happy to write the first one as a PR if that's useful, no strings.",
-                  "score": 2,
-                  "created_utc": "2026-09-26 13:02:41",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
+          "replies": []
         }
       ]
     },
@@ -1422,33 +1507,15 @@
       ]
     },
     {
-      "id": "1ws8qom",
-      "title": "NornicDB - 1.4.0-Preview",
-      "subreddit": "Rag",
-      "url": "https://www.reddit.com/r/Rag/comments/1ws8qom/nornicdb_140preview/",
-      "author": "Dense_Gate_5193",
-      "created_utc": "2026-09-28 08:12:47",
-      "score": 9,
-      "num_comments": 0,
-      "upvote_ratio": 1.0,
-      "text": "Been working on this a while and i think it's to a point to get more eyes on it and get it tested before we release.\n\nThis is a big parser refactor to enable full openCypher TCK support, increase stability, and performance.\n\nThe parser is similar to PEG, but it's a zero-allocation keyword scanner parse tree with lightweight lexing where needed, fused aggregation and traversal hot paths, and is coupled with streaming storage APIs. the storage is built on badgerDB.\n\n[https://github.com/orneryd/NornicDB/releases/tag/1.4.0-preview](https://github.com/orneryd/NornicDB/releases/tag/1.4.0-preview)\n\nFull openCypher TCK Compliance. That includes all the builtins, math functions, datetime conversions, everything. It's now part of CI and runs over 2000 scenarios in various modes each. more Neo4J differential stuff in CI - coming soon.\n\n**Performance highlights for the benchmark**\\-\n\n* per-query latency dropped roughly **35–45%** —\n   * mean query latency fell from 0.23 ms to **0.14 ms**,\n* wall time improved from \\~1.40 s to \\~**1.15 s** (**−18%**)\n* energy from \\~11.8 J to \\~**10.2** J (**−14%**),\n* peak memory dropped from 32.5 GiB to **20.0 GiB** (**−38%**).\n* Ingestion rate climbed from \\~8.8k to \\~12.7k nodes/sec (**+44%)**\n\nperformance benchmark breakdowns:\n\n[https://github.com/orneryd/NornicDB/blob/main/docs/performance/1.1.0-northwind-results/comparison.md](https://github.com/orneryd/NornicDB/blob/main/docs/performance/1.1.0-northwind-results/comparison.md)\n\nThat's not to mention RRF search continuation cursors (introduced in 1.3.3), and the HNSW improvements to IVF modes including IVF-PQ, Low memory mode optimizations, and more storage stability.\n\nedit: OH I ALMOST FORGOT! Improved recall by using lexial IDF hints from the BM25 index metadata for tie breaking and it improved quality across the board. here: [https://github.com/orneryd/NornicDB/blob/9a8d3734b9e73664148c7775f2774e167fff162f/docs/performance/retrieval-recall-benchmark.md#recorded-scifact-results](https://github.com/orneryd/NornicDB/blob/9a8d3734b9e73664148c7775f2774e167fff162f/docs/performance/retrieval-recall-benchmark.md#recorded-scifact-results)\n\n\"HNSW fast, lexical build + query entry points\" results\n\nMIT Licensed. 880+ stars and counting. \\~400x faster latency than neo4J for the same workloads on the same machines. neo4j-driver compatible.",
-      "is_original_content": false,
-      "link_flair_text": "Showcase",
-      "permalink": "https://reddit.com/r/Rag/comments/1ws8qom/nornicdb_140preview/",
-      "domain": "self.Rag",
-      "is_self": true,
-      "comments": []
-    },
-    {
       "id": "1wqmqbn",
       "title": "Beginner here, I know Python and NumPy. How would you learn RAG if you were starting from zero today?",
       "subreddit": "Rag",
       "url": "https://www.reddit.com/r/Rag/comments/1wqmqbn/beginner_here_i_know_python_and_numpy_how_would/",
       "author": "shakur_shirajul",
       "created_utc": "2026-09-26 10:02:16",
-      "score": 8,
-      "num_comments": 4,
-      "upvote_ratio": 0.91,
+      "score": 9,
+      "num_comments": 5,
+      "upvote_ratio": 0.92,
       "text": "Hey r/Rag,\n\nI want to learn RAG properly, but I honestly don't know where to start. Every tutorial I find either jumps straight into LangChain code without explaining anything, or assumes I already know a lot about LLMs and vector databases.\n\n**Where I'm at:**\n- Comfortable with Python\n- Know NumPy\n- No real experience with LLMs, embeddings, or vector search yet\n\nI'd really appreciate guidance from people who've actually built RAG systems:\n\n1. **What should I learn first?** Are there fundamentals (math, NLP, LLM basics) I need before touching RAG?\n2. **What order would you learn things in** if you were starting over?\n3. **What should I skip or not worry about yet?**\n4. **Best resources:** courses, YouTube channels, GitHub repos, or blogs that genuinely helped you.\n5. **A good first project** for a beginner that teaches the real concepts, not just copy-paste.\n\nI'll collect the answers into a summary and post it back here so it helps other beginners too.\n\nThanks in advance!",
       "is_original_content": false,
       "link_flair_text": "Discussion",
@@ -1495,6 +1562,70 @@
       ]
     },
     {
+      "id": "1wubxz6",
+      "title": "I tried 10 document parsers on 1,500 contract questions. Sharing what I learned",
+      "subreddit": "Rag",
+      "url": "https://www.reddit.com/r/Rag/comments/1wubxz6/i_tried_10_document_parsers_on_1500_contract/",
+      "author": "-GeneX-",
+      "created_utc": "2026-09-30 17:58:52",
+      "score": 9,
+      "num_comments": 3,
+      "upvote_ratio": 0.84,
+      "text": "We ran 10 document-parsing configurations across 94 redlined contracts, then gave the output to the same AI agent to answer 1,500 questions.\n\nA few things stood out:\n\nClean Markdown can still be completely wrong  \n  \nSay a contract has this:\n\n>~~ten~~ ~~three~~ five business days\n\nSome parsers return \\`ten three five business days\\`. All the words are there, but the agent can no longer tell which term was actually agreed.\n\nWhen we removed all edit markings, the agent got **28.8%** of the questions right. When every deletion was clearly preserved, it got **91.9%**. These are reference runs, not vendor scores.\n\n**The right setting can matter more than changing vendors**\n\nDatalab’s normal conversion endpoint scored **62.4%**. Its tracked-changes endpoint scored **78.6%**.\n\nSame vendor, **16.2 points higher** just from using the correct endpoint.\n\n**Scanned PDFs weren’t always harder**\n\nThis was the most surprising bit for us. We turned the same contracts into image-only PDFs and reran everything.\n\nGPT-6 Astra went from **63.3% to 91.3%**, while LlamaParse agentic dropped from **80.0% to 67.5%**.\n\nNot sure what to make of it but clearly text PDFs and scanned PDFs can take very different processing paths. Testing only clean PDFs probably won’t tell you how your production documents will behave.\n\nWe've published more insights here: [https://openbenchmarks.com/document-processing](https://openbenchmarks.com/document-processing), along with full results, methodology, costs, latency, dataset and open-source runner.\n\n",
+      "is_original_content": false,
+      "link_flair_text": "Discussion",
+      "permalink": "https://reddit.com/r/Rag/comments/1wubxz6/i_tried_10_document_parsers_on_1500_contract/",
+      "domain": "self.Rag",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "pd2oph7",
+          "author": "LawfulnessOptimal597",
+          "text": "I’m a bit confused .. what does strike through mean? In Markdown (or other typography) it is just a decoration. In fact this highlights what is terribly wrong with MarkDown. It reduces semantic tags to display. This spits in the face of all the lesions we learned from Charles Goldfarb:  the need for a strict separation between document structure and visual presentation. ",
+          "score": 2,
+          "created_utc": "2026-09-30 20:14:03",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "pd5y8r5",
+          "author": "Potential-Wrangler58",
+          "text": "Read through the full methodology, that out-of-scope list is the detail that stands out most: Textract, Azure Document Intelligence and Google Document AI didn't even make the cut because they can't represent a strike at all. That's a real gap, not a parsing nuance, if a parser has no concept of \"deleted\" vs \"kept\", no amount of prompt engineering downstream fixes it.\n\nWould love to get Anyformat into a future round, disclosure: I work there. We have an accuracy optimizer that's pulled numbers up on cases that looked unfixable going in, redlines specifically being the kind of thing it was built for. We also have free credits, so happy to set you up to run it against your exact 94-contract set yourself, that way it's a fair comparison, not a cherry-picked one. Super easy to set up with agents, and if any doubt just ping me :) ",
+          "score": 1,
+          "created_utc": "2026-10-01 07:28:38",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "pd86x1w",
+          "author": "Future_AGI",
+          "text": "that strikethrough example is the scary kind because the Markdown looks clean, so nothing downstream flags it. Parsing deserves its own eval separate from retrieval and generation: a small set of known-hard pages (redlines, merged table cells, footnotes, multi-column) with the correct extraction written out, run against each parser, so you catch 'ten three five' before it becomes a confidently wrong answer. Otherwise you are debugging the LLM for what is really a parser bug",
+          "score": 1,
+          "created_utc": "2026-10-01 15:41:35",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1ws8qom",
+      "title": "NornicDB - 1.4.0-Preview",
+      "subreddit": "Rag",
+      "url": "https://www.reddit.com/r/Rag/comments/1ws8qom/nornicdb_140preview/",
+      "author": "Dense_Gate_5193",
+      "created_utc": "2026-09-28 08:12:47",
+      "score": 8,
+      "num_comments": 0,
+      "upvote_ratio": 1.0,
+      "text": "Been working on this a while and i think it's to a point to get more eyes on it and get it tested before we release.\n\nThis is a big parser refactor to enable full openCypher TCK support, increase stability, and performance.\n\nThe parser is similar to PEG, but it's a zero-allocation keyword scanner parse tree with lightweight lexing where needed, fused aggregation and traversal hot paths, and is coupled with streaming storage APIs. the storage is built on badgerDB.\n\n[https://github.com/orneryd/NornicDB/releases/tag/1.4.0-preview](https://github.com/orneryd/NornicDB/releases/tag/1.4.0-preview)\n\nFull openCypher TCK Compliance. That includes all the builtins, math functions, datetime conversions, everything. It's now part of CI and runs over 2000 scenarios in various modes each. more Neo4J differential stuff in CI - coming soon.\n\n**Performance highlights for the benchmark**\\-\n\n* per-query latency dropped roughly **35–45%** —\n   * mean query latency fell from 0.23 ms to **0.14 ms**,\n* wall time improved from \\~1.40 s to \\~**1.15 s** (**−18%**)\n* energy from \\~11.8 J to \\~**10.2** J (**−14%**),\n* peak memory dropped from 32.5 GiB to **20.0 GiB** (**−38%**).\n* Ingestion rate climbed from \\~8.8k to \\~12.7k nodes/sec (**+44%)**\n\nperformance benchmark breakdowns:\n\n[https://github.com/orneryd/NornicDB/blob/main/docs/performance/1.1.0-northwind-results/comparison.md](https://github.com/orneryd/NornicDB/blob/main/docs/performance/1.1.0-northwind-results/comparison.md)\n\nThat's not to mention RRF search continuation cursors (introduced in 1.3.3), and the HNSW improvements to IVF modes including IVF-PQ, Low memory mode optimizations, and more storage stability.\n\nedit: OH I ALMOST FORGOT! Improved recall by using lexial IDF hints from the BM25 index metadata for tie breaking and it improved quality across the board. here: [https://github.com/orneryd/NornicDB/blob/9a8d3734b9e73664148c7775f2774e167fff162f/docs/performance/retrieval-recall-benchmark.md#recorded-scifact-results](https://github.com/orneryd/NornicDB/blob/9a8d3734b9e73664148c7775f2774e167fff162f/docs/performance/retrieval-recall-benchmark.md#recorded-scifact-results)\n\n\"HNSW fast, lexical build + query entry points\" results\n\nMIT Licensed. 880+ stars and counting. \\~400x faster latency than neo4J for the same workloads on the same machines. neo4j-driver compatible.",
+      "is_original_content": false,
+      "link_flair_text": "Showcase",
+      "permalink": "https://reddit.com/r/Rag/comments/1ws8qom/nornicdb_140preview/",
+      "domain": "self.Rag",
+      "is_self": true,
+      "comments": []
+    },
+    {
       "id": "1ws815e",
       "title": "Building a Corrective RAG (CRAG) Compliance Research Assistant",
       "subreddit": "Rag",
@@ -1502,7 +1633,7 @@
       "author": "Affectionate_Slip654",
       "created_utc": "2026-09-28 07:27:30",
       "score": 8,
-      "num_comments": 7,
+      "num_comments": 8,
       "upvote_ratio": 1.0,
       "text": "Most RAG chatbots will confidently answer with whatever they retrieved — even if it's irrelevant, even if it's wrong. In compliance, that's not a minor bug, it's real regulatory exposure.\n\nIn this video, I build the Veltra Pay Compliance Assistant — a Corrective RAG (CRAG) + Self-Correcting RAG Agent that checks its own work before it ever shows you an answer. It grades its own retrieved documents, rewrites its own search when retrieval is weak, and validates its own generated answer for grounding, hallucination risk, and completeness — retrying itself when it fails, and honestly saying \"I don't know\" when it genuinely can't answer from the source material.\n\n* ✅ The difference between a normal RAG pipeline and Corrective RAG (CRAG)\n* ✅ How CRAG grades retrieved documents as relevant/irrelevant and rewrites the search query when retrieval is weak\n* ✅ How a Self-Correcting RAG Agent validates its own generated answer — grounding, hallucination risk, completeness, and retrieval sufficiency\n\nTECH STACK:\n\n* 🛠️ Python\n* 🛠️ LangGraph (StateGraph — nodes, conditional edges, bounded retry loops)\n* 🛠️ Qdrant (vector database)\n* 🛠️ PDF ingestion & chunking (pdfplumber, overlapping chunks)\n* 🛠️ LLM-based document grading, query rewriting & answer validation\n* 🛠️ Streaming backend (Server-Sent Events) for live pipeline progress\n* 🛠️ Web dashboard for real-time visualization\n\n\n\n* **GitHub repository:** [https://github.com/saurabhkamal/Building-Corrective-RAG-CRAG-Pipeline-Self-Correcting-RAG-Agent](https://github.com/saurabhkamal/Building-Corrective-RAG-CRAG-Pipeline-Self-Correcting-RAG-Agent)\n* **YouTube walkthrough:** [https://www.youtube.com/watch?v=NxY93are\\_H8](https://www.youtube.com/watch?v=NxY93are_H8)\n* **Connect on LinkedIn:** [linkedin.com/in/saurabh-kamal](https://www.linkedin.com/in/saurabh-kamal/)\n\n[ Building a Corrective RAG (CRAG) Compliance Research Assistant](https://www.youtube.com/watch?v=NxY93are_H8&t=5s)",
       "is_original_content": false,
@@ -1567,6 +1698,44 @@
           "created_utc": "2026-09-28 15:13:28",
           "is_submitter": false,
           "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1wvetyi",
+      "title": "chunklet-py now has a self-tuning chunker that learns your chunk sizes",
+      "subreddit": "Rag",
+      "url": "https://www.reddit.com/r/Rag/comments/1wvetyi/chunkletpy_now_has_a_selftuning_chunker_that/",
+      "author": "Speedk4011",
+      "created_utc": "2026-10-01 23:41:36",
+      "score": 8,
+      "num_comments": 2,
+      "upvote_ratio": 1.0,
+      "text": "[chunklet-py](https://github.com/speedyk-005/chunklet-py) is a text, document, and code chunker for RAG pipelines and LLM apps. The latest version adds `SelfTuningChunker`, a chunker that learns its own boundaries from your data instead of making you tune them by hand.\n\nHow it works:\n\n- It classifies each input as `document` or `code`, then keeps a running profile per type.\n- Two profiles, both starting from sensible defaults.\n    - The document profile tracks sentences per paragraph, header density, section-break density, and mean paragraph length.\n    - The code profile tracks line gaps between functions, whether functions cluster, and mean token span between function starts.\n- Each metric updates with a [Kaufman Adaptive Moving Average](https://www.tradingview.com/support/solutions/43000773012-kaufman-s-adaptive-moving-average-kama/). Stable metrics hold their estimate, swinging ones catch up fast. Code and document profiles learn independently.\n- Sizes chunks from what it has learned so far. By the time you're ten files in, the boundaries are already sharper than they were on file one.\n\n```python\nfrom chunklet import SelfTuningChunker\n\ndef token_counter(text: str) -> int:\n    return len(text.split())\n\nchunker = SelfTuningChunker(lang=\"en\", token_counter=token_counter)\n\nfor chunk in chunker.chunk_texts([prose, code]):\n    print(chunk.metadata.inferred_type)  # \"document\" or \"code\"\n```\n\nEach chunk are inriched with metadata. See [Metadata included](https://speedyk-005.github.io/chunklet-py/latest/getting-started/metadata/)\n\nAfter a run, the learned profiles look like this:\n\n```python\nprint(chunker.learned_state)\n# {\n#     \"document\": {\n#         \"max_sentences\": 6.67,\n#         \"header_density_ratio\": 0.079,\n#         \"max_section_breaks\": 1.0,\n#         \"max_tokens\": 479.5,\n#     },\n#     \"code\": {\n#         \"max_lines\": 14.35,\n#         \"max_functions\": 1.06,\n#         \"max_tokens\": 479.9,\n#     },\n# }\n```\n\nThe defaults drifted toward the real shape of the data. If you've already tuned a profile on a representative corpus, pass the saved state back in and skip the warm-up:\n\n```python\nwarm = SelfTuningChunker(\n    lang=\"en\",\n    token_counter=token_counter,\n    initial_state=baseline,       # dict from a previous run\n    hard_token_limit=1024,        # cap so learned max_tokens can't balloon\n)\n```\n\nMissing metrics fall back to the defaults, so a partial baseline is fine. Each instance deep-copies what you pass, so mutating one chunker's state never leaks into another.\n\n\n> If you don't pass a `token_counter`, the chunker ignores `max_tokens`.\n\nGrab the latest version:\n\n```\npip install chunklet-py -U\n```\n\nFull Self-tuning chunker docs is here: https://speedyk-005.github.io/chunklet-py/latest/getting-started/programmatic/self_tuning_chunker/\n\nHappy to answer questions.",
+      "is_original_content": false,
+      "link_flair_text": "Showcase",
+      "permalink": "https://reddit.com/r/Rag/comments/1wvetyi/chunkletpy_now_has_a_selftuning_chunker_that/",
+      "domain": "self.Rag",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "pdbdvev",
+          "author": "ibrgma",
+          "text": "What stack/library or other tools do you recommend with it?",
+          "score": 2,
+          "created_utc": "2026-10-02 00:24:36",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "pdbnkhu",
+              "author": "Speedk4011",
+              "text": "You can use it with LangChain, AGNO, or any other RAG library.\n\neg \n```python\nfrom langchain_core.documents import Document  # pip install langchain-core\nfrom chunklet import SelfTuningChunker\n\ntext = \"\"\"\nArtificial intelligence (AI) is transforming industries worldwide.\nFrom healthcare to finance, AI systems are automating complex tasks.\nCompanies are investing heavily in AI research and development.\n\nMachine learning, a subset of AI, focuses on data-driven algorithms.\nDeep learning uses neural networks with many layers.\nThese techniques power everything from recommendation systems to self-driving cars.\n\nNatural language processing enables computers to understand human language.\nApplications include chatbots, translation services, and sentiment analysis.\nThe field has advanced rapidly with transformer architectures.\n\"\"\"\n\nchunker = SelfTuningChunker(lang=\"en\")\nchunks = chunker.chunk_text(text)\n\ndocs = [Document(page_content=c.content, metadata=c.metadata) for c in chunks]\n\nfor i, doc in enumerate(docs):\n    print(f\"--- Chunk {i + 1} ---\")\n    print(doc.page_content)\n    print(f\"Metadata: {doc.metadata}\")\n    print()\n```",
+              "score": 2,
+              "created_utc": "2026-10-02 01:14:04",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
         }
       ]
     },
@@ -1841,135 +2010,6 @@
               "replies": []
             }
           ]
-        }
-      ]
-    },
-    {
-      "id": "1wqmx79",
-      "title": "How would you turn thousands of customer documents into reliable structured data?",
-      "subreddit": "Rag",
-      "url": "https://www.reddit.com/r/Rag/comments/1wqmx79/how_would_you_turn_thousands_of_customer/",
-      "author": "FirestormCold",
-      "created_utc": "2026-09-26 10:14:38",
-      "score": 6,
-      "num_comments": 15,
-      "upvote_ratio": 1.0,
-      "text": "I work at a software company with a few thousand customers. Over the years, customer-specific information has ended up spread across:\n\ncontracts / order forms, security questionnaires, implementation documents, Excel sheets...\n\nThe problem isn’t really “chat with these documents”. We want to answer things like:\n\n\\- Which customers have a specific SLA?\n\n\\- What integrations were contractually promised?\n\n\\- Which customers require data residency in a certain region?\n\n\\- What renewal / notice periods apply?\n\n\\- Which implementation requirements are still outstanding?\n\nAnd ideally push the results into Salesforce or an internal DB/KB.\n\nMy first thought was RAG, but the more I think about it, the less convinced I am. Retrieval can find relevant passages, but that doesn’t necessarily give you a consistent dataset across thousands of differently structured documents.\n\nThe requirements would probably be something like:\n\n1. Handle both very different layouts and file types.\n\n2. Extract into a predefined schema rather than free-form text.\n\n3. Preserve the exact source/page for every extracted value.\n\n4. Flag uncertainty instead of silently guessing.\n\n5. Reprocess new documents continuously.\n\n6. Make the resulting data usable for analytics and downstream systems.\n\nWould you still build this primarily as a RAG system?\n\nI'm considering a dedicated document extraction / normalization layer in front of retrieval and treat the structured data as its own source of truth. To achieve that though, we would probably need a vendor",
-      "is_original_content": false,
-      "link_flair_text": "Discussion",
-      "permalink": "https://reddit.com/r/Rag/comments/1wqmx79/how_would_you_turn_thousands_of_customer/",
-      "domain": "self.Rag",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "pc6o6x5",
-          "author": "nullymammoth",
-          "text": "lakehouse + medallion architecture. load all the unstructured, semi-structured, and structured files in your bronze layer. in silver, parse + enrich with file metadata and requirements you shared. chunk and embed by domain into a vector store for the canonical unstructured data if it makes sense. in the gold zone, create consumption-ready tables, semantic layer and ontology to expose the data to tools (dashboard, API, agents, chatbot, etc.)\n\nreference architecture/vendor example: files to cloud storage to bronze with autoloader, hydrate silver databricks ai\\_enrich   \n() and ai\\_parse\\_document() pipelines + genie code for data modeling, metric views, lakebase/ai search, and genie in the gold layer for housing reports, agents, and viewing the business glossary",
-          "score": 2,
-          "created_utc": "2026-09-26 15:17:48",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "pc58334",
-          "author": "curatedpapers",
-          "text": "GraphRAG?",
-          "score": 1,
-          "created_utc": "2026-09-26 10:19:56",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "pc5bn4o",
-          "author": "Scary_Tour4227",
-          "text": "I am already building a workflow like this i can make that for you with RAG and converting documents into structured ones retreival with best strategies not to loose data or context\n\nsend me a dm i can show you what i build already\n and how we can customise it for you ",
-          "score": 1,
-          "created_utc": "2026-09-26 10:48:30",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "pcxixem",
-              "author": "LLMCitizen",
-              "text": "I’ll take you up on that as well!",
-              "score": 1,
-              "created_utc": "2026-09-30 03:30:13",
-              "is_submitter": false,
-              "replies": [
-                {
-                  "id": "pcxosqu",
-                  "author": "Scary_Tour4227",
-                  "text": "What do you build and for what",
-                  "score": 1,
-                  "created_utc": "2026-09-30 04:06:05",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "pc8aeph",
-          "author": "OkFlan504",
-          "text": "For this use case, “not found” has to be different from “not processed.” A customer and document inventory lets you preserve that distinction when extraction results reach Salesforce. Otherwise a clean schema can still give a misleading answer about which customers have a particular SLA.",
-          "score": 1,
-          "created_utc": "2026-09-26 19:37:31",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "pcci3ii",
-          "author": "jai-js",
-          "text": "I wouldn’t start by assuming you need to organize thousands of documents into a new structured knowledge base.\n\nI’d start with RAG + APIs and see where it actually fails.\n\nSome of this information probably already exists in structured systems. If customer-specific data is available through Salesforce or another API, call that API. For information buried in contracts, implementation docs, questionnaires, etc., that’s exactly where RAG can be surprisingly effective.\n\nBuild the simplest working version first: retrieve, say, the best 10–20 chunks, preserve the source/page metadata, and have the model answer from those plus your structured APIs.\n\nThen measure the failure modes.\n\nIf you discover that questions like “which customers have this SLA?” are missing customers because top-k retrieval isn’t exhaustive enough, *then* you have a concrete reason to extract certain fields into a structured schema.\n\nYou may eventually end up with something like:\n\nRAG → unstructured/document knowledge  \nAPIs → existing structured customer data  \nStructured extraction → specific fields that need exhaustive querying/analytics\n\nBut I wouldn’t design that entire architecture upfront.\n\nI’m the founder of [Predictable Dialogs](https://predictabledialogs.com), and we have customers successfully working with fairly large knowledge bases without first reorganizing all of their information. Modern retrieval is often better than people expect.\n\nThe other thing I’d avoid is a manual cleanup/reorganization exercise. With thousands of customers and continuously changing documents, that will eventually drift again. If normalization becomes necessary, it really needs to be an automated pipeline with provenance and confidence built in.\n\nI would be happy to help!",
-          "score": 1,
-          "created_utc": "2026-09-27 11:21:50",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "pcqk49p",
-          "author": "LawfulnessOptimal597",
-          "text": "Many of these document formats have explicit and/or implicit structure.  “contracts / order forms, security questionnaires, implementation documents, Excel sheets...” all carry significant structure and your queries seem more lexical/typed and structural than semantic. This has been the foundational focus of IR. RAG has quite a different focus: teaching an LLM/agent to access information outside of its training. ",
-          "score": 1,
-          "created_utc": "2026-09-29 06:19:46",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "pcxhfif",
-          "author": "LLMCitizen",
-          "text": "Hire me. ",
-          "score": 1,
-          "created_utc": "2026-09-30 03:21:21",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "pcximxf",
-          "author": "LLMCitizen",
-          "text": "Do you want the fun easy way or do you want to do it manually and probably give up several times?",
-          "score": 1,
-          "created_utc": "2026-09-30 03:28:29",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "pcdv7dl",
-          "author": "Lumpy_Fisherman_5352",
-          "text": "Your instinct is right — this isn't really a retrieval problem, it's an extraction problem. For \"which customers have X SLA\" you want a fixed schema per doc type and an LLM doing structured extraction (JSON schema / function calling) into a real table, then you just query the table. RAG on top is fine for the fuzzy \"what did we promise\" stuff, but the queryable facts should live as columns, not chunks. One tip: store the source doc + span for each extracted field so you can show provenance when sales inevitably asks \"says who.\"",
-          "score": 0,
-          "created_utc": "2026-09-27 15:39:24",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "pcj7rfd",
-          "author": "Potential-Wrangler58",
-          "text": "Your instinct is right, and this is a really clean articulation of why. RAG answers \"what does this document say about X\", but your questions are aggregate (\"which customers have SLA Y\") across thousands of documents, that's a database query, not a retrieval query. You can't run SQL over embeddings.\n\nThe mental model that fits: extraction is not a step before RAG, it's a replacement for it on this class of question. Define your schema once (SLA tier, integrations, data residency, notice period, outstanding requirements), run every document through it, land the output as rows in a real table, then your questions become normal queries. RAG chat can sit on top for the \"explain this specific clause\" cases, but it's not what answers \"which customers\".\n\nYour requirements list is basically the checklist for evaluating vendors here, I'd stress #3 and #4 hardest in eval: source-linking (click SLA value, see the exact contract page) is what makes this defensible when someone questions a number, and \"flag uncertainty, don't guess\" is what stops bad data from quietly reaching Salesforce. Test both explicitly, feed a document missing a field and see if it fabricates one.\n\nDisclosure, I'm at Anyformat, this is our core use case. Azure Document Intelligence, Reducto and Rossum are also worth putting on the same test with your messiest real contracts, not clean samples.",
-          "score": 0,
-          "created_utc": "2026-09-28 07:50:58",
-          "is_submitter": false,
-          "replies": []
         }
       ]
     }
