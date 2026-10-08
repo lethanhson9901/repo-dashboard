@@ -1,10 +1,10 @@
 {
   "metadata": {
-    "last_updated": "2026-10-07 15:39:56",
+    "last_updated": "2026-10-08 15:39:56",
     "time_filter": "week",
     "subreddit": "softwarearchitecture",
     "total_items": 20,
-    "total_comments": 112
+    "total_comments": 106
   },
   "items": [
     {
@@ -14,8 +14,8 @@
       "url": "https://www.reddit.com/r/softwarearchitecture/comments/1wz3pf6/what_architectural_patterns_allow_highthroughput/",
       "author": "Lupo_ZA",
       "created_utc": "2026-10-06 14:14:42",
-      "score": 91,
-      "num_comments": 15,
+      "score": 102,
+      "num_comments": 16,
       "upvote_ratio": 0.99,
       "text": "When scaling real-time distributed applications that require deterministic, low-latency state delivery to hundreds of thousands of active concurrent connections, standard request-response microservice paradigms quickly fall apart.\n\nEdge proxies can terminate TLS and hold millions of idle TCP connections easily, but the bottleneck shifts entirely to the core state engine: orchestrating dynamic state transitions, fan-out event replication, and strict ordering without choking under write lock contention.\n\nFrom an enterprise systems architecture perspective, I’m curious how teams design these high-velocity event pipelines to survive peak spikes:\n\nIn-Memory Core vs. Distributed State: Do high-throughput engines lean towards an in-memory single-threaded event loop (like the LMAX Disruptor pattern / mechanical sympathy) where state transitions run sequentially in nanoseconds and write out asynchronously via CQRS, or do teams favor distributed actor runtimes (Orleans / Akka / Erlang OTP)?\n\nFan-Out Message Bus Saturation: Standard Redis Pub/Sub often bottlenecks on CPU serialization once message fan-out exceeds tens of thousands of distinct channel subscribers per second. Are teams migrating edge workers to NATS JetStream, custom zero-copy memory ring buffers, or dedicated Kafka streams for broadcast?\n\nReconnection Storms & Hydration: When mobile or web clients experience transient network drops, flooding the edge gateway with concurrent re-sync requests can cripple downstream services. What’s the cleanest strategy for delta synchronization (vector clocks / sequence IDs) versus forcing heavy full-snapshot hydrations?\n\nWould love to hear how distributed systems architects and backend leads have structured these real-time messaging pipelines at scale.",
       "is_original_content": false,
@@ -28,7 +28,7 @@
           "id": "pe86l4m",
           "author": "leftthefanon",
           "text": "People love throwing distributed actor frameworks at this, but having worked on high-frequency trading matching engines, the real-world answer is usually deceptively simple: a single-threaded in-memory event loop (LMAX Disruptor pattern) pinned to dedicated CPU cores on bare metal.\n\nThe second you introduce distributed locks or network hops between nodes to resolve authoritative state, your p99 latency is completely cooked. You ingest commands into a circular ring buffer in nanoseconds, evaluate state transitions sequentially without lock contention, and asynchronously push the state diffs to edge broadcast workers while an append-only log persists to disk in the background.\n\n100k sockets sounds like a massive number on paper, but modern L3 cache and zero-copy buffers chew through millions of deterministic operations per second without breaking a sweat.",
-          "score": 52,
+          "score": 61,
           "created_utc": "2026-10-06 14:26:04",
           "is_submitter": false,
           "replies": [
@@ -36,7 +36,7 @@
               "id": "pe8u73g",
               "author": "PmMeCuteDogsThanks_",
               "text": "But what about web scale",
-              "score": 6,
+              "score": 10,
               "created_utc": "2026-10-06 16:05:25",
               "is_submitter": false,
               "replies": []
@@ -45,8 +45,17 @@
               "id": "peeurp5",
               "author": "tantiyabicchu",
               "text": "How do you handle hardware failure?",
-              "score": 1,
+              "score": 2,
               "created_utc": "2026-10-07 11:52:06",
+              "is_submitter": false,
+              "replies": []
+            },
+            {
+              "id": "peglqf0",
+              "author": "ibeerianhamhock",
+              "text": "Interesting comment. I think for your use case you REALLY cared about both throughput and latency though right? I think if you only care about throughput and latency tolerances are higher, you probably wouldn't chose that right? Just curious, I've never worked on a high frequency timing sensitive API like that and I'm just curious if you went that direction for those reasons. ",
+              "score": 1,
+              "created_utc": "2026-10-07 16:34:43",
               "is_submitter": false,
               "replies": []
             }
@@ -56,7 +65,7 @@
           "id": "pe84vln",
           "author": "Extension_Steak9697",
           "text": "the lmax disruptor pattern is slept on for this exact stuff. single threaded in memory state machine with async persistence gets you way further than most people think before you actually need to go distributed. ran something similar at my last gig, 80k concurrent ws connections on a handful of nodes with sub 30ms p99. the trick was keeping the hot path dead simple and punting anything heavy to sidecars via a ring buffer\n\n  \nfor reconnection storms we used a session bound sequence number per connection, client sends its last seen seq on reconnect and the edge node just replays from there. way cheaper than full snapshots and the logic was maybe 40 lines of go",
-          "score": 40,
+          "score": 39,
           "created_utc": "2026-10-06 14:18:32",
           "is_submitter": false,
           "replies": []
@@ -65,7 +74,7 @@
           "id": "pe8g2h7",
           "author": "_descri_",
           "text": "That depends on your domain - which kind of data you have, and how it is processed.\n\nIf you just share data among subscribers, you can use [multicast](https://en.wikipedia.org/wiki/Multicast) protocols, or you may rely on your subscribers sharing the data among themselves - building a [mesh](https://metapatterns.io/implementation-metapatterns/mesh/#peer-to-peer-networks) or tree. However, in the latter case some of the subscribers receive the updates before others do.\n\nIf you have a single cohesive piece of state with complex event-driven logic of state transitions, you can only rely on a single thread to control the state - this is [Proactor](https://metapatterns.io/basic-metapatterns/monolith/#proactor-one-thread-many-tasks).\n\nIf you have relatively independent request-confirm use cases which run in parallel, you will likely use [Half-Sync/Half-Async](https://metapatterns.io/basic-metapatterns/monolith/#inexact-half-synchalf-async-coroutines-or-fibers) which is the pattern behind coroutines and fibers. It's somewhat slower than Proactor, but there should be ready-to-use frameworks, and its imperative code is much easier to support than Proactor's reactive.\n\nIf your data is loosely coupled and sticks to individual clients, then you use an [Actor](https://metapatterns.io/implementation-metapatterns/mesh/#actors) per client. If you don't go distributed, there is very little contention, and you still can use all the CPU cores. If you are running a game or simulation, you can alternate lock-free read and write phases in an approach called [(Re)Actor-with-Extractors](https://metapatterns.io/basic-metapatterns/monolith/#inexact-reactor-with-extractors-phased-processing).\n\nIf you are read-heavy and can afford write conflicts, you can try [Space-Based Architecture](https://metapatterns.io/extension-metapatterns/shared-repository/#data-grid-of-space-based-architecture-sba-replicated-cache-distributed-cache) (distributed cache).\n\nFinally, more complex cases may require custom approaches. ScyllaDb runs a shared nothing framework (a shard per CPU core) while SingleStore relies on multithreaded access to indices which are atomic data structures. Both are low-latency databases.\n\nReconnection storms are usually handled with [randomized exponential backoff](https://en.wikipedia.org/wiki/Exponential_backoff#Collision_avoidance) on client side.",
-          "score": 9,
+          "score": 10,
           "created_utc": "2026-10-06 15:06:42",
           "is_submitter": false,
           "replies": []
@@ -83,17 +92,8 @@
           "id": "pe896g1",
           "author": "PrudenttMushroom",
           "text": "Honestly, 90% of the secret sauce is just ditching Redis Pub/Sub for NATS JetStream and praying users aren’t on terrible 4G connections lol.\n\nRedis CPU spikes into the stratosphere the second you start fanning out to tens of thousands of unique channels.",
-          "score": 11,
+          "score": 10,
           "created_utc": "2026-10-06 14:37:22",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "pe8co6o",
-          "author": "Ready1-Green",
-          "text": "The absolute worst bottleneck at this scale isn't the core state machine—it’s the thundering herd problem when things inevitably go wrong.\n\nIf an edge gateway blips or Cloudflare drops connections for 5 seconds, 50,000 clients will smash your backend simultaneously trying to hydrate their full state. If you hit the database for that, the entire stack collapses like a house of cards.\n\nWe had to cache a rolling sliding window of the last 2,000 sequence diffs in edge RAM and force reconnecting clients to pull lightweight delta patches with aggressive exponential backoff and jitter.",
-          "score": 5,
-          "created_utc": "2026-10-06 14:52:20",
           "is_submitter": false,
           "replies": []
         },
@@ -169,7 +169,7 @@
       "url": "https://www.infoq.com/news/2026/10/uber-eats-search-latency/",
       "author": "rgancarz",
       "created_utc": "2026-10-05 13:58:25",
-      "score": 74,
+      "score": 81,
       "num_comments": 4,
       "upvote_ratio": 0.96,
       "text": "[External Link]",
@@ -183,7 +183,7 @@
           "id": "pe1ojm9",
           "author": "TurnstileT",
           "text": "Tldr: They used to process search result candidates that were not even returned. Now they only process the ones that are returned. Also, they added some extra fields to the DTOs.\n\n👏🏼💯",
-          "score": 45,
+          "score": 48,
           "created_utc": "2026-10-05 16:47:02",
           "is_submitter": false,
           "replies": [
@@ -191,7 +191,7 @@
               "id": "pe4bbzb",
               "author": "SeaKoe11",
               "text": "So nothing groundbreaking? ",
-              "score": 7,
+              "score": 8,
               "created_utc": "2026-10-05 23:46:47",
               "is_submitter": false,
               "replies": [
@@ -226,9 +226,9 @@
       "url": "https://www.reddit.com/r/softwarearchitecture/comments/1wwgz5u/why_the_orchestrator_service_pattern_is_a_bad_idea/",
       "author": "0pet",
       "created_utc": "2026-10-03 07:19:53",
-      "score": 68,
+      "score": 73,
       "num_comments": 67,
-      "upvote_ratio": 0.87,
+      "upvote_ratio": 0.88,
       "text": "I'm noticing enterprises buying into this new pattern called the orchestrator service. From my experience, I have noticed that it usually starts with a legacy service being too big to handle.   \n  \n\\- Lots of contributors\n\n\\- no clean code boundaries which means a lot of redundancy and ad hoc code\n\n\\- scope is huge, it does everything\n\n\\- deployment is hard because no one knows what the code does and what can break\n\n\\- blast radius is a problem because it just runs too many things at once\n\n  \nSo a lead comes up with a plan: \"hey guys why not break our payment service into a payment orchestrator, checkout service, rule engine, loan service, customer context service that do one specific thing each\".\n\nYou buy the idea and you find certain boundaries.  \n  \nThe orchestrator service still has the same API surface as your original legacy service because its the same entry point again (!). So you have changed no complexity at that level.\n\nThen you create all the services and realise that the API surfaces of your child services (checkout, rule engine, loan, customer context) are all tightly coupled. \n\nYou accept that because you at least get to reduce some (?) blast radius. For instance, customer context service can go down without affecting other services. Then you realise, no, actually the blast radius problem is also not solved because how does payment work without customer context? You accept it and move on anyway.\n\nThen you think, \"well at least it allows different contributors to work across different services independently\". Then your PM comes up with new requirements and then you realise you've now made things worse. There's a new tax regime and your change spans rule engine, loan service, customer context and obviously the orchestrator. Not only that, you have to change all API surfaces simultaneously. You still accept it. You make the changes. But then.. what have we really achieved? The orchestrator is always involved in every change?!\n\n  \nTo steel-man the orchestrator pattern - it can sometimes work. If for example, the rule engine service can get big enough that entire customer features can span only the rule engine service. But is this usually true? ",
       "is_original_content": false,
       "link_flair_text": "Discussion/Advice",
@@ -240,7 +240,7 @@
           "id": "pdkj03j",
           "author": "amarao_san",
           "text": "I think, it's not good to mix-up opinion on implementation quality and the pattern. Every pattern can be implemented such, that you regret to use it.\n\nAs far as I understand, orchestrator pattern aims to be 'the holder' of intra-dependencies business rules (e.g. if processing A is failing, switch to processing B, but not if customer is from EU, in such case case fall back to the expensive C, and if payment in $, return error).\n\nSo, it's dirty, as dirty as set of rules. But it allows to concentrate dirt in one place (like 'unsafe' blocks in Rust), and not to spread it across simpler services.\n\nSo, it's not a solution to dirt problem, it's a solution to 'dirt everywhere' problem.",
-          "score": 79,
+          "score": 77,
           "created_utc": "2026-10-03 07:39:29",
           "is_submitter": false,
           "replies": [
@@ -256,7 +256,7 @@
                   "id": "pdkpm2v",
                   "author": "amarao_san",
                   "text": "If some logic is natural extension of local service ideology, hurray, you do it and have it for free.\n\nAll 'software architecture' things are solving one problem: keep human able to understand. So, every time you make something harder to understand (and there are ways not to do it), you do mistake. Every time you are able to cut off complexity away into simpler logic, you do great (as long as it's not contradict the original goal).\n\nSo, orchestrator: If something can be pushed to lower level without making them more hard to understand, do it. If it's require to convert dead-simple service into something which is require reader to 'consider' more than was before, don't do it.\n\nThe fate of orchestrator is the same as with every other solution or pattern. You start simple, add beaf, than requirements crawls in, and you get hard-to-understand system. Time to refactor or to abandon.\n\nThere is no pattern or solution which can withstand arbitrary flood of requirements.\n\nFor those, thinking they are smart cookies, try to guess why `sleep` utility can accept `Infinity` argument in command line and how is it implemented. I recently looked at it, and was washed away with complexity there.",
-                  "score": 7,
+                  "score": 8,
                   "created_utc": "2026-10-03 08:33:59",
                   "is_submitter": false,
                   "replies": []
@@ -323,10 +323,39 @@
           ]
         },
         {
+          "id": "pdonoop",
+          "author": "RummanSid1990",
+          "text": "Yes, this is the classic mistake of people thinking microservices mean \"break the codebase into as many small pieces as possible.\"\n\nMicroservices exist to solve team scaling issues (Conway's Law) so 50 engineers aren't stepping on each other's git branches.\n\nOnce you start splitting by technical steps instead of actual business domains then you just get the worst of everything. You turn simple in-memory calls into network latency, throw away ACID transactions and suddenly you're spending a lot of time writing saga patterns just to handle a basic rollback and also you didn't even get independent deployments. If a single tax rule change still requires coordinated PRs across three services and your orchestrator then it's just a monolith with network hops.\n\nIf two components need to communicate synchronously every time they perform a write then it is worth asking whether they should actually be part of the same service.",
+          "score": 7,
+          "created_utc": "2026-10-03 21:01:23",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "pdpnhfq",
+              "author": "jshalais_8637",
+              "text": "Implementing saga patterns just in the best case. For example in my company it doesn't exist, it something failsz then an alert is triggered and needs to be solved manually ",
+              "score": 1,
+              "created_utc": "2026-10-04 00:05:01",
+              "is_submitter": false,
+              "replies": [
+                {
+                  "id": "pdr7pb7",
+                  "author": "RummanSid1990",
+                  "text": "Well, I think it varies from company to company. Some companies prefer manual intervention because of their business requirements while others prefer automated recovery to avoid impacting the user experience. In our case, we’ve implemented the Saga pattern to handle these kinds of distributed failures automatically where possible.",
+                  "score": 1,
+                  "created_utc": "2026-10-04 05:55:10",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
           "id": "pdki6hp",
           "author": "Proper-Ape",
           "text": ">Then you create all the services and realise that the API surfaces of your child services (checkout, rule engine, loan, customer context) are all tightly coupled.\n\nUse something like Spring Modulith first to ensure that you've found clean seams internally. It's 10x easier to resolve bad abstractions in the same repo than in three.",
-          "score": 5,
+          "score": 7,
           "created_utc": "2026-10-03 07:32:47",
           "is_submitter": false,
           "replies": [
@@ -361,7 +390,7 @@
                   "id": "pdkrm16",
                   "author": "Dro-Darsha",
                   "text": "Modulith can be build in any language. Spring didn’t invent it",
-                  "score": 5,
+                  "score": 4,
                   "created_utc": "2026-10-03 08:50:48",
                   "is_submitter": false,
                   "replies": []
@@ -419,35 +448,6 @@
                   "text": "Okay, I think I agree actually. The times I’ve seen this come up is usually because we have some poorly designed API boundaries and a bunch of coupled things that need to happen together but no event infra to facilitate that cleanly. \n\nI can see an argument for it when there’s an end user that needs feedback at the other end - here you need to know that payment happened, the goods were in supply, fulfillment happened and shipment is confirmed. And if one fails you do potentially need to roll it back as a distributed transaction. But you probably don’t want all those domains to be in one monolith. But it’s a pretty rare scenario.",
                   "score": 2,
                   "created_utc": "2026-10-03 07:49:17",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "pdonoop",
-          "author": "RummanSid1990",
-          "text": "Yes, this is the classic mistake of people thinking microservices mean \"break the codebase into as many small pieces as possible.\"\n\nMicroservices exist to solve team scaling issues (Conway's Law) so 50 engineers aren't stepping on each other's git branches.\n\nOnce you start splitting by technical steps instead of actual business domains then you just get the worst of everything. You turn simple in-memory calls into network latency, throw away ACID transactions and suddenly you're spending a lot of time writing saga patterns just to handle a basic rollback and also you didn't even get independent deployments. If a single tax rule change still requires coordinated PRs across three services and your orchestrator then it's just a monolith with network hops.\n\nIf two components need to communicate synchronously every time they perform a write then it is worth asking whether they should actually be part of the same service.",
-          "score": 6,
-          "created_utc": "2026-10-03 21:01:23",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "pdpnhfq",
-              "author": "jshalais_8637",
-              "text": "Implementing saga patterns just in the best case. For example in my company it doesn't exist, it something failsz then an alert is triggered and needs to be solved manually ",
-              "score": 1,
-              "created_utc": "2026-10-04 00:05:01",
-              "is_submitter": false,
-              "replies": [
-                {
-                  "id": "pdr7pb7",
-                  "author": "RummanSid1990",
-                  "text": "Well, I think it varies from company to company. Some companies prefer manual intervention because of their business requirements while others prefer automated recovery to avoid impacting the user experience. In our case, we’ve implemented the Saga pattern to handle these kinds of distributed failures automatically where possible.",
-                  "score": 1,
-                  "created_utc": "2026-10-04 05:55:10",
                   "is_submitter": false,
                   "replies": []
                 }
@@ -542,7 +542,7 @@
               "id": "pdkh2r9",
               "author": "0pet",
               "text": "https://preview.redd.it/yq985w6we7th1.png?width=2394&format=png&auto=webp&s=31a98b1d79126a4625ffd660d73c13a1fa7bf777\n\n  \n  \n[https://www.pangram.com/history/2ce127c7-4c30-475c-9060-b1b2e1d925f8?ucc=0VvRHTVLFdo](https://www.pangram.com/history/2ce127c7-4c30-475c-9060-b1b2e1d925f8?ucc=0VvRHTVLFdo)",
-              "score": 2,
+              "score": 1,
               "created_utc": "2026-10-03 07:23:52",
               "is_submitter": true,
               "replies": []
@@ -643,9 +643,9 @@
       "url": "https://medium.com/@rummansiddiqui1990/how-stripe-and-paypal-never-lose-a-single-penny-e3d376be4228?source=friends_link&sk=cdc8f868f14a77e3958cd8c741e56205",
       "author": "RummanSid1990",
       "created_utc": "2026-10-03 09:01:02",
-      "score": 48,
+      "score": 50,
       "num_comments": 9,
-      "upvote_ratio": 0.78,
+      "upvote_ratio": 0.79,
       "text": "[External Link]",
       "is_original_content": false,
       "link_flair_text": "Article/Video",
@@ -657,7 +657,7 @@
           "id": "pdlslnq",
           "author": "syndbg",
           "text": "Is there actual production experience behind this system design? You got a lot of things right, but I am uncertain how 5.8k peak write transactions per second is achieved.\n\nBeen working on one of the largest EU fintechs and I believe the throughput is quite optimistic.\n\nWe do have a customer success story with CockroachDB, which imho is definitely the go-to database for global scale. Still, you have to consider that latency comes from various places.\n\nYou have the acquirers being 100ms slow on a good day, CRDB being a DB with RAFT consensus, also injecting a bit more to achieve true ACID over 9+ nodes in different regions.\n\n  \nOh and one important thing. Do mention that UUIDv4 and UUIDv7 is important. If you pick CRDB you need v4 to have good scatter and avoid hot spots. It's not just picking **any** UUID.",
-          "score": 32,
+          "score": 31,
           "created_utc": "2026-10-03 13:11:30",
           "is_submitter": false,
           "replies": [
@@ -674,7 +674,7 @@
               "id": "pdlu93v",
               "author": "RummanSid1990",
               "text": "Thanks for the great feedback!\n\nThis is an educational case study based on how companies like Stripe and PayPal build their systems rather than a single private company codebase. That is why real production feedback like yours is so helpful.\n\nYou are totally right about the latency and write throughput. When bank networks take 100ms or more, and distributed databases like CockroachDB need Raft consensus across different regions hitting 5.8k peak writes is challenging. In a real system, you have to rely heavily on background worker pools, message queues and keeping the database transactions as small and fast as possible.\n\nAlso, that is a great point about UUIDv4 versus UUIDv7. While sequential UUIDv7 is great for single Postgres databases and random UUIDv4 is definitely needed in CockroachDB to spread writes evenly across all nodes and prevent hot spot bottlenecks.\n\nThanks again for sharing your hands-on experience from the EU fintech space!",
-              "score": -18,
+              "score": -16,
               "created_utc": "2026-10-03 13:20:17",
               "is_submitter": true,
               "replies": [
@@ -721,7 +721,7 @@
               "id": "pdl9bpr",
               "author": "RummanSid1990",
               "text": "Thanks for sharing your SoftPOS setup and running contactless kernels via WebSockets in the cloud is really cool!\n\nTo answer your points:\n\n\\- It is a hybrid gateway + wallet ledger like Stripe and PayPal. It accepts card payments from buyers and tracks merchant wallet balances internally using double-entry accounting.\n\n\\- Card numbers are tokenized directly in the browser/app before reaching the backend so internal servers never see raw card details.\n\n\\- A single default Postgres instance would struggle here. In production, this write load is handled across a distributed SQL cluster like CockroachDB or sharded Postgres with table partitioning.\n\n\\- Completely agree. A real system runs an inline risk engine checking IP velocity, device fingerprints, and fraud scores before calling the card network.\n\nGreat points, appreciate the feedback!\n\n",
-              "score": -11,
+              "score": -10,
               "created_utc": "2026-10-03 11:12:44",
               "is_submitter": true,
               "replies": []
@@ -732,7 +732,7 @@
           "id": "pdmmg0m",
           "author": "Relevant-Shark",
           "text": "Biggest production lesson for me: model \"unknown\" as a first-class state. When the card network times out, you don't know whether the charge happened, so the transaction goes to PENDING_UNKNOWN, not FAILED. A resolver then queries the processor by idempotency key before any retry. Most double-charges I've seen came from treating a timeout as a failure and retrying blindly.\n\nOn the ledger side, post the pending amounts to a suspense or clearing account, so the books balance even while the outcome is unknown. Reconciliation then becomes \"explain everything in suspense\" rather than hunting for mismatches across three files. Anything older than N hours in suspense pages a human.",
-          "score": 4,
+          "score": 3,
           "created_utc": "2026-10-03 15:35:49",
           "is_submitter": false,
           "replies": []
@@ -746,9 +746,9 @@
       "url": "https://www.reddit.com/r/softwarearchitecture/comments/1wwqrow/how_do_you_enforce_a_usage_quota_for_onprem/",
       "author": "Calm-Comfortable2635",
       "created_utc": "2026-10-03 16:00:40",
-      "score": 34,
+      "score": 35,
       "num_comments": 29,
-      "upvote_ratio": 0.81,
+      "upvote_ratio": 0.82,
       "text": "We sell an on-prem B2B product (Java/Spring Boot + PostgreSQL) that runs on a VM in the customer's own data centre. The site is air-gapped, so no license server, heartbeat or phone-home is possible. The customer's IT has full admin over the hypervisor and root in the guest.\n\nThe contract limits usage to N completed transactions per year. Today we enforce it with:\n\n \\- a license file signed with our private key (the app only holds the public key);\n\n \\- an append-only, hash-chained usage ledger in the database;\n\n \\- periodic usage reports the customer sends us, which we verify offline.\n\nThe problem: cloning the VM, or reverting it to a snapshot, copies the license, the ledger and the counters together and consistently. Every copy passes every local check. Two clones get 2× the quota, and a snapshot revert resets the count.\n\nWhat we found so far:\n\n \\- VM Generation ID is the only signal built for this, but a non-root process on a Linux guest can't read it, and the hypervisor admin can pin or disable it.\n\n \\- UUID, MAC, machine-id and vTPM are copied with the VM or easy to forge.\n\n \\- TPM or SGX counters on the server aren't reachable from a VM.\n\nQuestions for anyone who has shipped on-prem, usage-based licensing:\n\n 1. What actually works for you in air-gapped VMs? USB dongles with on-chip counters (Wibu CodeMeter, Thales Sentinel), FIDO2 keys, a physical appliance, or something else?\n\n 2. If you use a dongle in a VM, how do you handle ESXi/Hyper-V passthrough, vMotion/HA and dongle failure?\n\n 3. Has anyone used a FIDO2 key's signature counter as a usage meter?\n\n 4. Or did you give up on technical enforcement and rely on audits?\n\nNot looking to stop determined attackers, just to make cheating detectable or impractical.\n\n",
       "is_original_content": false,
       "link_flair_text": "Discussion/Advice",
@@ -768,7 +768,7 @@
               "id": "pdmzpq7",
               "author": "CpnStumpy",
               "text": "Seriously.\n\nLawyers. That's how.\n\nEngineers put so much focus into these rabbit holes the rest of the world solved ages ago with known mechanisms. Someone's going to steal the vm? Probably they're not your target market anyway, let 'em. They were never going to pay you, so you're losing nothing.\n\nYour customers have air gapped IT infrastructure? They're honoring TOS and eula contracts, and paying their invoices, because they don't relish being taken to court. They aren't pirating your software.\n\nEngineers will spend a year getting a perfect licensure system worked out with three teams of engineers. And no customer will ever try stealing their software.",
-              "score": 63,
+              "score": 62,
               "created_utc": "2026-10-03 16:35:15",
               "is_submitter": false,
               "replies": [
@@ -776,7 +776,7 @@
                   "id": "pdn2rjy",
                   "author": "roiki11",
                   "text": "If they're paying their bill on time you're shooting yourself in the foot if you try to sue anybody. ",
-                  "score": 15,
+                  "score": 14,
                   "created_utc": "2026-10-03 16:48:48",
                   "is_submitter": false,
                   "replies": []
@@ -796,7 +796,7 @@
               "id": "pdmxbk1",
               "author": "PastSouth5699",
               "text": "In a very similar situation, I've spent 2 days searching for existing solutions, discussions about this issues and tried to imagine a system. At the end of the day, the only thing that gives you a little protection is the contract. Any solution has loopholes and it's too much of a hassle to implement and maintain. So, yeah, \"you don't\" is pretty much the only viable option ",
-              "score": 15,
+              "score": 16,
               "created_utc": "2026-10-03 16:24:34",
               "is_submitter": false,
               "replies": [
@@ -804,7 +804,7 @@
                   "id": "pdmz2td",
                   "author": "ArcticWolf_0xFF",
                   "text": "And closing the hole a little further and enforcing it probably costs more than a single license, even if it is five digits.",
-                  "score": 5,
+                  "score": 4,
                   "created_utc": "2026-10-03 16:32:26",
                   "is_submitter": false,
                   "replies": []
@@ -813,7 +813,7 @@
                   "id": "pdn26dz",
                   "author": "roiki11",
                   "text": "And all that time you could spend making your product better instead of fucking over your customers. Who can get around it with far less effort than you spend implementing it.",
-                  "score": 7,
+                  "score": 8,
                   "created_utc": "2026-10-03 16:46:11",
                   "is_submitter": false,
                   "replies": []
@@ -844,7 +844,7 @@
           "id": "pdmycfx",
           "author": "ham_plane",
           "text": "I believe audits is how Oracle does it",
-          "score": 16,
+          "score": 17,
           "created_utc": "2026-10-03 16:29:08",
           "is_submitter": false,
           "replies": []
@@ -853,7 +853,7 @@
           "id": "pdn127y",
           "author": "SeniorIdiot",
           "text": "How much are you willing to spend on controls and enforcement?\n\n1. Contract, legal (with audit).\n2. On-prem license server with hardware dongle(s).\n3. Phishing mails to the CEO/CTO and blackmail them.\n4. Install keyloggers and audit daemons in the air-gaped network, send signed logs and heartbeats to encrypted on-prem box.\n5. Become a dictator and have your secret police interrogate everyone at the company at random intervals - avoid windows.\n6. Place a nuke in their server room with a dead-mans switch that has to be pressed once per week by you.\n\n/s",
-          "score": 18,
+          "score": 17,
           "created_utc": "2026-10-03 16:41:15",
           "is_submitter": false,
           "replies": []
@@ -862,7 +862,7 @@
           "id": "pdo354u",
           "author": "thirst-trap-enabler",
           "text": "HASP (hardware key)\n\nNode locked license server, etc.",
-          "score": 4,
+          "score": 6,
           "created_utc": "2026-10-03 19:28:09",
           "is_submitter": false,
           "replies": []
@@ -1015,53 +1015,44 @@
       ]
     },
     {
-      "id": "1wuu5a0",
-      "title": "Which resources are worth about Architecture Documentation?",
+      "id": "1wzodc2",
+      "title": "Designing inventory consistency for a flash sale with 8M checkout attempts and 40K items",
       "subreddit": "softwarearchitecture",
-      "url": "https://www.reddit.com/r/softwarearchitecture/comments/1wuu5a0/which_resources_are_worth_about_architecture/",
-      "author": "two-point-zero",
-      "created_utc": "2026-10-01 08:37:33",
+      "url": "https://www.reddit.com/r/softwarearchitecture/comments/1wzodc2/designing_inventory_consistency_for_a_flash_sale/",
+      "author": "Fresh-Edge-7552",
+      "created_utc": "2026-10-07 05:26:49",
       "score": 34,
-      "num_comments": 9,
+      "num_comments": 10,
       "upvote_ratio": 0.97,
-      "text": "As in the title, which resources will you suggest to look at to learn about Architecture Documentation? Could they be books, MOOC, videos, blogs and so on..\n\nFor example, someone suggested to me having a look at  \"Documenting Software Architectures: view and beyond\" book. Is it worth reading?\n\nAny other?",
+      "text": "A flash sale opened 8 million checkout sessions in 2 minutes, but only 40,000 items were actually available. \n\nThousands of requests timed out while different regions disagreed on which orders had secured inventory.\n\nHow would you design the system so inventory is never oversold, successful payments can be safely retried, and the system recovers cleanly when parts of the network fail?",
       "is_original_content": false,
       "link_flair_text": "Discussion/Advice",
-      "permalink": "https://reddit.com/r/softwarearchitecture/comments/1wuu5a0/which_resources_are_worth_about_architecture/",
+      "permalink": "https://reddit.com/r/softwarearchitecture/comments/1wzodc2/designing_inventory_consistency_for_a_flash_sale/",
       "domain": "self.softwarearchitecture",
       "is_self": true,
       "comments": [
         {
-          "id": "pd66ytz",
-          "author": "efficacious_raymond",
-          "text": "arc42 is the only framework i still use. its boring and template-heavy but it actually forces you to think about what matters instead of drawing pretty diagrams that say nothing\n\n  \nthe views and beyond book is fine if you need academic justification for why you're doing something but nobody on your team will read a 50 page architecture doc anyway",
-          "score": 15,
-          "created_utc": "2026-10-01 08:45:46",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "pd68khu",
-          "author": "Least_Ad_1795",
-          "text": "“Documenting Software Architectures: Views and Beyond” is definitely worth reading. I’d also learn C4 diagrams and Architecture Decision Records (ADRs). The key is practicing on a real project: document the context, containers/components, key decisions, trade-offs, and deployment architecture rather than just learning diagram syntax.",
-          "score": 11,
-          "created_utc": "2026-10-01 08:59:45",
+          "id": "pedl4hd",
+          "author": "RummanSid1990",
+          "text": "To handle this cleanly:  \n\\- Block the heavy rush outside using a virtual waiting line like Cloudflare Waiting Room so 8 million hits don't bring down your servers.  \n\\- Track the item count in a single super-fast place like Redis with Lua scripts which guarantees two people can never grab the last item together.  \n\\- Give buyers a 5-minute temporary hold to finish paying, if their card fails or the app closes then let the system put the item back automatically.  \n\\- Attach a unique ID (Idempotency Key) to every attempt so repeated clicks or bad connections never charge a customer twice.  \n\\- Track every stock change like a bank record (Ledger) in your database so the system can recount and fix itself cleanly if parts of the network crash.",
+          "score": 14,
+          "created_utc": "2026-10-07 06:06:16",
           "is_submitter": false,
           "replies": [
             {
-              "id": "pd6edgn",
-              "author": "two-point-zero",
-              "text": "Indeed, I already USE a set of C4 style + sequence diagrams ( when needed, like in auth flows doc for example), and about ADR we are planning to start using them.\n\nI'm also exploring the contact points between ADR (for architecture context and explanation) and Specs like in spec-driven AI development.\n\nBut I would like to understand what are the options and the best practices IRL for architecture docs, thus the request of study materials ",
-              "score": 1,
-              "created_utc": "2026-10-01 09:49:28",
-              "is_submitter": true,
+              "id": "peevcb7",
+              "author": "mamaBiskothu",
+              "text": "Doing this with a redis counter sounds like a recipe for disaster. Amazon assigns one record per inventory item and thats what OP should do as well. ",
+              "score": 2,
+              "created_utc": "2026-10-07 11:55:19",
+              "is_submitter": false,
               "replies": [
                 {
-                  "id": "pd6kmyv",
-                  "author": "CpnStumpy",
-                  "text": "* ADRs are great\n* ADR is used as a name for tons of things which aren't ADRs\n* ADRs aren't necessary for most things\n* SDD is usually what people want when they talk about ADR\n* If you're trying to decide how to organize your object model or domain segments or what service patterns solve a problem, *don't use an ADR*, that's an SDD problem, or in-house RFC\n* If you're deciding whether to use Postgresql, or Oracle, if you're trying to decide whether to use ECS or EKS, if you're trying to decide whether to build an auth service or pay auth0 or use an open source solution, **those are ADR problems**\n\nWhen people use ADRs for the wrong problems, then they don't end up with an ADR process for the actual decisions ADRs solve well - and those are important decisions that fundamentally should have a process to help make quality decisions and not relitigate them.",
+                  "id": "pefoxmh",
+                  "author": "HRApprovedUsername",
+                  "text": "You could have one record in redis ",
                   "score": 2,
-                  "created_utc": "2026-10-01 10:37:57",
+                  "created_utc": "2026-10-07 14:18:38",
                   "is_submitter": false,
                   "replies": []
                 }
@@ -1070,49 +1061,32 @@
           ]
         },
         {
-          "id": "pd69ei8",
-          "author": "rperanen",
-          "text": "C4 is good way to explain high level details to different parties. Arc42 is good for project planning and budget meetings and architecture decisions records are needed for quick iterative implementation.\n\nYour will never know everything up to date so decision records give some background why some bizarre decisions were made.",
-          "score": 2,
-          "created_utc": "2026-10-01 09:07:01",
+          "id": "pedhciu",
+          "author": "Fun-Put-5197",
+          "text": "High concurrency and high contention over a restricted resource?\n\nBorrow a page from the high frequency financial trading domain and check out the LMAX Disruptor architecture.\n\nMillions of orders per second on a commodity hardware circa 2010.",
+          "score": 13,
+          "created_utc": "2026-10-07 05:37:46",
           "is_submitter": false,
           "replies": []
         },
         {
-          "id": "pd7an30",
-          "author": "SpaceGerbil",
-          "text": "Arc42 + C4 models. Sprinkle in a sequence diagram or flow chart where necessary. Send it.",
-          "score": 1,
-          "created_utc": "2026-10-01 13:12:55",
+          "id": "pedhbbh",
+          "author": "EarthySiding",
+          "text": "skip the cart reservation nonsense and just treat the checkout button as a raffle entry, let the dust settle then confirm winners",
+          "score": 6,
+          "created_utc": "2026-10-07 05:37:31",
           "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "pd9ze2i",
-          "author": "Careful_Travel8146",
-          "text": "The civil law",
-          "score": 1,
-          "created_utc": "2026-10-01 20:14:04",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "pdbh6r8",
-          "author": "marasheed",
-          "text": "C4 model is recommended. It is not heavy and worked across teams. ",
-          "score": 1,
-          "created_utc": "2026-10-02 00:41:45",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "pdcv2yw",
-          "author": "ihardzeenka",
-          "text": "I wrote few articles about kinds of documents you may want to have when documenting architecture. Concerte book references are inside.\nhttps://software-architecture-guild.com/guide/architecture/documentation/\n\nIf you interested to learn diagrams/models I would suggest view points and perspectives framework https://software-architecture-guild.com/guide/competencies/modeling/frameworks/viewpoints-and-perspectives/",
-          "score": 1,
-          "created_utc": "2026-10-02 05:30:08",
-          "is_submitter": false,
-          "replies": []
+          "replies": [
+            {
+              "id": "pefe233",
+              "author": "dilly_dust",
+              "text": "🤣 Love it\n\n",
+              "score": 2,
+              "created_utc": "2026-10-07 13:29:50",
+              "is_submitter": false,
+              "replies": []
+            }
+          ]
         }
       ]
     },
@@ -1141,9 +1115,9 @@
       "url": "https://www.reddit.com/r/softwarearchitecture/comments/1wvvh6z/at_what_point_does_composable_architecture_become/",
       "author": "Cool_Reality9325",
       "created_utc": "2026-10-02 14:37:26",
-      "score": 30,
+      "score": 29,
       "num_comments": 13,
-      "upvote_ratio": 0.93,
+      "upvote_ratio": 0.95,
       "text": "I mostly work around AEM and enterprise content platforms, and this is something I keep running into. On paper, composable makes perfect sense. CMS, DAM, search, analytics, personalization, translation, commerce, each handled by the tool that does it best. But then you have to connect and maintain all of it. APIs change, auth changes, data models drift, ownership gets blurry, and one broken integration can affect three other systems. At some point I start wondering whether we’re actually reducing complexity or just moving it into the connections between systems. For those running large composable setups in production, where do you draw the line? Have you ever started consolidating tools because maintaining the integrations became more painful than the problems those tools originally solved?",
       "is_original_content": false,
       "link_flair_text": "Discussion/Advice",
@@ -1155,7 +1129,7 @@
           "id": "pdfah3c",
           "author": "asdfdelta",
           "text": "If composable is done right, you really don't have tightly coupled systems. Or atleast you can create systems that can gracefully degrade and self-heal.\n\nI do understand the intent behind this though. Composable architecture is for highly mature organizations with huge technical landscapes and capabilities. I have, foolishly, also tried to apply composable architecture to a space that is too small and not complex enough for it to make sense. It resulted in one failed POC and everyone just moved on, soured about composability. Entirely my fault.\n\nI think the tradeoffs need to be much more transparently walked through. If an architecture like that doesn't immediately make sense to everyone involved, it should need business, engineering, and architecture to jointly decide this is a good path forward. Conway's Law ensures that the composable architecture impacts will bleed back into the business realm, even though it's an architecture decision.\n\nIt's a hard pill to swallow admitting you're wrong, especially about such a broadly impacting decision. I encourage you to plead the case of learning - your org did composable and here are the lessons from it. Faithfully learned lessons should generate action and change.",
-          "score": 12,
+          "score": 13,
           "created_utc": "2026-10-02 14:57:48",
           "is_submitter": false,
           "replies": [
@@ -1220,7 +1194,7 @@
               "id": "pdlnn1x",
               "author": "asdfdelta",
               "text": "I'm going to start instituting consequences for false-flag slop claims. It really is exhausting. Everyone is witch-hunting instead of faithfully engaging with the community, these \"it's slop!\" comments only subtract from the conversation. Report it if you think it's slop, stop commenting it for social proof.\n\nThat post is from the same account. The same account that has 11 contributions to the aem subreddit, along with r/aww and r/reddit_ukr. That is a person that has the same problem, and comes to the same sub for help or discussion with it. BotBouncer didn't flag it, neither did Reddit. Use the report button in the future",
-              "score": 2,
+              "score": 3,
               "created_utc": "2026-10-03 12:44:24",
               "is_submitter": false,
               "replies": [
@@ -1265,9 +1239,9 @@
       "url": "https://youtu.be/3ZgOXecar9I",
       "author": "BootstrpFn",
       "created_utc": "2026-10-04 07:06:22",
-      "score": 26,
+      "score": 27,
       "num_comments": 0,
-      "upvote_ratio": 0.91,
+      "upvote_ratio": 0.92,
       "text": "[External Link]",
       "is_original_content": false,
       "link_flair_text": "Article/Video",
@@ -1283,7 +1257,7 @@
       "url": "https://medium.com/javarevisited/when-messages-go-wrong-reliability-in-event-driven-systems-58053659e492?sk=9af4cc9b9dd1d387ac20319e7fadc635",
       "author": "Overall-Beach-9801",
       "created_utc": "2026-10-02 15:23:06",
-      "score": 25,
+      "score": 26,
       "num_comments": 0,
       "upvote_ratio": 0.89,
       "text": "[External Link]",
@@ -1295,44 +1269,100 @@
       "comments": []
     },
     {
-      "id": "1wzodc2",
-      "title": "Designing inventory consistency for a flash sale with 8M checkout attempts and 40K items",
+      "id": "1x00yxk",
+      "title": "Arch diagram generation automation",
       "subreddit": "softwarearchitecture",
-      "url": "https://www.reddit.com/r/softwarearchitecture/comments/1wzodc2/designing_inventory_consistency_for_a_flash_sale/",
-      "author": "Fresh-Edge-7552",
-      "created_utc": "2026-10-07 05:26:49",
+      "url": "https://www.reddit.com/r/softwarearchitecture/comments/1x00yxk/arch_diagram_generation_automation/",
+      "author": "modern_medicine_isnt",
+      "created_utc": "2026-10-07 16:23:44",
       "score": 19,
-      "num_comments": 6,
-      "upvote_ratio": 0.95,
-      "text": "A flash sale opened 8 million checkout sessions in 2 minutes, but only 40,000 items were actually available. \n\nThousands of requests timed out while different regions disagreed on which orders had secured inventory.\n\nHow would you design the system so inventory is never oversold, successful payments can be safely retried, and the system recovers cleanly when parts of the network fail?",
+      "num_comments": 19,
+      "upvote_ratio": 0.93,
+      "text": "I know I can probably \"just use AI\".  But I want to avoid not invented here syndrome and use established methods and tools where possible.\n\nThe first part I am looking for is a well established format for storing architectural information in the repo with the code.\n\nNext would be any tools for helping to generate it.\n\nLastly, we have mermaid for the actual diagrams.  Any good tools for generating the diagrams?",
       "is_original_content": false,
       "link_flair_text": "Discussion/Advice",
-      "permalink": "https://reddit.com/r/softwarearchitecture/comments/1wzodc2/designing_inventory_consistency_for_a_flash_sale/",
+      "permalink": "https://reddit.com/r/softwarearchitecture/comments/1x00yxk/arch_diagram_generation_automation/",
       "domain": "self.softwarearchitecture",
       "is_self": true,
       "comments": [
         {
-          "id": "pedl4hd",
-          "author": "RummanSid1990",
-          "text": "To handle this cleanly:  \n\\- Block the heavy rush outside using a virtual waiting line like Cloudflare Waiting Room so 8 million hits don't bring down your servers.  \n\\- Track the item count in a single super-fast place like Redis with Lua scripts which guarantees two people can never grab the last item together.  \n\\- Give buyers a 5-minute temporary hold to finish paying, if their card fails or the app closes then let the system put the item back automatically.  \n\\- Attach a unique ID (Idempotency Key) to every attempt so repeated clicks or bad connections never charge a customer twice.  \n\\- Track every stock change like a bank record (Ledger) in your database so the system can recount and fix itself cleanly if parts of the network crash.",
-          "score": 6,
-          "created_utc": "2026-10-07 06:06:16",
+          "id": "pegkq9h",
+          "author": "Dry-Algae6154",
+          "text": "the C4 model is the obvious answer for the format side. structurizr lets you define everything as code and spits out diagrams including mermaid exports. works well enough that you're not fighting the tooling\n\n  \nif you want something lighter there's the arc42 template but that's more documentation focused than diagram generation. depends how much ceremony your team actually wants\n\n  \nfor keeping it in the repo alongside code i've seen teams just commit the structurizr dsl files and run a ci step to regenerate the images on merge. keeps the diagrams from going stale which is usually the real problem",
+          "score": 8,
+          "created_utc": "2026-10-07 16:30:36",
           "is_submitter": false,
           "replies": [
             {
-              "id": "peevcb7",
-              "author": "mamaBiskothu",
-              "text": "Doing this with a redis counter sounds like a recipe for disaster. Amazon assigns one record per inventory item and thats what OP should do as well. ",
+              "id": "pegwi2q",
+              "author": "boyneyy123",
+              "text": "If you want to explore more structured docs into diagrams too, I build an OOS project to help (EventCatalog), which infers diagrams from your docs (domains, services, systems etc....), just another way to do things.\n\nI have users that store this info next to code and also have some crazy CI/CD to keep everything updated, which is possible.\n\n",
               "score": 0,
-              "created_utc": "2026-10-07 11:55:19",
+              "created_utc": "2026-10-07 17:18:50",
               "is_submitter": false,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "pegyttp",
+          "author": "aktentasche",
+          "text": "I find diagrams generated from codebases largely useless because the codebase does not have all information to really represent the whole business logic.\n\nIf you want high quality diagrams you will need to edit and create some parts yourself.",
+          "score": 3,
+          "created_utc": "2026-10-07 17:28:16",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "peh138l",
+              "author": "Veuxdo",
+              "text": "I use to feel this way, but they can generate pretty good sequence diagrams at this point. Which makes sense; if they can \"understand\" a logic flow well enough to modify it, they should be able to create a sequence diagram of that same logic flow.",
+              "score": 3,
+              "created_utc": "2026-10-07 17:37:28",
+              "is_submitter": false,
+              "replies": []
+            },
+            {
+              "id": "pehgz6a",
+              "author": "boyneyy123",
+              "text": "I think you need to get constraints, and primitives and boundaries. What is a service, or a domain or system, then once you define these I found AI agents (for example) are pretty good at updating docs and diagrams based on these rulesets, rather than just a free for all mermaid diagram with different outputs every time.",
+              "score": 2,
+              "created_utc": "2026-10-07 18:42:26",
+              "is_submitter": false,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "pegka2b",
+          "author": "asdfdelta",
+          "text": "What language are you using? There are C4 generator libraries out there that you can stick into your CI/CD pipelines",
+          "score": 2,
+          "created_utc": "2026-10-07 16:28:48",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "peglhtr",
+              "author": "modern_medicine_isnt",
+              "text": "Go and a little python.  Any recommendations on discovery tools that outputs the c4 inputs?",
+              "score": 1,
+              "created_utc": "2026-10-07 16:33:45",
+              "is_submitter": true,
               "replies": [
                 {
-                  "id": "pefoxmh",
-                  "author": "HRApprovedUsername",
-                  "text": "You could have one record in redis ",
-                  "score": 1,
-                  "created_utc": "2026-10-07 14:18:38",
+                  "id": "peglxfr",
+                  "author": "asdfdelta",
+                  "text": "PyStructurizr and go-structurizr would be the libs I would reach for.",
+                  "score": 3,
+                  "created_utc": "2026-10-07 16:35:31",
+                  "is_submitter": false,
+                  "replies": []
+                },
+                {
+                  "id": "pegx5pd",
+                  "author": "boyneyy123",
+                  "text": "[https://likec4.dev/](https://likec4.dev/) is great :)",
+                  "score": 0,
+                  "created_utc": "2026-10-07 17:21:30",
                   "is_submitter": false,
                   "replies": []
                 }
@@ -1341,30 +1371,258 @@
           ]
         },
         {
-          "id": "pedhciu",
-          "author": "Fun-Put-5197",
-          "text": "High concurrency and high contention over a restricted resource?\n\nBorrow a page from the high frequency financial trading domain and check out the LMAX Disruptor architecture.\n\nMillions of orders per second on a commodity hardware circa 2010.",
-          "score": 7,
-          "created_utc": "2026-10-07 05:37:46",
+          "id": "pegtjr3",
+          "author": "shadowdance55",
+          "text": "You'll love https://icepanel.io/",
+          "score": 3,
+          "created_utc": "2026-10-07 17:06:50",
           "is_submitter": false,
           "replies": []
         },
         {
-          "id": "pedhbbh",
-          "author": "EarthySiding",
-          "text": "skip the cart reservation nonsense and just treat the checkout button as a raffle entry, let the dust settle then confirm winners",
+          "id": "peh9nm2",
+          "author": "Adventurous-Hunt4683",
+          "text": "Draw.io is free (works offline) but do you want a picture or a proper architecture diagram. If you need the later something like leanIX and Archimate is needed. Also, for standards check out OWL/UML",
           "score": 1,
-          "created_utc": "2026-10-07 05:37:31",
+          "created_utc": "2026-10-07 18:12:31",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "pehxwou",
+          "author": "Fun-Put-5197",
+          "text": "My team uses C4 and tried Structurizr for a while, but found sufficient friction in maintaining diagram layouts that adoption suffered.\n\nI wrote a simple set of CLI tools based on the principle of separation of concerns between the model (source of truth) and diagrams as snapshots on demand.\n\nOne CLI tool assembles a set of YAML files (one file per element or relationship) into a JSON intermediate representation.\n\nAnother CLI tool accepts this JSON IR as input and renders a set of SVG diagrams.\n\nThe diagrams separate structure (parent/child), such as subsystems within an L1 system, containers within a subsystem/system, components within a container, from relationships. For relationships, heuristics will prioritize and distinguish inbound or outbound hub/spoke diagrams for elements that share > 2 relationships. Everything else ends up in a diagram of simple pairs at each level.\n\nThere are a few constraints enforced, such as components may only share relationships within the same container.\n\nThe result and tradeoff: diagrams on demand and more diagrams over fine control over layout and edge paths. The diagrams do distinguish L1, L2, and L3 views.\n\nThis prioritized architecture change management over \"pretty diagrams\" for executive consumption.\n\nc4assemble | c4svg does all the work needed for my team most of the time.\n\nConvention over configuration, prioritizing the use cases you face most often.",
+          "score": 1,
+          "created_utc": "2026-10-07 19:55:00",
           "is_submitter": false,
           "replies": [
             {
-              "id": "pefe233",
-              "author": "dilly_dust",
-              "text": "🤣 Love it\n\n",
+              "id": "pejplb6",
+              "author": "Mathie1729",
+              "text": "Are the SVGs committed or just generated in CI? I'd be worried about noisy diffs if they get regenerated whenever the YAML changes.",
               "score": 1,
-              "created_utc": "2026-10-07 13:29:50",
+              "created_utc": "2026-10-08 01:01:32",
+              "is_submitter": false,
+              "replies": [
+                {
+                  "id": "pelhdoy",
+                  "author": "Fun-Put-5197",
+                  "text": "We generate them on demand, as they are only a snapshot of the current state.\n\nThe  YAML model files are the source of truth in git.",
+                  "score": 1,
+                  "created_utc": "2026-10-08 08:01:24",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "pen2i7b",
+          "author": "C3P2T2",
+          "text": "Our diagrams (f.e. C4 model) are in a simple plantuml or mermaid format. They are stored beside the arc42 doc. \n\nThe nightly build generates png/svg file for us, if they have changed. And these image files are referenced in our documentation and code. ",
+          "score": 1,
+          "created_utc": "2026-10-08 14:01:02",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "pen3a4v",
+              "author": "C3P2T2",
+              "text": "Otherwise as side info: currently, I try arc42agentic as AI agent for our arch docu and arch images. The first result looks goods. But I think, I will take it only as reviewer. ",
+              "score": 1,
+              "created_utc": "2026-10-08 14:04:30",
               "is_submitter": false,
               "replies": []
+            }
+          ]
+        },
+        {
+          "id": "pegmxpx",
+          "author": "Veuxdo",
+          "text": "[Ilograph agent skills](https://github.com/ilograph/skills) was made for this. It has both a \"generate\" and an \"update\" skill that can be run nightly (or whenever).",
+          "score": -1,
+          "created_utc": "2026-10-07 16:39:38",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "pej1uy4",
+          "author": "Aggravating-Two-154",
+          "text": "I have switched to using parsers to create C1 diagrams.\n\nC1 diagrams of an entire codebase is just a mash of spaghetti in 2D images though. But in 3D they can be as complicated as you like, combined with LOD rendering, zooming out makes them change from C1, 2, 3, and 4.\n\nThere is only one DSL capable of creating 3D DAC though, I spent months searching for one, I tried modifying Mermaid but it would require a complete rewrite, so I ended up having to make my own.\n\nAll of that meant I ended up having to create the 3D renderer too, and at a C1 level it needed to be able to handle 100,000 objects at least.\n\nThen to be able to truly harness the power of all that info I ended up having to build an AI harness into the infrastructure, that was on top of the multi user aspect where teams can collaborate on projects within the diagram tool with chat, webcams and being able to modify the diagram in real time, while everyone has their individual chat windows to interact with coding tools.\n\nThen you have a planning and workflow system so that everyone's AI can work together, following a single source of truth.\n\nAnd it's live in production, unfortunately the current generation of humans in work environments are unable to read 3D diagrams. Only those who have grown up with 3D digital environments have the spatial awareness skills to navigate and understand 3D diagrams. Maybe in 10 years people might be interested.",
+          "score": -1,
+          "created_utc": "2026-10-07 22:57:46",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "pegx1pm",
+          "author": "boyneyy123",
+          "text": "If you want to explore an Open source tool to help I've been building EventCatalog for the past 4 years that might help you.\n\nYou define your domains, systems, messages (etc), as markdown files that live in git, they store relationships with everything else and the architecture visualization is inferred from this. \n\nThat allows your teams to keep their docs/specs/schemas close and also get other value of diagrams etc.\n\n100 ways to do this stuff, but that's the way I explore it, and seems to resonate with others too.\n\nLet me know if you ever want to take a look or explore happy to help.\n\nGood luck!",
+          "score": -2,
+          "created_utc": "2026-10-07 17:21:03",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1wzyg2e",
+      "title": "Where does tenant context come from in your background jobs?",
+      "subreddit": "softwarearchitecture",
+      "url": "https://www.reddit.com/r/softwarearchitecture/comments/1wzyg2e/where_does_tenant_context_come_from_in_your/",
+      "author": "srikanth_builds",
+      "created_utc": "2026-10-07 14:47:06",
+      "score": 18,
+      "num_comments": 14,
+      "upvote_ratio": 1.0,
+      "text": "On the normal request path, tenant isolation is pretty straightforward for us. The user is authenticated, the tenant comes from the token, every query is scoped in one place, and CI prevents anyone from adding a query that bypasses it.\n\nThat all disappears once a job goes onto a queue.\n\nThe worker has no user session. It runs under a service identity that can access every tenant because it has to process jobs for all of them. At that point, the tenant becomes data carried by the job, and a field in a queue message isn't the same as an authenticated claim.\n\nI have seen a few ways of handling this, but each one seems to create a different problem.\n\nPut the tenant ID in the job payload.  \nSimple, but anyone who can enqueue a job may be able to put any tenant ID in that field. What independently validates it when the worker runs hours later?\n\nDerive the tenant from the record being processed.  \nThat works when the job operates on one record. It gets less clear for batch jobs, or when the record has been reassigned or deleted between enqueue and execution.\n\nMint a tenant scoped token when the job is created.  \nNow a credential is sitting in the queue. Jobs retry, and dead-lettered jobs can remain there for days possibly longer than the session that created them.\n\nRe-check the originating user when the job runs.  \nBy then, the user may have been suspended, deleted, or moved to another tenant. Should the job fail, or should it run using the authority the user had when it was originally created?\n\nThe two cases I am least sure about are nightly fan-out jobs and dead letter replays.\n\nA nightly process may legitimately operate across every tenant, so there's no single tenant at the start of the job. What prevents one iteration from leaking state into the next?\n\nWith dead-letter replay, the context may have been valid when the job was created but no longer be valid when someone replays it days later.\n\nAnd RLS doesn't solve this by itself. If the worker connects using a service role, it can bypass RLS unless something explicitly sets the tenant context for every job, and unless the system fails closed when that context is missing.\n\nSo assume the tenant ID is already in the payload. The question is: what validates that tenant at execution time, hours later, when there's no user principal left to check it against?\n\n**How are you handling tenant context in background jobs, and what broke the first time it was wrong?**",
+      "is_original_content": false,
+      "link_flair_text": "Discussion/Advice",
+      "permalink": "https://reddit.com/r/softwarearchitecture/comments/1wzyg2e/where_does_tenant_context_come_from_in_your/",
+      "domain": "self.softwarearchitecture",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "pefzhlh",
+          "author": "bitweis",
+          "text": "A checklist I use for this: is every sensitive action actually enforced (background jobs included), can the model express per-resource access, how fast does a revoke take effect, and can you explain a specific decision a month later. Your dead-letter replay case is basically the question of how you revoke permissions in realtime once work is sitting in a queue, and revocation lag is the one people tend to underestimate. What I'd do there is keep the enqueuing user and tenant in the job for the record, but re-check current permissions when the worker runs and fail closed if that user was suspended or moved.",
+          "score": 5,
+          "created_utc": "2026-10-07 15:03:28",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "peg32mc",
+              "author": "srikanth_builds",
+              "text": "\"Revocation lag\" is a better name for this than anything I had. It also makes the risk measurable: the queue depth effectively becomes the revocation window.\n\nI keep coming back to re-checking permissions when the job runs and failing closed if they are no longer valid. But that shifts the problem. To perform that check, the worker must know which permission the job requires, and most job systems don't record that. The job knows what to do, but not necessarily what authority it needs.\n\nYou can include the required permission in the payload alongside the tenant ID, but then that field becomes just as security critical as the tenant ID. It also only works for jobs started on behalf of a user. Nightly fan out jobs have no user to validate against.\n\nI am also less certain that failing closed should always be the default. If a user is suspended while their export is still queued, sometimes the export should be cancelled, but in other cases it should still run for the company. That feels like an explicit policy decision rather than something the job system can decide universally.",
+              "score": 1,
+              "created_utc": "2026-10-07 15:18:27",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "peg4t5l",
+          "author": "Existing-Round4556",
+          "text": "The queue itself is within the tenant context. All databases, queues, service instances, etc are logically and/or physically sharded by tenant. The first action that triggered a job to be processed later had a user token with a tenant, which added it to the tenant's queue. For defense in depth, all messages also contain the TID and are signed using a tenant-scoped credential. The TID is used to validate the message, never to create the context.",
+          "score": 3,
+          "created_utc": "2026-10-07 15:25:41",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "peggg1i",
+              "author": "srikanth_builds",
+              "text": "That last point is what I was circling around without quite saying it, the tenant ID validates the context, but it doesn't establish it. The actual context comes from the queue the message arrived on, which makes it an infrastructure boundary rather than something the payload gets to declare.\n\nThe tradeoff is having per tenant queues and sharded workers, which not every system can justify. I am curious what drove that decision for you. Was it mainly a scaling choice, or did compliance require the stronger isolation?.\n\nIt still leaves the revocation problem the other commenter raised. The tenant may be correct, but if the user was suspended while the job was waiting, the queue tells you nothing about whether that user's action should still be allowed to complete.",
+              "score": 1,
+              "created_utc": "2026-10-07 16:13:09",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "pehmzgw",
+                  "author": "Existing-Round4556",
+                  "text": "It was required by compliance and justified by scale. \nA message on the queue is a request to perform an action. The message processor still needs to perform all validation and authz at the time it picks it up. Whether a deactivated user's request is still allowed to be processed is a policy decision, not an engineering one. Usually it would depend on the class of the action. ",
+                  "score": 1,
+                  "created_utc": "2026-10-07 19:07:10",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "pelqeaf",
+          "author": "armb2",
+          "text": "We had authentication services where incoming requests got a token they could then use to say \"I am acting on behalf of this tenant\", passed down with all requests to other services.\nA background service or cron job could say \"authenticate me as one of a small number of services allowed to act for tenants without a request, and give me a token valid for this tenant\". Any internal requests it sent then used the token in the same way.\nAt least that was the theory we were working towards.",
+          "score": 2,
+          "created_utc": "2026-10-08 09:17:11",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "pelspdi",
+              "author": "srikanth_builds",
+              "text": "The important distinction is minting the token when the job runs, rather than when it's added to the queue. I hadn't separated those two cases in the original post. I treated carrying a token in the payload as one option, but that token can outlive the session that created it. Requesting a fresh token at execution time avoids that problem entirely.\n\nWhat I would still want to understand is what limits the tenant a service can request a token for. An allowlist can control which services are allowed to act without a user request, but if one of those services has a bug, the blast radius still seems to include every tenant it serves rather than just one.\n\nDid you end up implementing this in production, or did it remain more of a design?",
+              "score": 1,
+              "created_utc": "2026-10-08 09:35:58",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "pem6x5l",
+                  "author": "armb2",
+                  "text": "We had a _very_ few services that were one instance per tenant, but otherwise yes, for services that could request tokens for any tenant a bug or vulnerability could have affected all tenants. We implemented it in production, but not with all of the defence in depth features that would have been ideal. I can't give details though.\nTokens were created when the job/task was created, because that's when the creator could have their identity created. If the token expired while something was blocked or sitting in a queue, the task failed.",
+                  "score": 1,
+                  "created_utc": "2026-10-08 11:18:09",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "1wzs8z9",
+      "title": "Three months ago I asked how you preserve rationale beyond ADRs. Here is what evolved once coding agents joined the workflow (FOSS)",
+      "subreddit": "softwarearchitecture",
+      "url": "https://www.reddit.com/r/softwarearchitecture/comments/1wzs8z9/three_months_ago_i_asked_how_you_preserve/",
+      "author": "oliver-zehentleitner",
+      "created_utc": "2026-10-07 09:39:24",
+      "score": 17,
+      "num_comments": 5,
+      "upvote_ratio": 0.75,
+      "text": "In July I asked here how you keep architectural rationale alive beyond ADRs. The thread gave me three hard constraints: ADRs are right for the big discrete decisions but nobody keeps them current, wrong information is worse than none, and a note is only trusted when it points to a scar and is part of review. That was the starting point. Since then the format has evolved substantially on real repositories, mine and other people's, and most of what follows did not exist in July. One rule I did not want to give up: humans and agents work from the same project truth, not a knowledge base for people and a second memory layer for agents beside it.\n\n**Capture moved to the source.** The reason ADRs stay unwritten is that writing them is a second job after the code. With an agent, the weighing of options already happens in the conversation that produces the change, so the agent writes the entry as a byproduct, into a context/ folder in the repository, and you review it in the same pull request as the code. No wiki, no database, no service to operate. Changes that never happened count too: an approach started and abandoned once a reason not to became clear would otherwise leave no trace.\n\n**Topics replaced one-decision-per-file.** ADRs stay for the decisions big enough to deserve one. The messier volume underneath, the defensive timeout, the rejected dependency, the odd initialization order, the compatibility branch that still exists, goes into topic files, each entry recording both halves: what was chosen, what lost, and why. An existing decisions/ folder is kept and written into; the skill adapts to what a repository already has.\n\n**Honesty became fields.** Every entry says how much to trust it: Evidence is confirmed, inferred or unknown, and Source names the scar, never a person. Superseded entries stay and name their successor. \"Revisit when\" puts a trigger on each entry, so decay is caught by a condition instead of an audit nobody runs. Staleness itself is not solved, the same way it is not solved for tests or docs; it is made hard to happen silently: an agent touching code that has rationale updates the entry or flags it for review in the same pull request, and stale state becomes explicit instead of being pretended away.\n\n**Entries got identities.** Every entry carries an Id, and a See line cites another entry by it, inside the repository or in another one. Rationale can link across repositories without centralizing it: a constraint in a library, the workaround it forced in the service, the incident that confirmed it, readable as one thread, while each reason stays in the repository it belongs to.\n\n**Agents read it back, measurably.** A lean index, one line per topic, is the routing layer: the agent reads it and opens only the topic a task touches, before changing that code. On fresh sessions asked to simplify a retry wrapper, 7 of 10 offered the already-rejected simplification without the recorded reason; with one entry on disk, 10 of 10 found it and declined. The skill itself is checked by 104 eval cases run as real agent sessions, published with their failures.\n\n**Ownership stayed with review, and humans got tools around it.** The entries are Markdown in the repository, so they go through the same pull requests, CODEOWNERS and branch protection as the code, and they build into the same docs: this project's own why layer is public at [https://keepthewhy.com/context/](https://keepthewhy.com/context/) straight from its context/ folder. A linter in CI checks structure, and says plainly that it cannot check whether a reason is true; that stays with the reviewer, and with every human and agent that works with the entry later. What the format guarantees is that the claim stays traceable: who recorded it, on what evidence, and what has been revisited since. A read-only dashboard draws topics as a graph, authors and timeline from blame, and follows the citations across repository boundaries: [https://keepthewhy.com/dashboard/live/](https://keepthewhy.com/dashboard/live/). Git does the rest: distribution, permissions, forks, blame.\n\nWhat it is not: not a replacement for ADRs, and not a lock. It is agent memory that belongs to the project, not to an agent, a user or a machine, and humans read the same files; the quality of an entry depends on the model writing it and on the reviewer reading it.\n\nWhere would you draw the line between an ADR and a topic entry in your team? And what from classic ADR practice would you keep that this loses?\n\n[https://keepthewhy.com/](https://keepthewhy.com/) · [https://github.com/oliver-zehentleitner/keep-the-why](https://github.com/oliver-zehentleitner/keep-the-why) · MIT",
+      "is_original_content": false,
+      "link_flair_text": "Tool/Product",
+      "permalink": "https://reddit.com/r/softwarearchitecture/comments/1wzs8z9/three_months_ago_i_asked_how_you_preserve/",
+      "domain": "self.softwarearchitecture",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "peecanp",
+          "author": "DarlingSiding",
+          "text": "This is the kind of thing that makes me wish my team's ADR folder wasnt just a graveyard of decisions from 2022 nobody remembers making\n\n  \nThe topic vs ADR split feels right intuitively, ADRs for the architectural \"we chose postgres over mongo\" moments and topics for the thousand small \"dont use that library it breaks under load\" scars that normally live only in slack threads. What I wonder is how well the agent-written entries hold up when the model misunderstands the reason. Review catches the obvious stuff but a confidently wrong explanation that sounds plausible might be worse than no explanation at all\n\n  \nAlso curious if you found any friction with the context/ folder getting noisy over time, 3 months is still early days for a repo",
+          "score": 6,
+          "created_utc": "2026-10-07 09:47:59",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "peefz67",
+              "author": "oliver-zehentleitner",
+              "text": "Those are exactly the two failure modes I'm most cautious about.\n\nFor a confidently wrong explanation, the format tries to make uncertainty visible rather than letting polished prose look authoritative. An entry carries Evidence (`confirmed`, `inferred`, `unknown`) and a Source pointing to the scar in the project, not to a person saying \"trust me\". If the agent has inferred the reason rather than established it, that should survive into the entry as an inference. And if nobody was there to confirm what it wrote, it can stay pending instead of silently becoming fact.\n\nBut that doesn't solve the underlying problem. A model can still write something plausible and wrong, and a reviewer can still miss it. The important property for me is that the claim is reviewable and traceable in the same PR as the code, rather than disappearing into a session and being rediscovered later as folklore.\n\nOn noise: so far the biggest thing that helped was moving away from one-decision-per-file. Entries accumulate under topic files, and the index stays one short line per topic, so agents don't load the whole history every time. Superseded reasoning stays for history, but stops being current.\n\nThere is also maintenance behavior for merging, superseding and flagging stale entries rather than just appending forever.\n\nBut yes, three months is early. I don't yet have a five-year repository proving that this stays tidy. That's one of the reasons I'm trying to get it into more real repos now rather than adding more features in isolation.",
+              "score": 2,
+              "created_utc": "2026-10-07 10:16:11",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "peei35q",
+          "author": "foresterLV",
+          "text": "specs instead of ADRs?\nevery change have a motivational proposal and design. can reference previous proposals. then there are specs which define rules (shall do X/Y/Z) with scenarios. each proposal lists specs it's going to change/create/delete and why. every new agent/developer reads specs on the area being changed before doing anything (enforced with skills and agent config files). can track changes to specs via proposals history (all kept in repo).\n\nwe are using this flow for a half year now and frankly there are no outdated specs ever. the only problem I run into from time to time is that some specs can grow uncontrollable (100k+ file on single area) and it needs trimming + split into sub-areas to avoid burning agent context budget. but it's kind of normal to spend some time refactoring requirements over time.",
+          "score": 2,
+          "created_utc": "2026-10-07 10:31:19",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "peekk9j",
+              "author": "oliver-zehentleitner",
+              "text": "That sounds like a very solid workflow, and actually quite close in spirit.\n\nThe main difference I see is that your specs are normative: they define what the system shall do, and proposals explain how those rules change over time.\n\nKTW is deliberately more descriptive. It records why the current implementation exists, what was rejected, what constraint or incident shaped it, and when that reasoning should be revisited. It can sit underneath specs or ADRs rather than replace them.\n\nYour 100k+ spec files are interesting though. That's exactly the kind of pressure that pushed me toward a small topic index plus selective loading instead of asking every agent to read the whole history.\n\nSix months with no stale specs is a strong data point. Thanks for sharing this.",
+              "score": 2,
+              "created_utc": "2026-10-07 10:48:29",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "pef2aj1",
+                  "author": "foresterLV",
+                  "text": "most of our work is done by agents guided by devs so its hard to make spec stale as its enforced during implementation (use command x to start implementing y), per harness files also remind this (for example [claude.md](http://claud.md) for claude code), so even if someone goes vibe mode and says lets fix X, the agent replies \"your repo says you need to route it via openspec, writing the spec first\" etc. and even if something slips in its easy for full-auto review agent to spot the spec drift. so essentially problem moves from drift for having too much detailed specs and the need to groom them and split/trim.",
+                  "score": 1,
+                  "created_utc": "2026-10-07 12:32:54",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
             }
           ]
         }
@@ -1377,9 +1635,9 @@
       "url": "https://www.reddit.com/r/softwarearchitecture/comments/1wvz0jo/ports_and_adapters_architecture/",
       "author": "Dwenya",
       "created_utc": "2026-10-02 16:58:25",
-      "score": 17,
+      "score": 16,
       "num_comments": 24,
-      "upvote_ratio": 0.95,
+      "upvote_ratio": 0.91,
       "text": "Hi, I have a few questions about ports and adapters architecture.\n\nShould you make a port+adapter for a **use case** that's gonna be called by a controller (regular class)?\n\nIf so, would this port be inbound or outbound?\n\nI've read that inboud ports defines how the outside can call the application — e.g. REST API endpoint, and that outbound ports defines how the application calls the outside — e.g. database, email service… But in this case, the application would call itself. I feel like I'm missing something here\n\n",
       "is_original_content": false,
       "link_flair_text": "Discussion/Advice",
@@ -1429,7 +1687,7 @@
           "id": "pdg4h19",
           "author": "C3P2T2",
           "text": "Controller calls the UseCase over an Inbound Port. So the UseCase is the Interface and the Implementation of it, could be something like a Handler.\n\nAnd if the handler calls something outside, f.e. Infrastructure stuff Like DB, LDAP and so on, it defines an outside port. An Adapter will implement it, like MailAdapter, LdapAdapter.\n\nHere is a good arrival about it https://www.happycoders.eu/software-craftsmanship/hexagonal-architecture/",
-          "score": 5,
+          "score": 4,
           "created_utc": "2026-10-02 17:06:19",
           "is_submitter": false,
           "replies": [
@@ -1583,9 +1841,9 @@
       "url": "https://www.reddit.com/r/softwarearchitecture/comments/1wx0302/jobmaster_a_net_job_scheduler_that_splits/",
       "author": "West_Ad6277",
       "created_utc": "2026-10-03 22:41:48",
-      "score": 15,
+      "score": 12,
       "num_comments": 7,
-      "upvote_ratio": 0.95,
+      "upvote_ratio": 1.0,
       "text": "I built JobMaster, a job scheduler for .NET aimed at horizontal scale. Execution is split from the audit trail and the coordination, so workers are not all locking the same rows.\n\nJobs go into a per-worker bucket first. The Master DB keeps the history. A job due soon stays in the bucket. A job due later is parked there and moved back in a batch when it is close. On a 50k burst with 20 workers, NATS in front of RavenDB did 23.8k jobs/sec, against 6.5k when one database did both.\n\n* Write-up: [https://hugoj0s3.dev/blog/jobmaster-achieving-horizontal-scaling-for-net-jobs-while-maintaining-a-centralised-audit-log/](https://hugoj0s3.dev/blog/jobmaster-achieving-horizontal-scaling-for-net-jobs-while-maintaining-a-centralised-audit-log/) \n* Docs: [https://docs.jobmaster.hugoj0s3.dev/](https://docs.jobmaster.hugoj0s3.dev/) \n* Benchmark: [https://docs.jobmaster.hugoj0s3.dev/docs/benchmarks/results](https://docs.jobmaster.hugoj0s3.dev/docs/benchmarks/results) \n* Architecture: [https://docs.jobmaster.hugoj0s3.dev/docs/architecture-under-the-hood/architecture-overview](https://docs.jobmaster.hugoj0s3.dev/docs/architecture-under-the-hood/architecture-overview) \n* Repo: [https://github.com/hugoj0s3/jobmaster-net](https://github.com/hugoj0s3/jobmaster-net)\n\nI would appreciate any feedback, especially on the bucket split.",
       "is_original_content": false,
       "link_flair_text": "Article/Video",
@@ -1625,73 +1883,6 @@
       ]
     },
     {
-      "id": "1wy7bcr",
-      "title": "Interactive architecture refactoring",
-      "subreddit": "softwarearchitecture",
-      "url": "https://www.reddit.com/r/softwarearchitecture/comments/1wy7bcr/interactive_architecture_refactoring/",
-      "author": "asdoduidai",
-      "created_utc": "2026-10-05 12:30:39",
-      "score": 13,
-      "num_comments": 6,
-      "upvote_ratio": 0.88,
-      "text": "Hi all,\n\nI was recently untangling the architecture of a project from the last few months and I've put together a tool to visually fix encapsulation/abstraction and the likes:\n\n[https://github.com/orglnte/objectsboard-skill](https://github.com/orglnte/objectsboard-skill)\n\nIt helps to **visually find calls to private methods**/members/attributes/variables (Red), calls to members not private but likely bypassing the owner (Amber), calls to shared data (Amber), and maps all accesses to the interface (Blue). It finds calls by running the repo unit tests, and then doing a static code analysis.\n\nYou can then **drag and drop boxes**, group them, assign a box to another one, and then ask the coding agent to review your changes and **refactor the code accordingly**.\n\nIf you are curious to see how a repo you know looks like and you do try, it would be amazing if you can drop a quick comment. As a teaser, this is how *fastapi* looks like:\n\nhttps://preview.redd.it/klesda5qwoth1.png?width=2666&format=png&auto=webp&s=08eaa0951ed33472b40a87341777ca5fd8bac1e6\n\nIt currently supports only Python and claude. It is not meant to be optimised for all kinds of repos and python architectures, but it has been tested with a few and the visualization was meaningful.\n\nThis is what you see with *fastapi* automatic objects placement with the option *--root-owns* (it labels all objects within a module to the class with that module name):\n\nhttps://preview.redd.it/abmmvay1woth1.png?width=1186&format=png&auto=webp&s=e01b1edfe4b0071477f030924f27175fde1d9316\n\n￼​NOTE: It currently has an approx. limit of 300 boxes/objects, so throwing Django at it does not work (yet).\n\nIf you mind, here's an intro article: [https://medium.com/@ayeyebrz/interactive-architecture-refactoring-with-coding-agents-b8af78cd477b](https://medium.com/@ayeyebrz/interactive-architecture-refactoring-with-coding-agents-b8af78cd477b)",
-      "is_original_content": false,
-      "link_flair_text": "Tool/Product",
-      "permalink": "https://reddit.com/r/softwarearchitecture/comments/1wy7bcr/interactive_architecture_refactoring/",
-      "domain": "self.softwarearchitecture",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "pe332wg",
-          "author": "bunsenhoneydew007",
-          "text": "Very interesting. I often use visual representations of things that I rearrange to help my thinking on a topic so I can see this being useful. Unfortunately it’s python only for now, so I’ll check back in later. ",
-          "score": 2,
-          "created_utc": "2026-10-05 20:15:50",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "pe3625g",
-              "author": "asdoduidai",
-              "text": "Which language you code in mostly? As coding agents mature and get more and more reliable, I think that’s how we are gonna code… on the line of what Karpathy said years ago:\n\nhttps://karpathy.medium.com/software-2-0-a64152b37c35",
-              "score": 1,
-              "created_utc": "2026-10-05 20:28:20",
-              "is_submitter": true,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "pe1etff",
-          "author": "CzyDePL",
-          "text": "How is this useful?",
-          "score": 3,
-          "created_utc": "2026-10-05 16:07:07",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "pe2730r",
-              "author": "asdoduidai",
-              "text": "Thx for asking let me check if we are on the same page: you mean how does it help in refactoring a code base that has a lot of entangled code, with classes/modules that call each other private variables/attributes/members/methods?",
-              "score": 1,
-              "created_utc": "2026-10-05 18:02:35",
-              "is_submitter": true,
-              "replies": [
-                {
-                  "id": "pe341fr",
-                  "author": "CzyDePL",
-                  "text": "Yes. How does it help refactoring?",
-                  "score": 2,
-                  "created_utc": "2026-10-05 20:19:53",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        }
-      ]
-    },
-    {
       "id": "1wxeh93",
       "title": "Sunday Sequence Diagrams: Helm Dashboard",
       "subreddit": "softwarearchitecture",
@@ -1720,146 +1911,233 @@
       ]
     },
     {
-      "id": "1wuqqh7",
-      "title": "im a se student and somehow became the only developer responsible for taking a large system to production. how do i not screw this up?",
+      "id": "1wy7bcr",
+      "title": "Interactive architecture refactoring",
       "subreddit": "softwarearchitecture",
-      "url": "https://www.reddit.com/r/softwarearchitecture/comments/1wuqqh7/im_a_se_student_and_somehow_became_the_only/",
-      "author": "heapshade",
-      "created_utc": "2026-10-01 05:04:16",
-      "score": 10,
-      "num_comments": 14,
-      "upvote_ratio": 0.86,
-      "text": "im at the beginning of my third year studying software engineering. im not even a junior developer yet in terms of professional experience and ive never actually built and shipped a real production product before.\n\ni do have a decent amount of programming experience in general. im comfortable reading and writing code, learning new concepts, solving programming problems, etc. so im not starting from zero technically. what i dont have is real experience with production web development, system architecture, deployment, security, maintaining a production database, designing something that other developers will eventually have to work on, and all the other things that come with building an actual product.\n\nsomehow ive ended up in a situation where im currently the only developer responsible for a fairly large product, and im expected to eventually get the first version into production.\n\ni cant really explain what the product does in detail, but its essentially a fairly large enterprise management system with multiple interconnected domains. if the first version succeeds, the scope and customer base may expand significantly later.\n\nif the first version succeeds and the project receives further funding, there will most likely be more developers working on it. however, until that happens, im the only developer. its also possible that ill remain the only developer for quite a while.\n\ni should eventually be connected with a few people who have more experience in this area, and they will probably be able to review things or point me in the right direction occasionally. however, i dont know yet who exactly those people are or how experienced they actually are, so i dont want to build my entire strategy around assuming that somebody will catch my mistakes.\n\nright now im still working on the requirements and overall domain model. ive already mapped out a significant part of the system, the major features, entities, relationships, open questions, user types, permissions, workflows, etc. im trying to resolve the important domain questions before i start seriously implementing things.\n\nwhat scares me isnt really writing the code itself.\n\nmy biggest concern is that i dont have the experience to recognize when an architectural decision is good or bad.\n\ni can read about different approaches. i can understand why something like a modular monolith might make sense. i can learn about database normalization, authorization models, migrations, testing, ci/cd, caching, replication, load balancing, security, and so on. but there is a huge difference between understanding these concepts and having enough experience to know when im applying them incorrectly.\n\nfor example, i can design a database schema that looks reasonable to me. but how do i know that i havent made a fundamental modeling mistake that will become extremely expensive six months later?\n\ni can separate the application into modules. but how do i know whether those are actually good boundaries?\n\ni can make something \"extensible\", but how do i know whether im genuinely making future changes easier or just overengineering because im afraid of future requirements?\n\ni can make the application work on my machine and pass tests, but how do i know that what ive built is actually something i should trust in production?\n\nsecurity is probably the part that concerns me the most. this isnt a hobby application where losing some test data doesnt matter. if this actually gets deployed for real organizations, i dont want to discover security through production incidents.\n\nreliability is another concern. backups, database migrations, deployment, monitoring, failure recovery, concurrency, data integrity, authorization bugs, etc. are all things where i simply dont have years of mistakes behind me to know what i should be afraid of.\n\nscalability worries me too, although im deliberately trying not to design for google-scale traffic that may never exist. my goal isnt to build some insane distributed system from day one. i just dont want to make early decisions that make reasonable scaling unnecessarily difficult later.\n\nthe thing im trying hardest to avoid is this scenario:\n\ni spend months building the first version, funding arrives, experienced developers join the project, look at what ive built and basically say, \"this entire foundation is wrong, we need to rewrite it.\"\n\ni understand that some refactoring and even some rewriting is inevitable. requirements will change and im obviously going to make mistakes. im not expecting to design a perfect architecture on my first attempt.\n\nwhat i want is a reasonable engineering process that minimizes the probability of catastrophic mistakes.\n\nso i guess my main question for experienced developers/architects is:\n\nif you were in my position a se student with decent programming ability but basically no production experience, suddenly responsible for taking a relatively large greenfield system from requirements to its first production version alone.. how would you approach it?\n\nmore specifically, how would you determine whether your architectural decisions are \"good enough\" when you dont yet have the experience to judge them intuitively?\n\nwhat would you absolutely keep simple?\n\nwhat would you design carefully before writing much code?\n\nwhich decisions are cheap to get wrong and fix later, and which decisions are dangerous enough that i should get an experienced person to review them before continuing?\n\nhow much architecture should i define upfront?\n\nwhat production practices would you consider non-negotiable even for the first version?\n\nwhat should i deliberately ignore until the system actually needs it?\n\nand probably most importantly: what are the common ways someone in my position can accidentally create a complete mess while genuinely believing they are following \"best practices\"?\n\nim not looking for someone to design the system for me. im mostly trying to figure out how to develop the engineering judgment necessary to get through the first version without creating something fundamentally broken for whoever has to work on it after me.\n\nalso, i want to make it clear that im looking for serious answers, including uncomfortable ones. i understand how absurd this situation probably sounds to experienced developers. im aware that, from a purely technical and risk-management perspective, the most sensible advice might simply be \"you should not be the person responsible for this\" or \"walk away.\" im not under the illusion that being able to write code somehow makes me qualified to architect and operate a production system by myself. but assuming i have a choice, i dont want to walk away from it. i want to at least try. its a ridiculous opportunity for someone at my level, and even if i eventually find out that im in way over my head, id rather make that determination after seriously trying to approach it correctly than reject it immediately because im inexperienced. so feel free to tell me that something im doing is stupid, that my assumptions are wrong, or that certain parts absolutely need someone more experienced. thats actually the kind of feedback im looking for. im just particularly interested in what the best possible approach is if i decide to go forward anyway :)",
+      "url": "https://www.reddit.com/r/softwarearchitecture/comments/1wy7bcr/interactive_architecture_refactoring/",
+      "author": "asdoduidai",
+      "created_utc": "2026-10-05 12:30:39",
+      "score": 11,
+      "num_comments": 6,
+      "upvote_ratio": 0.83,
+      "text": "Hi all,\n\nI was recently untangling the architecture of a project from the last few months and I've put together a tool to visually fix encapsulation/abstraction and the likes:\n\n[https://github.com/orglnte/objectsboard-skill](https://github.com/orglnte/objectsboard-skill)\n\nIt helps to **visually find calls to private methods**/members/attributes/variables (Red), calls to members not private but likely bypassing the owner (Amber), calls to shared data (Amber), and maps all accesses to the interface (Blue). It finds calls by running the repo unit tests, and then doing a static code analysis.\n\nYou can then **drag and drop boxes**, group them, assign a box to another one, and then ask the coding agent to review your changes and **refactor the code accordingly**.\n\nIf you are curious to see how a repo you know looks like and you do try, it would be amazing if you can drop a quick comment. As a teaser, this is how *fastapi* looks like:\n\nhttps://preview.redd.it/klesda5qwoth1.png?width=2666&format=png&auto=webp&s=08eaa0951ed33472b40a87341777ca5fd8bac1e6\n\nIt currently supports only Python and claude. It is not meant to be optimised for all kinds of repos and python architectures, but it has been tested with a few and the visualization was meaningful.\n\nThis is what you see with *fastapi* automatic objects placement with the option *--root-owns* (it labels all objects within a module to the class with that module name):\n\nhttps://preview.redd.it/abmmvay1woth1.png?width=1186&format=png&auto=webp&s=e01b1edfe4b0071477f030924f27175fde1d9316\n\n￼​NOTE: It currently has an approx. limit of 300 boxes/objects, so throwing Django at it does not work (yet).\n\nIf you mind, here's an intro article: [https://medium.com/@ayeyebrz/interactive-architecture-refactoring-with-coding-agents-b8af78cd477b](https://medium.com/@ayeyebrz/interactive-architecture-refactoring-with-coding-agents-b8af78cd477b)",
       "is_original_content": false,
-      "link_flair_text": "Discussion/Advice",
-      "permalink": "https://reddit.com/r/softwarearchitecture/comments/1wuqqh7/im_a_se_student_and_somehow_became_the_only/",
+      "link_flair_text": "Tool/Product",
+      "permalink": "https://reddit.com/r/softwarearchitecture/comments/1wy7bcr/interactive_architecture_refactoring/",
       "domain": "self.softwarearchitecture",
       "is_self": true,
       "comments": [
         {
-          "id": "pd5udz3",
-          "author": "BroadCrazy",
-          "text": "If you're solo and inexperienced, push for a smaller first production target than the business probably wants. Start with a modular monolith, one Postgres database, boring deployment, backups you've restored, basic monitoring, and a reviewed auth model. I'd get senior eyes on security, tenancy and data isolation, and any decision that changes data ownership across modules.",
-          "score": 13,
-          "created_utc": "2026-10-01 06:56:46",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "pd5lc4f",
-          "author": "fuccdevin",
-          "text": "I stopped reading halfway through, you are out of your depth and being setup to drown. \n\nIf you want to get the experience of a seasoned full stack software engineer this is the project, but it is sink or swim. This project will bring you to your breaking point. Whatever you think you estimated for the workload, triple it. If you think you’ve absolutely nailed your requirements, you haven’t. \n\nSpeaking as someone literally doing this same thing “solo” with one other dev but I am doing most of the code, I just finished my 6th full system re-write because requirements that were dictated to me logically could not work when implemented in code. \n\nI am currently building an entire manufacturing ERP from scratch. We do paper converting manufacturing, which is essentially middleman for parts conversion. I have to, in the interim of this migration/build out, support two different legacy systems with completely different parts schemas, while supporting our client part schemas which differ drastically by client, all of which would make any DBA swallow a shotgun. \n\nMy advice if you choose to see this project through is to get full development -> staging -> production environments and CI/CD pipelines setup from day one. Figure out a good database migration strategy/tool that handles auto running them when deploying/promoting changes through your pipelines. \n\nWhile you setup those 3 environments and your pipelines, you will realize that getting something running correctly in production is the actual bulk of the work. The saying “the last 10% takes 90% of the time” is a law of nature when it comes to a project like this. \n\nI’d be willing to DM or even hop on a call if you want more advice or just to discuss stuff. Sorry currently 12 hours into a shift and half of this post turned into a rant lol",
-          "score": 7,
-          "created_utc": "2026-10-01 05:44:46",
+          "id": "pe1etff",
+          "author": "CzyDePL",
+          "text": "How is this useful?",
+          "score": 3,
+          "created_utc": "2026-10-05 16:07:07",
           "is_submitter": false,
           "replies": [
             {
-              "id": "pd7vj9f",
-              "author": "Adventurous-Hunt4683",
-              "text": "Although you are spot on, what makes you think the OP has time to also be a team of DevOps engineers too? Not only is the OP being setup to drown, the company as a whole it taking a risk the board should know about, as this type of behaviour by companies is cavalier at best, negligent and incompetent at worst!!",
+              "id": "pe2730r",
+              "author": "asdoduidai",
+              "text": "Thx for asking let me check if we are on the same page: you mean how does it help in refactoring a code base that has a lot of entangled code, with classes/modules that call each other private variables/attributes/members/methods?",
               "score": 1,
-              "created_utc": "2026-10-01 14:51:10",
-              "is_submitter": false,
-              "replies": []
+              "created_utc": "2026-10-05 18:02:35",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "pe341fr",
+                  "author": "CzyDePL",
+                  "text": "Yes. How does it help refactoring?",
+                  "score": 3,
+                  "created_utc": "2026-10-05 20:19:53",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
             }
           ]
         },
         {
-          "id": "pd6q0kq",
-          "author": "SucculentSuspition",
-          "text": "You are asking the wrong questions. The right question is what is the simplest, stupidest piece of shit system you can ship in order to get to keep playing the game and produce a slightly less piece of shit system.",
-          "score": 5,
-          "created_utc": "2026-10-01 11:15:02",
+          "id": "pe332wg",
+          "author": "bunsenhoneydew007",
+          "text": "Very interesting. I often use visual representations of things that I rearrange to help my thinking on a topic so I can see this being useful. Unfortunately it’s python only for now, so I’ll check back in later. ",
+          "score": 2,
+          "created_utc": "2026-10-05 20:15:50",
           "is_submitter": false,
-          "replies": []
-        },
+          "replies": [
+            {
+              "id": "pe3625g",
+              "author": "asdoduidai",
+              "text": "Which language you code in mostly? As coding agents mature and get more and more reliable, I think that’s how we are gonna code… on the line of what Karpathy said years ago:\n\nhttps://karpathy.medium.com/software-2-0-a64152b37c35",
+              "score": 1,
+              "created_utc": "2026-10-05 20:28:20",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "1wzxukj",
+      "title": "Parimatch event-driven pipeline: maintaining low-latency state fan-out and strict ordering under high-frequency writes",
+      "subreddit": "softwarearchitecture",
+      "url": "https://www.reddit.com/r/softwarearchitecture/comments/1wzxukj/parimatch_eventdriven_pipeline_maintaining/",
+      "author": "WitchMamaHouse",
+      "created_utc": "2026-10-07 14:22:50",
+      "score": 11,
+      "num_comments": 7,
+      "upvote_ratio": 1.0,
+      "text": "While analyzing high-velocity distributed systems during peak global traffic spikes, the resilience of the real-time streaming pipeline was genuinely impressive: deterministic state synchronization held steadily under 30ms across hundreds of thousands of concurrent client connections, with zero dropped message frames and clean state reconciliation even when inbound write throughput surged.\n\nIn ultra-low-latency event streaming, keeping real-time edge broadcast fast while strictly preventing out-of-order execution usually leads to heavy lock contention or edge memory exhaustion.\n\nFrom an enterprise systems architecture perspective, I’m curious how teams achieve this level of throughput without degrading tail latencies:\n\n1. Core Serialization: Do teams rely on an in-memory single-writer model (LMAX Disruptor pattern) pinned to dedicated CPU cores, or are distributed Actor models (Akka / Microsoft Orleans) scalable enough without introducing GC pauses?\n2. Edge Backpressure: When mobile clients drop packets or sit on high-jitter cellular networks, what message coalescence or delta-compression strategies prevent edge socket buffers from saturating?\n3. Message Fan-Out: Is NATS JetStream now the de facto replacement for Redis Pub/Sub when scaling broadcast pipelines beyond 100k+ unique channel subscribers?\n\nWould appreciate perspectives from engineers who have architected or benchmarked high-frequency event broadcast systems at scale.",
+      "is_original_content": false,
+      "link_flair_text": "Discussion/Advice",
+      "permalink": "https://reddit.com/r/softwarearchitecture/comments/1wzxukj/parimatch_eventdriven_pipeline_maintaining/",
+      "domain": "self.softwarearchitecture",
+      "is_self": true,
+      "comments": [
         {
-          "id": "pd7vda5",
-          "author": "SecretaryAntique8603",
-          "text": "No way I’m reading all that but let me say this: you will fail, 100% certainty. By that I mean shit will break, you will miss deadlines, but you may still add value.\n\nSo, plan for failure. Make sure you can see what your system is doing and debug it. Put your efforts into:  \n\\* being able to get the smallest possible piece out that’s still slightly useful  \n\\* making sure you can observe and debug it well enough to fix it when it breaks\n\nLearn from when it breaks and how you screwed it up. Make it a little better. Roll out the next feature/module.\n\nFor the love of god do not do a big bang release and roll out everything to all the users at the same time. You have a negative infinity percent chance of pulling that off without causing yourself permanently life-altering stress. Do everything in your power to pull it back to my suggestion, or prepare to suffer.\n\nYou can do it, good luck!",
-          "score": 6,
-          "created_utc": "2026-10-01 14:50:25",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "pd5h0ct",
-          "author": "ImmediateComplexity",
-          "text": "Man, that's a hell of a spot to be in. A lot of people would fold under that pressure but you're clearly thinking about it the right way. The fact you're not just diving into code and writing a thousand microservices is already a good sign.\n\n  \nThe \"modular monolith\" instinct is dead on. Keep everything in one deployable for as long as you possibly can. The boundaries between modules matter way more than how they communicate at runtime, and you can always extract things later if you actually need to. Way easier than trying to stitch a distributed mess back together.\n\n  \nFor the database, draw your schema on paper first and walk through every single workflow you've mapped out. If a query requires joining across six tables for something users do constantly, you've probably got a problem. Don't try to normalize everything into fifth normal form either, some duplication is fine if it keeps queries simple and fast. The mistakes that hurt are usually around not having proper foreign keys or putting a column in the wrong table so it creates weird dependencies, not minor normalization stuff.\n\n  \nSecurity-wise, the non-negotiables are parameterized queries everywhere, hashed passwords, proper session management, and never trusting anything from the client. Auth is way too easy to mess up rolling your own, so lean hard on whatever framework handles it. If there's one area to beg an experienced person to review before launch, it's the auth flow and any endpoint that touches sensitive data.\n\n  \nWhat I'd keep dead simple is the deployment process. A single server, a script that pulls code and restarts the app, and a database backup that runs on a cron job. You don't need containers and orchestration and zero-downtime deploys on day one. Just make sure you can restore the database from a backup and you've practiced doing it. That alone puts you ahead of half the production systems out there.\n\n  \nThe thing that burns people in your position is building abstractions for problems they don't have yet. If you catch yourself writing an interface with one implementation \"just in case,\" delete it. Build the simplest thing that works for the requirements you actually know about. You can always refactor later when the second implementation actually shows up.",
+          "id": "pefs7sr",
+          "author": "SogapKnup",
+          "text": "At this scale, distributed locks and microservice network hops are completely out of the question for the core mutation path. The industry gold standard for sub-30ms consistency is almost universally an in-memory single-writer architecture backed by lock-free circular ring buffers (Disruptor pattern).\n\nBy eliminating thread synchronization overhead and cache false sharing, a modern CPU core can easily sequence millions of state transitions per second. The state mutations are committed sequentially in nanoseconds, and state diffs are offloaded asynchronously to decoupled edge workers while an append-only log handles durability in the background.",
           "score": 3,
-          "created_utc": "2026-10-01 05:12:02",
+          "created_utc": "2026-10-07 14:32:49",
           "is_submitter": false,
           "replies": []
         },
         {
-          "id": "pd5p53r",
-          "author": "Kriging",
-          "text": "I was in this position, and I simply failed. It was too much for me to handle at the time, and although I thought I was confident in my capabilities there were so many things I didn't even known I didn't know the project ultimately failed. \n\nWell I went on to continue studying, but when I presented my work after a few months working there they were visibly dissapointed although I thought I made the best of it. \n\nNow after 4 yoe in a company I know how many things I did wrong.",
+          "id": "pegz6qx",
+          "author": "wyldstallionesquire",
+          "text": "Im sure there are humans here, but this feels like a lot of LLMs talking to each other?",
+          "score": 3,
+          "created_utc": "2026-10-07 17:29:43",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "pefs6ns",
+          "author": "Hairy_Spray_3479",
+          "text": "The single-writer pinned ring buffer approach still hard to beat when you need that sub-30ms guarantee. GC pauses on the JVM side can ruin your day real quick if you not careful with object allocation in the hot path.\n\n  \nFor the edge backpressure problem we solved it by batching state deltas and sending only the latest value when client reconnects, plus adaptive send window that shrinks when ack latency spikes. The fan-out question depends entirely on your ordering requirements, NATS does well but if you need strict per-key ordering across partitions then Kafka still the safer bet despite the operational overhead.",
           "score": 2,
-          "created_utc": "2026-10-01 06:14:44",
+          "created_utc": "2026-10-07 14:32:41",
           "is_submitter": false,
           "replies": []
         },
         {
-          "id": "pd6djze",
-          "author": "Luneriazz",
-          "text": "first manage your anxiety and your burn out stress...\n\nthis 2 alone could drag you down to the point doing day to day task is imposible.\n\nbut there simple indicator you could used. my father always says if it were hard it probably wrong\n\nif you cant understand or explain the architecture it probably wrong and does not suit your technical need. after all you are the only one left managing the system.",
+          "id": "peftr1s",
+          "author": "20Kenny",
+          "text": "Replacing Redis Pub/Sub with clustered NATS is pretty much a rite of passage once you cross 50k concurrent sockets lol. Redis CPU just goes vertical the second high fan-out kicks in.",
           "score": 2,
-          "created_utc": "2026-10-01 09:42:36",
+          "created_utc": "2026-10-07 14:39:22",
           "is_submitter": false,
           "replies": []
         },
         {
-          "id": "pd5n0f5",
-          "author": "Happy_Breakfast7965",
-          "text": "You will screw this up because anybody will. So, don't worry too much. Consider it a learning opportunity.\n\nEvery developer (or plumber; no jokes) comes and says: \"Who have done it this way? Why?!\".\n\nAre you just an employee? In that case, if you are acting in a good faith, nothing is your plohlem. It's a problem of the organization and business owners. They are responsible for quality, security, resilience, etc. (it's not a legal advise, I'm not a lawyer)\n\nI'm an experienced Architect, I work with many other Architects and Developers, I screw up, my peers screw up, Developers screw up all the time. It's a difficult industry. \n\nRead good books, follow good engineers, learn system design, learn non-abstract large system design, observability, eventual consistency, developer experience, user experience, proper automated testing, documentation. Learn how to write ADRs and write them. Don't try to be smart in solutions, try to be simple. Simple wins.\n\nIf you want to learn, avoid vibe-coding. Do an AI-assisted engineering. It's a subtle difference: do you just prompt or do you read the code, care about tests and technical design?\n\nRemember that whatever you do in development — it's a socio-technological system. It's not only code, it's the process how software is created: discovery, analysis, implementation, feedback loop, desicions. Also, it's a socio-technological system when it runs and another dimension of it when it's in use. \n\nIt's great to be exposed to difficult things. That's how you learn. Great stuff in life is hard. Be humble, be a learner.",
+          "id": "pefzqac",
+          "author": "AmmoniaSkull",
+          "text": "Parimatch's tech team actually shared a solid engineering write-up on this a while back. They basically decoupled their in-memory Disruptor core from NATS JetStream at the edge, so client WebSocket backpressure never touches the core mutation loop. Simple architecture, but keeps p99 latencies crazy low.",
           "score": 2,
-          "created_utc": "2026-10-01 05:57:55",
+          "created_utc": "2026-10-07 15:04:29",
           "is_submitter": false,
           "replies": []
         },
         {
-          "id": "pd6y1tg",
-          "author": "badguy84",
-          "text": "Doing smaller increments as suggested below is probably the practical tip I'd have... do whatever you can to consistently stress test your system at each increment and practice and re-do the exact steps you'd do for production.\n\nOne thing that I immediately thought and I don't think you addressed: are you being paid to take on this responsibility? I'm not sure what your actual role is, you describe your duties... but are you a full time employee or a contractor working on this? Why is this responsibility being hoisted on to someone who is clearly too inexperienced to fulfill this role?\n\nI can't say for certain you'll fail, but the questions you're asking seems to be too little too late. Your architecture seems to already be there? Why would you change it? Did you come up with it? Do you not know how to pressure test your decisions? It feels like you're in a difficult position and you're in pretty deep. You can keep going with a sink or swim mentality, and maybe succeed... I don't think there is any good advice here because you already know you're out of your depth and you seem to know what the true solution is.",
+          "id": "pefym2d",
+          "author": "VanFonHelsing",
+          "text": "Curious why high-frequency engines still insist on raw WebSockets instead of migrating edge fan-out to WebTransport over HTTP/3?\n\nHead-of-line blocking over TCP is the actual killer on spotty mobile connections. With QUIC/WebTransport you can drop non-critical state deltas natively without stalling the entire client stream.",
           "score": 1,
-          "created_utc": "2026-10-01 12:04:47",
+          "created_utc": "2026-10-07 14:59:45",
           "is_submitter": false,
           "replies": []
         },
         {
-          "id": "pd8luvt",
-          "author": "CharacterPay9544",
-          "text": "Just go to prod in small steps and keep learning from your mistakes. ",
+          "id": "pefyvig",
+          "author": "MoneyPrinceLuke",
+          "text": "Slow client backpressure is by far the biggest real-world headache. If a mobile user hits a tunnel and their TCP window shrinks to zero, buffering outgoing events on the edge server will OOM your gateway in minutes.\n\nWe had to implement an aggressive drop-and-coalesce policy: if a client falls behind by more than 3 sequence ticks, drop intermediate telemetry and only push the latest absolute state snapshot once their socket drain clears.",
           "score": 1,
-          "created_utc": "2026-10-01 16:45:11",
+          "created_utc": "2026-10-07 15:00:50",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1wz5pce",
+      "title": "Open Source, a relic, a charity or still the thing?",
+      "subreddit": "softwarearchitecture",
+      "url": "https://event-driven.io/en/open-source-a-relict-a-charity-or/",
+      "author": "Adventurous-Salt8514",
+      "created_utc": "2026-10-06 15:34:39",
+      "score": 9,
+      "num_comments": 7,
+      "upvote_ratio": 0.66,
+      "text": "[External Link]",
+      "is_original_content": false,
+      "link_flair_text": "Article/Video",
+      "permalink": "https://reddit.com/r/softwarearchitecture/comments/1wz5pce/open_source_a_relic_a_charity_or_still_the_thing/",
+      "domain": "event-driven.io",
+      "is_self": false,
+      "comments": [
+        {
+          "id": "pe8rxg9",
+          "author": "joelparkerhenderson",
+          "text": "Open source is fundamental to human goodness, in my opinion. I maintain many open source projects - some popular, some tiny, and they help many people.   \n  \nFor example I lead the architecture decision record repo:\n\n[https://github.com/architecture-decision-record/architecture-decision-record](https://github.com/architecture-decision-record/architecture-decision-record)\n\nIt's 100% hand written by me in English, then translated to many more languages thanks to volunteers and AI. Constructive feedback welcome.",
+          "score": 32,
+          "created_utc": "2026-10-06 15:56:06",
           "is_submitter": false,
           "replies": []
         },
         {
-          "id": "pdaj567",
-          "author": "omry8880",
-          "text": "i was in the same exact situation a bit over a year ago and followed through, so I feel obliged to comment.\n\nI'll start by saying that the advice given here is top tier. Read the other comments and write down topics to research about.\n\nThe first thing you gotta do is calm down. Suppose everything goes wrong - well, that's the company's fault they chose you to build this system, and the worst thing that can happen is you losing your job (ofc this is just a speculation and not legal advice or whatever).\n\nYou can pull this off, but it will be hard. extremely hard. You're going to work more than everyone else, you're going to go home and continue working, and you're going to spend weekends also working. Mostly researching and reading a lot (books, medium articles, docs, blogs etc..). This is because you don't have the experience, and for a big system like the one you're describing, you have to know A LOT of stuff to pull such a feat. Knowledge that is worth a couple of years (at least) of day to day software engineering.\n\nThe good thing? You have AI to help you. In my opinion, the path to seniority has never been shorter. Of course, that doesn't mean that you should vibe code the application. For the first couple of months, you should prob code everything by hand to get yourself familiar with everything: your stack, your db driver, api framework and other frameworks/libraries that you're going to use. Treat the AI as a conversational partner: always ask questions, discuss architecture, list tradeoffs, ask it questions about why it chose to do X using Y. I don't know what you're going to develop, but like others wrote here - go with a modular monolith & postgres. You're a one man team, so splitting up to microservices at this point is a waste of time and can seriously hurt you in the long run. Research about SWE principles like YAGNI & DRY. Make sure to write tests.\n\nWrite a design doc, ADRs, and again - keep everything as simple as possible, because everything will 100% change in the future when you notice that you did something wrong, or something could be done much better and simper - so design stuff to be easily changeable in the future. Make sure to have readable code and a maintainable project. You're going to be making a lot of mistakes, and that's fine and natural. By being familiar with the code and technology you use, it will be much easier catching bugs and understanding where things might go wrong.\n\nDid they give you a deadline? Are you going to be using a cloud provider (GCP/AWS/..) when you receive funding and when will this be? These are important questions. Like others have said here - don't reinvent the wheel. If there's a library that does something good and is legit (a good amount of repo stars, guides and articles) - make sure to use it. If you can use managed auth (like auth0 for example) then don't waste time building it yourself (though it's a good exercise).\n\nSome things to read about: separation of concerns, loose coupling, idempotency, retries, postgres internals, docker, high availability and observability.\n\nRemember to try to have fun in the process :)",
+          "id": "pe90md0",
+          "author": "_descri_",
+          "text": "IMHO you missed the points of disrupting competitors and finding help.\n\nIf you dislike a company with big money who sells proprietary things, you may opensource something like that to hurt them, make a buzz, and maybe even get support contracts. You cannot compete against them through advertisements, therefore you just make their service to appear overpriced.\n\nFinding help for an open source project is not easy, but is still possible. You can hardly find any volunteer help with a closed source project.\n\nAnother option, possible for largeer businesses, is open sourcing to build a community which will create novel products on top of their open source infrastructure. The company will sell support and cloud hosting, and may even cannibalize community ideas to make its own higher-level products.",
+          "score": 9,
+          "created_utc": "2026-10-06 16:31:40",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "peb3s00",
+              "author": "ZyberZeon",
+              "text": "Oh no! The billion dollar Saas that prioritizes revenue over users, and steals their data to influence elections suddenly lacks a moat to extract maximum revenue and oppression. \n\nOh no! They would have to actually build a product the users want and have to abide by user sovereignty. \n\nOh the tragedy! ",
+              "score": 0,
+              "created_utc": "2026-10-06 21:43:58",
+              "is_submitter": false,
+              "replies": [
+                {
+                  "id": "pecslu8",
+                  "author": "Middlewarian",
+                  "text": "On April 21, 2026 [a jewelry store in Texas was robbed by a bunch of thugs](https://www.kxan.com/news/local/round-rock/police-searching-for-suspects-accused-of-robbing-jewelry-store-at-round-rock-outlets/). There was another robbery in Freemont, California in June of 2025. Around 24 thieves raided a jewelry store and stole over 1.7 million$ of jewelry in 70 seconds. If the stewards of those stores decide to rebuild, I predict they won't replace the display cases that were smashed. It will be a \"by appointment only\" store and they will frisk you before they show you anything. Of the 24 thieves, only a handful of them have been caught.\n\nIn other words, the store managers will replace their open model with a SaaS model. I saw some of this trouble brewing back in the 1990s and realized SaaS was a gift from above in terms of safeguarding investments. I'm glad I have some open-source code for my portfolio, but I'm glad it's not all I have. Making something [proprietary but free-to-use](https://www.reddit.com/r/codereview/comments/qo8yq3/c_programs/) is the best I can do.",
+                  "score": 1,
+                  "created_utc": "2026-10-07 02:56:24",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "peaktwb",
+          "author": "pstmdrnargh",
+          "text": "Postgres is Open Source, still going strong, still useful. ",
           "score": 1,
-          "created_utc": "2026-10-01 21:43:41",
+          "created_utc": "2026-10-06 20:21:42",
           "is_submitter": false,
           "replies": []
         },
         {
-          "id": "pdbbtdt",
-          "author": "andlewis",
-          "text": "In Claude We Trust",
+          "id": "pecxbqs",
+          "author": "Middlewarian",
+          "text": "I'm glad I have some open-source for my portfolio, but I'm glad that's not all I have.",
           "score": 1,
-          "created_utc": "2026-10-02 00:13:30",
+          "created_utc": "2026-10-07 03:24:25",
           "is_submitter": false,
           "replies": []
         },
         {
-          "id": "pdcvadd",
-          "author": "theScruffman",
-          "text": "I was in the same boat. It was a long and hard road that took more time than I expected, but I’m learned and grew soooo much in the process and it actually worked out. It’s a massive bet on yourself. \n\nEvery situation is different but I’ll tell you that I was by several I couldn’t do it, not to do it. By mentors, people I trust, people with more experience. I did it anyways, and I’m so glad I did. Similar to what the CEO of Nvidia said - if I knew how actually hard it would be at the start, I might have never started. Ignorance is bliss. \n\nUse AI. It helps. Watch videos, spend time evaluating concepts. I have core components of the system I redesigned multiple times. Components I built then questioned for months. Mistakes I made and only found out when it got to product, and had break-fix bug deployments or database migrations to make it right. \n\nOne big thing you need to understand is you’re not just writing code anymore. You’re designing a system. Your devops, managing infra. DBA, doing the database. You’re security. The best approach I’ve found is lean into industry standards and simplify. Use PaaS where possible even if expensive. You need to offload some of those somewhere - that’s part of doing the job correctly. Design for function not scale. I can’t tell you how many times I thought I needed a cache or x or y because performance. Then I shoved it into a Postgres table, and benchmarked it, and realized I’d be fine for YEARS before it became an issue. Sometimes the boring, not resume driven design or decision is the right one. Lean into that. ",
-          "score": 1,
-          "created_utc": "2026-10-02 05:31:41",
+          "id": "peaerga",
+          "author": "YahenP",
+          "text": "Open source has always been total garbage. But in this garbage there was a tiny share of good and useful software. Mainly because the evil megacorporations we hate so much gave resources, mostly money, to create or fund software in this movement. Today, because generating code has become basically free, and corporations are not planning to give more to open source, the share of useful open-source software is close to the margin of error. Almost all new open source is AI slop.",
+          "score": -7,
+          "created_utc": "2026-10-06 19:56:28",
           "is_submitter": false,
           "replies": []
         }
@@ -1872,9 +2150,9 @@
       "url": "https://www.reddit.com/r/softwarearchitecture/comments/1wv71lj/database_replication_is_routing_reads_based_on/",
       "author": "Existing-Web3922",
       "created_utc": "2026-10-01 18:21:10",
-      "score": 9,
+      "score": 8,
       "num_comments": 11,
-      "upvote_ratio": 0.84,
+      "upvote_ratio": 0.83,
       "text": "Today I learned about a problem that initially seemed confusing:\n\nA database write can succeed, but an immediate read can still return “not found.”\n\nThe reason can be replication lag.\n\nFor example:\n\nAPI\n\n/   \\\\\n\n↓     ↓\n\nPrimary   Replica\n\nDB        DB\n\nWrites     Reads\n\nImagine:\n\n1. User creates Order #501\n\n2. The write goes to the Primary\n\n3. The Primary successfully stores it\n\n4. The API returns success\n\n5. The user immediately requests Order #501\n\n6. The request goes to the Replica\n\n7. The Replica hasn't received the change yet\n\nThe order exists, but the replica is temporarily behind.\n\nSo I'm thinking about routing based on freshness requirements rather than simply saying:\n\n«“GET = Replica”»\n\nFor example:\n\nPrimary\n\n\\- Writes\n\n\\- Newly-created resource reads\n\n\\- Current status\n\n\\- Freshness-sensitive operations\n\nReplica\n\n\\- Reports\n\n\\- Analytics\n\n\\- Summaries\n\n\\- Delay-tolerant reads\n\nThe concept I'm trying to understand better is read-your-writes consistency — after a successful write, the user should be able to immediately see their change.\n\nMy takeaway so far:\n\nThe important question isn't just whether an operation is a GET.\n\nIt's:\n\n“What happens if this request receives slightly stale data?”\n\nHow do you normally implement read-after-write consistency in applications using primary/read replicas?",
       "is_original_content": false,
       "link_flair_text": "Discussion/Advice",
@@ -1886,7 +2164,7 @@
           "id": "pda0fxc",
           "author": "elkazz",
           "text": "You could have synchronous replication, which adds write latency, but will ensure the replica is consistent.",
-          "score": 6,
+          "score": 5,
           "created_utc": "2026-10-01 20:18:38",
           "is_submitter": false,
           "replies": [
@@ -1905,7 +2183,7 @@
           "id": "pd9dq9l",
           "author": "Helpful-Educator-415",
           "text": "Barring the fact that this is an AI generated post...\n\nYeah, you're basically correct. If it's important that the data is as fresh as possible, go with the primary; if it doesn't matter, then don't. I'd encourage you to think carefully about what data is required to be fresh though.",
-          "score": 11,
+          "score": 10,
           "created_utc": "2026-10-01 18:41:49",
           "is_submitter": false,
           "replies": [
@@ -1982,280 +2260,6 @@
           "text": "Baby's first replication delay 😂",
           "score": 0,
           "created_utc": "2026-10-01 22:57:41",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
-      "id": "1wz0coa",
-      "title": "Title: Architectural Review: Building a 9-Layer T+0 RTGS Settlement Pipeline (Dual Python/Rust Runtime + ZK Provers)",
-      "subreddit": "softwarearchitecture",
-      "url": "https://www.reddit.com/r/softwarearchitecture/comments/1wz0coa/title_architectural_review_building_a_9layer_t0/",
-      "author": "Decade10D",
-      "created_utc": "2026-10-06 11:39:37",
-      "score": 6,
-      "num_comments": 2,
-      "upvote_ratio": 0.81,
-      "text": "Hey everyone, I’ve been architecting and prototyping a clean-slate real-time gross settlement (RTGS) pipeline designed around ISO 20022 messaging, compliance-by-design, and zero-knowledge privacy layers.\n\nThe Core Problem I'm Tackling: Traditional high-value payment infrastructure struggles to balance instantaneous T+0 gross settlement with multi-jurisdictional compliance and data privacy, without locking into proprietary legacy rails (like SWIFT/Oracle).\n\nThe Architecture:\n\nDual Runtime: Python async core for orchestration + Rust (Tokio) high-throughput event loop (hitting \\~1250+ TPS in local testing).\n\nPipeline Design: 8-to-9 distinct operational layers handling ingress sanitization, ISO 20022 mapping (pacs.008), dynamic multi-jurisdictional routing, 3-tier ZK proof generation, and atomic settlement dispatching.\n\nFinality Layer: Local SQLite WAL auditing + multi-destination dispatching (including XRPL testnet anchoring).\n\nWhat I’m Looking for Feedback On:\n\nDecoupling Runtimes: I used gRPC over Unix Domain Sockets for the Python-to-Rust bridge. Are there hidden bottleneck risks here for high-frequency message passing?\n\nState Isolation: For the 200+ nation directory partitioning (nations/{jurisdiction}/), how would you handle dynamic schema migrations if regulatory compliance rules change mid-stream?\n\nThis design is built under Termux.\n\nHere is the repository and technical blueprint for reference: https://github.com/nurkhalisX-blip/RTGS\\_System\\_Prototype\\_01",
-      "is_original_content": false,
-      "link_flair_text": "Discussion/Advice",
-      "permalink": "https://reddit.com/r/softwarearchitecture/comments/1wz0coa/title_architectural_review_building_a_9layer_t0/",
-      "domain": "self.softwarearchitecture",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "pe9kqbx",
-          "author": "paca-vaca",
-          "text": "Can someone translate this please? 🥺",
-          "score": 1,
-          "created_utc": "2026-10-06 17:53:19",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "pee3l4p",
-              "author": "Existing_Cry_9366",
-              "text": "so basically dude made a payment system that settles instantly across countries while hiding transaction details using fancy math proofs\n\n  \nthe python part handles the talking and the rust part does the heavy lifting like processing over a thousand payments per second\n\n  \nhonestly lost me at the iso 20022 mapping but the whole thing was built on a phone which is kinda wild",
-              "score": 3,
-              "created_utc": "2026-10-07 08:36:01",
-              "is_submitter": false,
-              "replies": []
-            }
-          ]
-        }
-      ]
-    },
-    {
-      "id": "1wz5pce",
-      "title": "Open Source, a relic, a charity or still the thing?",
-      "subreddit": "softwarearchitecture",
-      "url": "https://event-driven.io/en/open-source-a-relict-a-charity-or/",
-      "author": "Adventurous-Salt8514",
-      "created_utc": "2026-10-06 15:34:39",
-      "score": 5,
-      "num_comments": 7,
-      "upvote_ratio": 0.6,
-      "text": "[External Link]",
-      "is_original_content": false,
-      "link_flair_text": "Article/Video",
-      "permalink": "https://reddit.com/r/softwarearchitecture/comments/1wz5pce/open_source_a_relic_a_charity_or_still_the_thing/",
-      "domain": "event-driven.io",
-      "is_self": false,
-      "comments": [
-        {
-          "id": "pe8rxg9",
-          "author": "joelparkerhenderson",
-          "text": "Open source is fundamental to human goodness, in my opinion. I maintain many open source projects - some popular, some tiny, and they help many people.   \n  \nFor example I lead the architecture decision record repo:\n\n[https://github.com/architecture-decision-record/architecture-decision-record](https://github.com/architecture-decision-record/architecture-decision-record)\n\nIt's 100% hand written by me in English, then translated to many more languages thanks to volunteers and AI. Constructive feedback welcome.",
-          "score": 28,
-          "created_utc": "2026-10-06 15:56:06",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "pe90md0",
-          "author": "_descri_",
-          "text": "IMHO you missed the points of disrupting competitors and finding help.\n\nIf you dislike a company with big money who sells proprietary things, you may opensource something like that to hurt them, make a buzz, and maybe even get support contracts. You cannot compete against them through advertisements, therefore you just make their service to appear overpriced.\n\nFinding help for an open source project is not easy, but is still possible. You can hardly find any volunteer help with a closed source project.\n\nAnother option, possible for largeer businesses, is open sourcing to build a community which will create novel products on top of their open source infrastructure. The company will sell support and cloud hosting, and may even cannibalize community ideas to make its own higher-level products.",
-          "score": 10,
-          "created_utc": "2026-10-06 16:31:40",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "peb3s00",
-              "author": "ZyberZeon",
-              "text": "Oh no! The billion dollar Saas that prioritizes revenue over users, and steals their data to influence elections suddenly lacks a moat to extract maximum revenue and oppression. \n\nOh no! They would have to actually build a product the users want and have to abide by user sovereignty. \n\nOh the tragedy! ",
-              "score": 0,
-              "created_utc": "2026-10-06 21:43:58",
-              "is_submitter": false,
-              "replies": [
-                {
-                  "id": "pecslu8",
-                  "author": "Middlewarian",
-                  "text": "On April 21, 2026 [a jewelry store in Texas was robbed by a bunch of thugs](https://www.kxan.com/news/local/round-rock/police-searching-for-suspects-accused-of-robbing-jewelry-store-at-round-rock-outlets/). There was another robbery in Freemont, California in June of 2025. Around 24 thieves raided a jewelry store and stole over 1.7 million$ of jewelry in 70 seconds. If the stewards of those stores decide to rebuild, I predict they won't replace the display cases that were smashed. It will be a \"by appointment only\" store and they will frisk you before they show you anything. Of the 24 thieves, only a handful of them have been caught.\n\nIn other words, the store managers will replace their open model with a SaaS model. I saw some of this trouble brewing back in the 1990s and realized SaaS was a gift from above in terms of safeguarding investments. I'm glad I have some open-source code for my portfolio, but I'm glad it's not all I have. Making something [proprietary but free-to-use](https://www.reddit.com/r/codereview/comments/qo8yq3/c_programs/) is the best I can do.",
-                  "score": 1,
-                  "created_utc": "2026-10-07 02:56:24",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "peaktwb",
-          "author": "pstmdrnargh",
-          "text": "Postgres is Open Source, still going strong, still useful. ",
-          "score": 1,
-          "created_utc": "2026-10-06 20:21:42",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "pecxbqs",
-          "author": "Middlewarian",
-          "text": "I'm glad I have some open-source for my portfolio, but I'm glad that's not all I have.",
-          "score": 1,
-          "created_utc": "2026-10-07 03:24:25",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "peaerga",
-          "author": "YahenP",
-          "text": "Open source has always been total garbage. But in this garbage there was a tiny share of good and useful software. Mainly because the evil megacorporations we hate so much gave resources, mostly money, to create or fund software in this movement. Today, because generating code has become basically free, and corporations are not planning to give more to open source, the share of useful open-source software is close to the margin of error. Almost all new open source is AI slop.",
-          "score": -3,
-          "created_utc": "2026-10-06 19:56:28",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
-      "id": "1wx8s5z",
-      "title": "How would you build a low-latency chatbot for Money transaction data?",
-      "subreddit": "softwarearchitecture",
-      "url": "https://www.reddit.com/r/softwarearchitecture/comments/1wx8s5z/how_would_you_build_a_lowlatency_chatbot_for/",
-      "author": "mdarmousa",
-      "created_utc": "2026-10-04 06:37:57",
-      "score": 5,
-      "num_comments": 16,
-      "upvote_ratio": 0.73,
-      "text": "I have Money transaction data in postgres DB, with fields like merchant, MCC, amount, date, card last four digits, and location.\n\nI want users to ask questions like:\n\n* “How much did I spend on restaurants last month?”\n* “Show transactions in Dubai on my card ending 4242.”\n* “How does my spending compare with last month?”\n\nLow end-to-end latency is the main requirement, while keeping filtering and calculations accurate.\n\nI’m considering using a small LLM to turn questions into structured queries, executing them against the database, and rendering results without a second LLM call.\n\nHas anyone built something similar? What architecture and models worked for you, and what actual latency—especially p95—did you achieve?",
-      "is_original_content": false,
-      "link_flair_text": "Discussion/Advice",
-      "permalink": "https://reddit.com/r/softwarearchitecture/comments/1wx8s5z/how_would_you_build_a_lowlatency_chatbot_for/",
-      "domain": "self.softwarearchitecture",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "pdrs738",
-          "author": "p3rdy",
-          "text": "I'd suggest the MCP approach. You can just build a service that exposes an MCP interface with the appropriate set of tools, resources and prompts for interacting with your database; so this service will act like the bridge between your database and an LLM.\n\nThis architecture let you handle effectively the database interactions, and also provide a sophisticated way to include complex operations over your data in the shape of a MCP tool, you can even include traditional ML models as tools for making predictive analytics, forecasting, etc.\n\nHere is a full [guide](https://flama.dev/blog/building_an_mcp_server_with_flama/) I wrote some time ago covering how to build an MCP from scratches. It guides how to build an MCP using [Flama](https://github.com/vortico/flama), which I'm one of its principal maintainers. I'm suggesting the tool just because it'll let you cover all the angles of this solution: you can run an LLM, build a CRUD layer for your database, and provide an MCP interface over it.",
-          "score": 7,
-          "created_utc": "2026-10-04 08:35:36",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "pdrwaii",
-              "author": "Risc12",
-              "text": "He mentions three times that he wants low latency, and your approach is like the literal slowest approach?\n\nWhat system characteristics are you even prioritizing in your suggestion?",
-              "score": 3,
-              "created_utc": "2026-10-04 09:08:17",
-              "is_submitter": false,
-              "replies": [
-                {
-                  "id": "pds28ww",
-                  "author": "p3rdy",
-                  "text": "Running MCP over local HTTP adds barely ~2ms of overhead, which is completely invisible next to the 300ms+ spent on model inference. The bottleneck in LLM pipelines is always generation time, so executing 1 single-turn structured query directly against your indexed DB is the fastest architectural path end-to-end.\n\nThis solution also let him to provide determinism in responses by keeping a 100% accurate financial calculations, and also standardisation, clean separation of context, and safety.",
-                  "score": 8,
-                  "created_utc": "2026-10-04 09:56:27",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            },
-            {
-              "id": "pdrtcuv",
-              "author": "magnetronpoffertje",
-              "text": "Ive found MCP to just introduce more latency compared to exposing tools directly in code ",
-              "score": 1,
-              "created_utc": "2026-10-04 08:44:48",
-              "is_submitter": false,
-              "replies": [
-                {
-                  "id": "pdru9il",
-                  "author": "p3rdy",
-                  "text": "Well, MCP is probably the most flexible way, but it has a cost as you pointed (it worths to pay it, but that's my opinion). You can consider another option that could be operationally faster: building a RAG for keeping your data indexed and available for the LLM.",
-                  "score": 1,
-                  "created_utc": "2026-10-04 08:52:09",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "pdyegzv",
-          "author": "briznady",
-          "text": "The ad I was served on this post is pretty targeted.   \n\n\nhttps://preview.redd.it/176gyiabykth1.jpeg?width=1170&format=pjpg&auto=webp&s=afd88e4b53ea3657fd544d8fc0c83a7ba8683b93",
-          "score": 3,
-          "created_utc": "2026-10-05 04:55:54",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "pdrg4rg",
-          "author": "magnetronpoffertje",
-          "text": "Look up Text-to-SQL, semantic layers and schema pruning if you wanna go that route.",
-          "score": 2,
-          "created_utc": "2026-10-04 07:00:57",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "pdrkioi",
-              "author": "mdarmousa",
-              "text": "Thanks! do you suggest any other faster way to do so?",
-              "score": 1,
-              "created_utc": "2026-10-04 07:35:31",
-              "is_submitter": true,
-              "replies": [
-                {
-                  "id": "pdrkned",
-                  "author": "magnetronpoffertje",
-                  "text": "If its not very dynamic you could just expose a fixed set of querying tools (in the sense of agent tools, e.g. in ms agent framework which we use)",
-                  "score": 1,
-                  "created_utc": "2026-10-04 07:36:35",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "pdsd3ma",
-          "author": "Suspicious-Walk-4854",
-          "text": "Shove it all into BigQuery. Job done.",
-          "score": 2,
-          "created_utc": "2026-10-04 11:16:21",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "pdufqpc",
-          "author": "HRApprovedUsername",
-          "text": "Just export recent data from accounts and process over that with the llm ",
-          "score": 1,
-          "created_utc": "2026-10-04 17:22:31",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "pdvv90c",
-              "author": "mdarmousa",
-              "text": "Thanks, that’s a nice approach for smaller datasets and fewer users. However, I’m handling hundreds of transactions per user per day. How would this scale while keeping latency low?",
-              "score": 0,
-              "created_utc": "2026-10-04 20:51:12",
-              "is_submitter": true,
-              "replies": [
-                {
-                  "id": "pdvzhy7",
-                  "author": "HRApprovedUsername",
-                  "text": "Yeah sure you are buddy",
-                  "score": 0,
-                  "created_utc": "2026-10-04 21:09:39",
-                  "is_submitter": false,
-                  "replies": []
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "id": "pdygt42",
-          "author": "TocinoLips",
-          "text": "id keep the LLM focused on query and let postgres handle the actual filtering and calculations for accuracy and latency.",
-          "score": 1,
-          "created_utc": "2026-10-05 05:12:52",
           "is_submitter": false,
           "replies": []
         }
