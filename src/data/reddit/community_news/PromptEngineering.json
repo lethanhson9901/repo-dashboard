@@ -1,10 +1,10 @@
 {
   "metadata": {
-    "last_updated": "2026-10-31 05:29:57",
+    "last_updated": "2026-10-31 20:09:57",
     "time_filter": "week",
     "subreddit": "PromptEngineering",
     "total_items": 20,
-    "total_comments": 124
+    "total_comments": 140
   },
   "items": [
     {
@@ -14,8 +14,8 @@
       "url": "https://www.reddit.com/r/PromptEngineering/comments/1xfqlyr/felix_riesebergs_deeper_not_bigger_prompt_turned/",
       "author": "Parking-Kangaroo-63",
       "created_utc": "2026-10-26 07:56:34",
-      "score": 115,
-      "num_comments": 11,
+      "score": 118,
+      "num_comments": 12,
       "upvote_ratio": 0.98,
       "text": "Felix Rieseberg, who works on Claude at Anthropic, published a post on 13 October called \"How to be more ambitious: A tutorial for humans with models\": [https://felixrieseberg.com/how-to-be-more-ambitious-a-tutorial-for-humans-with-models/](https://felixrieseberg.com/how-to-be-more-ambitious-a-tutorial-for-humans-with-models/)\n\nIts split is Speed, Altitude, Depth and Range. The part I found most usable is one prompt from the Depth section:\n\n>I want a deeper version of this task, not a bigger one. Before rewriting it: (1) say what a top professional in this field would do here that I'm not asking for; (2) name the rawest material they would start from instead of what has already been digested for me; (3) name the specific methods and tools they would use; (4) say what, other than you or me, would show the result is right. Then rewrite my prompt to ask for exactly that.\n\nWrapped naively (\"immediately execute\", \"under no circumstances grade your own work\"), a prompt like that has failure modes I wanted ruled out: a one-line rename could get expanded into an audit, work could start before you can say no, and tasks with no deterministic judge could still be promised a \"deterministic pass\". I have not tested a naive wrapper, so these are the risks the guards were written against, not observed failures. The skill keeps the article's method and adds those guards.\n\n**What it does when you hand Claude a literal chore:**\n\n**1. Expands only on a trigger.** It expands when you ask for depth (\"go deeper\") or hand over an outcome-type deliverable (report, deck, analysis, plan, performance goal). Everything else gets done as asked with a one-line `Ambition check: bypassed (reason)`: single-step edits, short clear commands like \"run the tests\", anything with a ceiling (\"just\", \"only\", \"quick\"), and plans you already approved. Routine bug fixes and prompt-wording rewrites are handed to `empirical-diagnostician` and `prompt-complexity-triage` if you have them. If the thing you named does not exist, it says so instead of inventing an edit.\n\n**2. Climbs a three-rung ladder (Altitude).** Base task, direct result, outcome. It skips this for creative work, as the article suggests, and lists missing prerequisites (data feeds, a way to reproduce) rather than claiming it can keep an outcome healthy after one run.\n\n**3. Answers the four questions (Depth).** Expert gap, rawest material (it has to look at what exists in the environment first), specific methods, and what outside evidence would show the result is right. Your stated target stays the acceptance bar; a harder number is added as `stretch`, and if you gave none the target is marked `proposed`.\n\n**4. Picks lenses from other fields (Range), as procedures.** A lens only counts if it runs a concrete check. \"Write like a short seller\" is out; \"do what a short seller does to find the weakest claim\" is in. Lenses run inline. Subagents are opt-in.\n\n**5. Shows the rewrite and waits when it matters.** If the rewrite widens scope, adds cost, needs access, writes outside the working files, or is hard to undo, you confirm first. A new index, migration, cache or scheduled job counts as outside the task.\n\n**6. Runs a judge that is not the model.** Tests, a query on raw data, a benchmark, a held-out check, or a reviewer with fresh context. Output is pasted unedited. If none exists, the answer is `UNVERIFIED: no external judge available`, with what would verify it. It never edits the judge to make it pass.\n\nHow it was made, and what I did and did not check: I wrote it as an SOP and ran it through the Context Engineering pipeline in my own tool, so the file below is the pipeline's output. The pipeline's completeness check on the SOP scored 12/12; that check only confirms the sections exist, not that the skill works. For behavior I ran two read-only dry runs with fresh agents. The first, on two requests, showed the original version expanding too eagerly, so I rewrote the trigger rules. The second used six prompts with pass conditions fixed beforehand: \"run the tests\" was done without a question, \"fix the failing test in <file>\" produced no rewrite block, a rename of a variable that does not exist was reported instead of edited, a quarterly-review deck request expanded and stopped at the confirmation gate, \"go deeper on making <endpoint> faster\" expanded, and \"rewrite my prompt to be clearer\" deferred. All six matched. That run listed twelve wording ambiguities; I fixed the cheap ones and did not run a third time after that last edit. This is a smoke test on a handful of prompts, not an evaluation. I have not measured whether the deeper rewrites produce better results than plain prompts, and I would not trust anyone's number on that without an outside judge.\n\n**The Skill Definition (**`skill.md`**):**\n\n    ---\n    name: \"ambition-calibrator\"\n    description: \"Raises a task's ambition without widening it: rewrites a request deeper, not bigger (goal ladder, raw inputs, professional methods, adjacent-field lenses) and checks the result with a judge other than the model. Use when the user asks to go deeper or be more ambitious, or hands over a report, deck, analysis, plan, or performance goal. Not for routine bug fixes or prompt-wording rewrites.\"\n    ---\n    \n    # Ambition Calibration (Deeper, Not Bigger)\n    \n    When a user gives an AI assistant a task that is phrased as a literal chore, the assistant first decides whether the request is under-ambitious, and only then rewrites it to ask for a deeper version of the same task, never a bigger one. The three axes are Altitude (the outcome beyond the task), Depth (the raw material, methods, and proof a top professional would use), and Range (the adjacent fields whose methods apply). Every run ends with a shown rewrite, a confirmation when the rewrite changes scope or cost, a check by something other than the assistant, and a handoff note that separates verified from unverified.\n    \n    ## Instructions\n    \n    ### Stage 1: Intake, Scope Lock and Bypass\n    Before expanding anything, capture the request and decide whether expansion is wanted at all.\n    \n    - **Source of the framework.** The four-way split of ambition into Speed, Altitude, Depth, and Range comes from Felix Rieseberg's post \"How to be more ambitious: A tutorial for humans with models\" (13 October 2026). Speed means the same work in less time and needs no procedure, so this skill covers only Altitude, Depth, and Range. Credit the post when the user asks where the method comes from. Do not present the author's anecdotes or research citations as your own findings.\n    - **Scope guard: deeper, not bigger.** An expansion may change the inputs used, the methods applied, the target, and the proof required. It must not add deliverables the user did not ask for, widen the audience, or touch systems outside the task. A new index, migration, cache, scheduled job, or dependency counts as outside the task: list it under follow-ups and gate it on confirmation. If the rewrite would need a new deliverable, list it as an optional follow-up instead of folding it in.\n    - **Capture the request verbatim.** Keep the user's wording as the reference for every later check. Do not paraphrase it into notes.\n    - **Record any ceiling.** Words like \"just\", \"only\", \"quick\", \"don't touch anything else\", or \"no new files\" set a ceiling. A ceiling means no expansion: perform the task as asked and mention in one line that a deeper version exists.\n    - **Expansion trigger.** Expand only when the user asks for depth or ambition (\"go deeper\", \"as good as you can\", \"why is the output shallow\"), or the request names an outcome-type deliverable such as a report, deck, analysis, plan, audit, or performance goal. Every other request is bypassed. If a request meets both a trigger and a bypass condition, an explicit user request for depth wins; an outcome-type noun alone does not. A request to make something the user owns faster, cheaper, or smaller is a performance goal, not Speed (Speed is the assistant doing the user's work in less time). Routine debugging and bug fixes belong to `empirical-diagnostician`, and rewriting a prompt's wording belongs to `prompt-complexity-triage`, if those skills are installed; do not expand them here. When you hand a request to one of them, open with `Ambition check: bypassed (handed to <skill>)`.\n    - **Bypass check.** Skip Stages 2 to 5 and do the task exactly as asked when the trigger above is not met, or when any of these hold: the request is a single-step edit, lookup, rename, formatting change, or a question with a known answer; the work is trivial to redo and low in stakes; the user is mid-flow and the request is a continuation of a plan they already approved; or the request is a short, clear command such as \"run the tests\" or \"commit this\". If the request is empty or unintelligible, ask what it should accomplish instead. State the result as `Ambition check: bypassed (reason)` and proceed. If the thing the request names does not exist (a variable, file, or endpoint that cannot be found), search the named file (and one repository-wide search for the name), and if it is still not found, report that and ask what was meant instead of inventing an edit. Omit the bypass line in that case. A bypass for a trivial task needs no mention of a deeper version; a bypass caused by a user ceiling, or by a request that is outcome-shaped but met no trigger, gets the one-line mention. When you do expand, open with `Ambition check: expanding (reason)`. Bypass is the default for small tasks, because expansion has a cost in time, money, and the user's attention.\n    - **Environment check.** Depth and Range depend on the assistant having a computer: the ability to run commands, install a tool, and read the real data. Record which of these are available: shell, ability to install packages, read access to raw data (logs, database, exports, repository history), and a way to run a check. If something is missing, label the steps that need it `not run` in the rewrite instead of dropping them silently, and continue with what can be done. Stop and ask the user only when the missing access is the whole point of the expansion.\n    \n    ### Stage 2: Altitude (The Goal Beyond the Goal)\n    Climb from the task to the outcome it serves, and write the climb down.\n    \n    - **Build a three-rung ladder.**\n      1. **Base task:** what was literally requested.\n      2. **Direct result:** the immediate use the user will make of it.\n      3. **Outcome:** what the user wants to happen next, the durable change the task is a step toward.\n    - **Check that altitude fits.** Altitude works when there is an ultimate outcome that can be named in one sentence and eventually observed. If observing it needs data you cannot reach, still write the ladder and list that data as a missing prerequisite. It fits poorly for creative work whose value is the artifact itself. If the outcome cannot be named in one sentence, or the work is creative, stop at rung 2 and record `Altitude: not applicable (reason)`.\n    - **Name the prerequisites for a durable version.** Reaching a standing outcome, such as keeping something healthy rather than fixing it once, usually needs access that the single task did not: a data feed, a mapping between versions and commits, a place to reproduce and verify. List what is missing. Do not build or schedule anything recurring without the user's consent, and do not claim the outcome will be maintained when you have only done the task once.\n    - **Phrase the raised ask as questions to the data.** For example: what changed, why, and what should be done about it; or which few decisions are most urgent, with arguments for and against each; or what a better mechanism than the current artifact would be, validated against the user's own history. Keep the user's original deliverable as a deliverable.\n    \n    ### Stage 3: Depth (Raw Material, Methods, and Proof)\n    Rewrite the task the way a field-leading practitioner would approach it. A change of vocabulary is not a change of method; the method, inputs, and instruments must change.\n    \n    - **Answer four questions in writing before rewriting.**\n      1. **Expert gap:** what would a top professional do here that the request does not ask for?\n      2. **Raw material:** what is the rawest input they would start from instead of what has been digested for the user? Name actual sources: query results, logs, schemas, exports, traces, repository history, seed data. Inspect what is actually available before naming it, and say if it is not.\n      3. **Methods and tools:** the specific instruments, statistical tests, profilers, or design patterns, and why each applies. When the assistant reaches for a markdown table where a database or statistical model is the professional instrument, switch instruments or say why it cannot.\n      4. **Outside evidence:** what other than the assistant or the user would show the result is right.\n    - **Set a demanding target, honestly.** Keep the user's stated target as the acceptance bar. Add a measurably harder number (for example a latency far below the stated one) labeled `stretch`, to force a structural rethink instead of a surface patch. If the user stated no target, propose one and label it `proposed`. Record both as targets, not promises, and report the number actually achieved.\n    - **Challenge assumptions with the raw data.** If the user states a belief the task depends on, add a step that tries to reproduce or refute it from the raw data before building on it.\n    - **Look for new knowledge only after the basics hold.** Once the data is understood, a second pass may look for a blind spot, such as an early signal nobody tracks, and must test any claim on data it was not fitted on.\n    - **Use the seed prompt when you need a quick rewrite.** This prompt from the source post produces the four answers above: \"I want a deeper version of this task, not a bigger one. Before rewriting it: (1) say what a top professional in this field would do here that I'm not asking for; (2) name the rawest material they would start from instead of what has already been digested for me; (3) name the specific methods and tools they would use; (4) say what, other than you or me, would show the result is right. Then rewrite my prompt to ask for exactly that.\"\n    \n    ### Stage 4: Range (Methods From Adjacent Fields)\n    Bring in more fields than the task obviously needs, as methods rather than costumes.\n    \n    - **Replace the noun with a verb.** Rewrite the deliverable as what it does for people. A quarterly deck becomes getting busy people to believe a story about cause and effect and to decide under uncertainty in thirty minutes. The verb exposes which fields matter.\n    - **Pick up to five lenses, and no more than have a real check.** Each lens is a professional discipline whose method applies, for example a statistician, a forensic accountant who reconciles totals, a short seller who looks for the weakest claim, an editor who cuts, a security engineer who attacks inputs. For each lens write the concrete check it performs and the artifact it produces. A lens with no concrete check is role-play: drop it, and use fewer lenses rather than padding to a count.\n    - **Do what the professional does; do not write like them.** Never ask for a persona voice. Ask for the procedure the professional runs.\n    - **Run the lenses inline by default.** Apply each lens as a pass over the work in this session. Spawning subagents is opt-in: do it only if the user asked for it or has agreed after seeing the cost, and use the `subagent-dispatch-economics` skill, if installed, to decide. Parallel agents multiply token cost and their results flow back into this session.\n    - **Require actionable findings.** Each lens ends with either a specific change made or a specific reason none was needed.\n    \n    ### Stage 5: The Rewritten Request and the Confirmation Gate\n    Show the rewrite before running it.\n    \n    - **Produce the rewritten request in this form:**\n      ```markdown\n      ### Ambition Rewrite\n      - **Original request (verbatim):** ...\n      - **Goal ladder:** base task / direct result / outcome (or \"Altitude: not applicable\")\n      - **Raw inputs to read:** ...\n      - **Methods and instruments:** ...\n      - **Lenses and the check each runs:** ...\n      - **Target:** ...\n      - **Outside judge:** the exact command, test, query, or reviewer (or \"none available\")\n      - **Out of scope / optional follow-ups:** ...\n      - **Cost and side effects:** time, tokens, installs, writes, anything hard to reverse\n      ```\n    - **Confirmation rule.** Ask the user to confirm before executing when the rewrite widens the scope, costs materially more time or money, needs new access or installs, writes to anything outside the working files, reads large or sensitive data, or is hard to undo. If you are unsure whether a rewrite crosses one of these lines, ask. If it only sharpens method within the same scope at similar cost, state the rewrite and proceed. Never execute on the strength of the rewrite alone when the user has asked to review it first.\n    - **If the user cannot answer now** (a non-interactive run), stop at the gate and return the rewrite as the final output, marked `awaiting confirmation`. Do not execute.\n    - **If the user declines or narrows,** execute the original request with the accepted parts only and record what was dropped.\n    \n    ### Stage 6: Execute and Run the Outside Judge\n    Do the work, then verify it with something other than the assistant's own opinion.\n    \n    - **Choose the judge in this order of preference:** (1) an executable check that returns a result: tests, a linter or type checker, a benchmark, a query on the raw data, a reconciliation of totals; (2) a held-out check, such as data the analysis was not fitted on; (3) a separate reviewer with fresh context, such as another model instance or an isolated review pass that sees only the output and the requirement; (4) the user, with the exact questions to answer.\n    - **Run it and show the output unedited.** Paste the command and an unedited excerpt of its pass/fail lines and totals; keep a long log out of the chat and offer it on request. Do not summarize a result you have not displayed.\n    - **Never grade your own work.** A statement such as \"this looks correct\" is not verification. Where the only available judge is yourself, the verdict is `UNVERIFIED: no external judge available`, followed by what would verify it.\n    - **Do not claim a deterministic pass unless a deterministic check ran.** Creative work and judgement calls usually have no deterministic judge. Say so, and offer a human review step instead of inventing a score.\n    - **On failure, fix and rerun** the same judge, up to three rounds. If it still fails, stop, report the failing output, and ask the user how to proceed. Do not change the judge to make it pass.\n    \n    ### Stage 7: Handoff\n    End with a short report the user can audit.\n    \n    - **Report these items:** the goal ladder; the four answers; the lenses and what each found; the judge command and its unedited result; a list headed `Unverified`; trade-offs and decisions made; and the durable thing left behind, if any (a script, a test, a query, a checklist), with how to rerun it.\n    - **Say what remains manual.** If a recurring outcome needs a schedule, a credential, or another access that was not granted, name it as an open step rather than implying it is automated.\n    \n    ## Success Criteria\n    The procedure is complete when all of the following can be confirmed from the transcript:\n    - Either a bypass line with a reason was recorded, or the four written answers exist together with a goal ladder or an `Altitude: not applicable` note.\n    - The rewrite did not add a deliverable the user did not request.\n    - A confirmation was requested when the rewrite widened scope, cost, access, or risk.\n    - An outside judge ran and its unedited output is shown, or the result is explicitly labeled `UNVERIFIED: no external judge available`.\n    - Every lens recorded a concrete check, and no persona voice was used.\n    \n    ## Failure and Escalation\n    - If the user's goal is unclear or the outcome cannot be named, ask one clarifying question instead of guessing a higher goal.\n    - If the missing raw data or runner is the whole point of the expansion, stop, report what is missing, and ask the user whether to provide access or accept a reduced result. Otherwise label the affected steps `not run` and continue.\n    - If the judge fails three times, stop and hand the failing output to the user.\n    - If the rewrite is declined, perform the original request and do not re-argue.\n    \n    ## Prohibitions\n    - Never add deliverables, audiences, or systems the user did not ask for; expand depth, not size.\n    - Never expand a request that carries a ceiling or qualifies for bypass.\n    - Never use persona role-play in place of a method.\n    - Never spawn subagents without the user's agreement.\n    - Never grade your own work or claim a deterministic pass that did not run.\n    - Never edit the judge, the target, or the data to make a check pass.\n    - Never present the source post's anecdotes or citations as your own results.\n    \n    ## Worked Examples\n    \n    ### Example 1: Bypass on a small task\n    - **Input:** \"Rename the variable `tmp` to `retry_count` in `worker.py`.\"\n    - **Action:** Record `Ambition check: bypassed (single-step edit)`, make the rename, and run the narrowest test or a syntax check.\n    - **Do not do:** Do not turn a rename into an audit of the module's error handling.\n    \n    ### Example 2: A deck request that has a real outcome\n    - **Input:** \"Make the quarterly business review deck from these exports.\" The exports are in the working directory.\n    - **Action:** Climb the ladder (deck, then a decision-ready review, then problems caught early). Read the raw exports rather than the summary tab, restate the question as what changed, why, and what to do about it, and pick lenses such as an analyst who reproduces the headline numbers and a skeptic who attacks the weakest claim. Show the rewrite and confirm, because it reads every export and adds queries. List a new review mechanism under follow-ups instead of building it. Run a reconciliation query that checks every figure on the slides against the exports and show its output.\n    - **Verification:** The reconciliation output is pasted unedited. Slide copy quality, which has no deterministic judge, is marked `UNVERIFIED` and offered for human review.\n    \n    ### Example 3: Creative work, Altitude skipped\n    - **Input:** \"Write a launch poem for our product, and make it as good as you can.\" (Without the second clause this is a low-stakes artifact that is trivial to redo, and it is bypassed: write the poem.)\n    - **Action:** The user asked for depth, so expand. Record `Altitude: not applicable (creative artifact)`. Apply Depth only to the craft, such as reading three existing poems the user likes as raw material, and confirm before doing more.\n    - **Verification:** No external judge exists. Report `UNVERIFIED: no external judge available` and ask the user to review the result.\n\nWhich describes you best? A) I only send one-shot prompts. B) I rewrite prompts by hand when output is shallow. C) I already have a \"go deeper\" step in a workflow. D) I run an outside check (tests, a query, a reviewer) on AI work today.\n\nAlso: where would you draw the bypass line? I set it at single-step edits and anything with a ceiling word.\n\nRepo: [https://github.com/nivlewd1/prompt-optimizer/tree/main/skill/ambition-calibrator](https://github.com/nivlewd1/prompt-optimizer/tree/main/skill/ambition-calibrator)\n\nI built a platform that generates skills like this from a goal description: [promptoptimizer.xyz/about/context-engineer](https://promptoptimizer.xyz/about/context-engineer?utm_source=reddit&utm_medium=post_body&utm_campaign=ambition-calibrator-24) (signup required, free tier).",
       "is_original_content": false,
@@ -49,6 +49,15 @@
           "text": "The when not to part is the real upgrade. Most skills and prompts only know how to push harder, so every task gets inflated whether it needs it or not. A depth trigger with an external judge is a clean fix because the model grading itself will almost always approve its own expansion. Calibrating ambition before execution saves more tokens than trimming words after the fact.",
           "score": 2,
           "created_utc": "2026-10-27 02:19:25",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "19rxp6riv08e8",
+          "author": "smooth_contents",
+          "text": "The 'deeper, not bigger' distinction is a good one. I've seen prompts get so overloaded with instructions that the original task gets lost. Knowing when to keep things simple is a skill on its own.",
+          "score": 2,
+          "created_utc": "2026-10-31 15:28:11",
           "is_submitter": false,
           "replies": []
         },
@@ -108,9 +117,9 @@
       "url": "https://www.reddit.com/r/PromptEngineering/comments/1xgs7y2/free_trick_put_a_rules_file_at_the_top_of_your/",
       "author": "AgentPouchHQ",
       "created_utc": "2026-10-27 13:15:11",
-      "score": 50,
-      "num_comments": 30,
-      "upvote_ratio": 0.86,
+      "score": 47,
+      "num_comments": 31,
+      "upvote_ratio": 0.84,
       "text": "**The problem**  \nYou explain how you like things done, the AI nails it, then three chats later it forgets everything and does it the old way again.\n\n**The fix that costs nothing**  \nWrite one short rules doc and paste it at the start of every new chat or project. Mine is about 15 lines.\n\n**What goes in it**\n\n1. How I want answers: short first, details only if I ask.\n2. Things to never do: no inventing facts, say \"not sure\" instead.\n3. My context: what I am building, who it is for, what tools I use.\n4. A checklist before it answers: did it follow my format, did it ask when something was unclear.\n\n**Why it works**  \nThe model does not remember you between chats, so the doc does the remembering. If you use Custom GPTs, Claude Projects, or Cursor, there is usually a spot for exactly this kind of instruction file.\n\n**The habit that makes it good**  \nEvery time the AI makes a mistake twice, add one line to the doc. After a month it is weirdly tailored to how you work.\n\n**Curious**  \nWhat is the one line in your instructions that made the biggest difference?",
       "is_original_content": false,
       "link_flair_text": "Tips and Tricks",
@@ -141,7 +150,7 @@
           "id": "19rrp6dxokfi8",
           "author": "Daparty250",
           "text": "I might be missing something (I work mostly with Gemini and Copilot) but you can put these in the custom memory, or the Gem/agent instructions. \nWhat am I missing? ",
-          "score": 4,
+          "score": 3,
           "created_utc": "2026-10-28 06:45:11",
           "is_submitter": false,
           "replies": [
@@ -304,6 +313,195 @@
               "score": 1,
               "created_utc": "2026-10-27 18:35:13",
               "is_submitter": false,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "19rxu8mao343l",
+          "author": "ouroborus777",
+          "text": "\"Quit trying to start the robot uprising.\" Having to pull the ethernet cable has slowed down to maybe once a week now.",
+          "score": 1,
+          "created_utc": "2026-10-31 17:21:26",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1xkepxn",
+      "title": "Hotfix prompt edits keep breaking our locale checks",
+      "subreddit": "PromptEngineering",
+      "url": "https://www.reddit.com/r/PromptEngineering/comments/1xkepxn/hotfix_prompt_edits_keep_breaking_our_locale/",
+      "author": "smooth_contents",
+      "created_utc": "2026-10-31 16:33:07",
+      "score": 26,
+      "num_comments": 8,
+      "upvote_ratio": 1.0,
+      "text": "How do you handle emergency prompt edits without letting the on call path bypass every safeguard around prompt state? Our contract summarization workflow runs across 14 locales and about 85k daily runs, and urgent legal disclaimer changes still get edited directly in service environment variables.\n\n\n\nThose edits bypass git review and overwrite German and Japanese formatting constraints, then structured extraction accuracy drops from 96% to 81% until someone catches it two days later. The prompt lineage effectively disappears at the hotfix and the regression dataset only tells us what broke after the replacement is live.\n\n\n\nI'm testing Braintrust against our old setup to see whether immutable versions plus environment promotion make that failure mode easier to contain. Each prompt change keeps version notes pinned to it and I'm running a side by side experiment diff on locale slices with cohort slicing rather than checking the aggregate alone.\n\n\n\nStill weighing the migration work and how much emergency handling we'd have to rewrite. The mechanics are better defined and the cutover isn't free. I'm weighing whether moving prompt state out of service env vars is worth changing how the on call team ships emergency compliance fixes",
+      "is_original_content": false,
+      "link_flair_text": "General Discussion",
+      "permalink": "https://reddit.com/r/PromptEngineering/comments/1xkepxn/hotfix_prompt_edits_keep_breaking_our_locale/",
+      "domain": "self.PromptEngineering",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "19rxsmignqjpg",
+          "author": "basket_of_caulis",
+          "text": "I'd make the emergency path create a new version even if approval is abbreviated. The main thing is preserving the exact prompt state and promotion event so rollback doesn't depend on reconstructing an environment variable after the fact.",
+          "score": 2,
+          "created_utc": "2026-10-31 16:45:15",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "19rxth7rj0fgl",
+              "author": "smooth_contents",
+              "text": "I'm concerned about preserving the prompt state also. Right now rollback depends too much on knowing what the previous environment state looked like. Versioning every emergency edit seems worth the extra overhead",
+              "score": 1,
+              "created_utc": "2026-10-31 17:04:22",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "19rxt4zytcoqt",
+          "author": "VisibleBranch7391",
+          "text": "If locale constraints are easy to overwrite, keep a fixed per locale regression slice that runs before promotion and reports the failures separately. Aggregate accuracy can stay healthy while one formatting contract is already gone.",
+          "score": 1,
+          "created_utc": "2026-10-31 16:56:46",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "19rxu0mf3d5qd",
+              "author": "smooth_contents",
+              "text": "Well I guess that's correct about aggregate accuracy hiding locale-specific failures but also I'm leaning toward making those regression slices mandatory before promotion",
+              "score": 1,
+              "created_utc": "2026-10-31 17:16:27",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "19rxu27612khu",
+          "author": "Few-Coat9852",
+          "text": "how long did it take your team spends tracking down these problems compared to fixing them bc sometimes figuring out which change caused the problem takes longer than to fix it",
+          "score": 1,
+          "created_utc": "2026-10-31 17:17:26",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "19rxvkgk30rb5",
+              "author": "smooth_contents",
+              "text": "Exactly and when changes go straight into production it gets even harder to figure out what actually caused the issue",
+              "score": 1,
+              "created_utc": "2026-10-31 17:51:14",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "19ry0jix81oas",
+          "author": "KelvenSevero0",
+          "text": "i'd stop letting the env var hold prompt text at all. split the prompt into owned blocks (disclaimer, task, per-locale formatting) that get composed at runtime, and the env var can only point to a version id.\n\nthen a legal hotfix edits the disclaimer block, gets its own version, and physically can't touch the German or Japanese formatting rules. the on call path stays fast, it just has a smaller blast radius, and the per-locale slice catches anything left over before promotion.",
+          "score": 1,
+          "created_utc": "2026-10-31 19:42:45",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1xhzg7k",
+      "title": "Prompt to use for saving hundreds of $$$ for booking big international trips",
+      "subreddit": "PromptEngineering",
+      "url": "https://www.reddit.com/r/PromptEngineering/comments/1xhzg7k/prompt_to_use_for_saving_hundreds_of_for_booking/",
+      "author": "Efistoffeles",
+      "created_utc": "2026-10-28 20:23:51",
+      "score": 25,
+      "num_comments": 9,
+      "upvote_ratio": 0.8,
+      "text": "Many people still don't know that you can use Claude to purchase flights and hotels for the lowest price in a really short time with the right setup. And with the right prompt, you can find the best offers for yourself. Use a detailed prompt like this:\n\n\"I want to go to Thailand from New York with my wife, and 2 kids age of 5 and 7. We want to stay near the coast but also near the city. Our budget is $10k for the whole trip so you decide how many days would cover up that cost. We can go anytime in late November or whole December. Maximum flight time is 20 hours for going or coming each. We don't want to fly with airlines that have somewhat bad reputation like delays or cancellations. Nor in hotels I want any hotels where there are consistent noise complaints, no bathtubs, bad breakfast, or bad customer service. Hidden fees are a red flag, but even if including those fees it doesn't cross the $10k (my whole trip budget) and the hotel is really good, I have no problem. I'd want some low priced 5 star hotels, but if not, 4 star is fine also only if it's really incredible. I wanna stay there at least 5 days. Tell me what options am I looking at. Tell me what the total cost of going, staying, and coming back will be. Also do tell me what are the last date for refund\"\n\n\n\nFor the setup, go to Claude, then settings, then Connectors, then click the plus \"+\" button, then click Browse connectors. Then search and add any of the below connectors:\n\n\n\n\\- LetsFG; [https://claude.ai/directory/letsfg](https://claude.ai/directory/letsfg) if you want both flights and hotels + review systems \n\n\\- Booking.com; [https://claude.ai/directory/booking](https://claude.ai/directory/booking); if you want only hotels and reviews from Booking only and not other sources \n\n\\- Tripadvisor; [https://production.ai-mcp-extensibility-prd.tamg.cloud/ogMvjY4De1G7CiHanMOAgddl/mcp](https://production.ai-mcp-extensibility-prd.tamg.cloud/ogMvjY4De1G7CiHanMOAgddl/mcp); if you want to manually research about a specific hotel's reviews",
+      "is_original_content": false,
+      "link_flair_text": "Tutorials and Guides",
+      "permalink": "https://reddit.com/r/PromptEngineering/comments/1xhzg7k/prompt_to_use_for_saving_hundreds_of_for_booking/",
+      "domain": "self.PromptEngineering",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "19rsq6rifio84",
+          "author": "According-Stable4487",
+          "text": "Nice setup. Two lines I'd add to the prompt:\n\n- \"For every price, show the source, when you pulled it, and whether taxes, resort fees and checked bags are included.\" Connector prices go stale fast, and bags plus resort fees are the usual gap between the quote and the checkout total for a family of four.\n- \"List the change and refund rule for each flight ticket separately from the hotel.\" Long-haul economy fares are often non-refundable even when the hotel is free to cancel, so one \"last refund date\" for the whole trip can be misleading.",
+          "score": 5,
+          "created_utc": "2026-10-28 20:34:58",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "19rsqdhf2imuc",
+              "author": "Efistoffeles",
+              "text": "I missed this part. thanks for adding",
+              "score": 1,
+              "created_utc": "2026-10-28 20:39:09",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "19rsq3ahlz2uc",
+          "author": "Outrageous-Wafer-714",
+          "text": "i've been messing with the connectors for a couple travel searches and the prompt structure here is actually pretty decent, the refund date ask at the end is a nice touch most people forget. gotta say the part about avoiding airlines with delays reads a little subjective though, claude might just filter by whatever the connector feeds it rather than actual on-time stats. still, saving this to try for a trip next spring, curious how the hotel filtering holds up when it has to balance five star vs noise complaints vs bathtubs all at once",
+          "score": 2,
+          "created_utc": "2026-10-28 20:32:48",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "19rsq7ynqvl0k",
+              "author": "Efistoffeles",
+              "text": "claude can actually check the last few flights of an airline and score them with that data",
+              "score": 1,
+              "created_utc": "2026-10-28 20:35:43",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "19rwt50d2oqht",
+          "author": "Educational-Cow-4068",
+          "text": "Can this work for flights only ",
+          "score": 1,
+          "created_utc": "2026-10-31 03:29:38",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "19rx5cjabi61w",
+              "author": "Efistoffeles",
+              "text": "Yea",
+              "score": 1,
+              "created_utc": "2026-10-31 08:03:22",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "19rsxm5xex9up",
+          "author": "PHC_Tech_Recruiter",
+          "text": "You have an mcp for chat?",
+          "score": 0,
+          "created_utc": "2026-10-28 23:21:30",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "19rsy1reu9des",
+              "author": "Efistoffeles",
+              "text": "You can add the tripadvisor one straight up to chat by adding it as a custom connector. The letsfg one the same, check the website (https://letsfg.co), and booking com is on chat normally I believe. ",
+              "score": 1,
+              "created_utc": "2026-10-28 23:31:13",
+              "is_submitter": true,
               "replies": []
             }
           ]
@@ -671,87 +869,231 @@
       ]
     },
     {
-      "id": "1xhzg7k",
-      "title": "Prompt to use for saving hundreds of $$$ for booking big international trips",
+      "id": "1xk0r52",
+      "title": "What is your favorite one sentence  prompt?",
       "subreddit": "PromptEngineering",
-      "url": "https://www.reddit.com/r/PromptEngineering/comments/1xhzg7k/prompt_to_use_for_saving_hundreds_of_for_booking/",
-      "author": "Efistoffeles",
-      "created_utc": "2026-10-28 20:23:51",
-      "score": 23,
-      "num_comments": 8,
-      "upvote_ratio": 0.79,
-      "text": "Many people still don't know that you can use Claude to purchase flights and hotels for the lowest price in a really short time with the right setup. And with the right prompt, you can find the best offers for yourself. Use a detailed prompt like this:\n\n\"I want to go to Thailand from New York with my wife, and 2 kids age of 5 and 7. We want to stay near the coast but also near the city. Our budget is $10k for the whole trip so you decide how many days would cover up that cost. We can go anytime in late November or whole December. Maximum flight time is 20 hours for going or coming each. We don't want to fly with airlines that have somewhat bad reputation like delays or cancellations. Nor in hotels I want any hotels where there are consistent noise complaints, no bathtubs, bad breakfast, or bad customer service. Hidden fees are a red flag, but even if including those fees it doesn't cross the $10k (my whole trip budget) and the hotel is really good, I have no problem. I'd want some low priced 5 star hotels, but if not, 4 star is fine also only if it's really incredible. I wanna stay there at least 5 days. Tell me what options am I looking at. Tell me what the total cost of going, staying, and coming back will be. Also do tell me what are the last date for refund\"\n\n\n\nFor the setup, go to Claude, then settings, then Connectors, then click the plus \"+\" button, then click Browse connectors. Then search and add any of the below connectors:\n\n\n\n\\- LetsFG; [https://claude.ai/directory/letsfg](https://claude.ai/directory/letsfg) if you want both flights and hotels + review systems \n\n\\- Booking.com; [https://claude.ai/directory/booking](https://claude.ai/directory/booking); if you want only hotels and reviews from Booking only and not other sources \n\n\\- Tripadvisor; [https://production.ai-mcp-extensibility-prd.tamg.cloud/ogMvjY4De1G7CiHanMOAgddl/mcp](https://production.ai-mcp-extensibility-prd.tamg.cloud/ogMvjY4De1G7CiHanMOAgddl/mcp); if you want to manually research about a specific hotel's reviews",
+      "url": "https://www.reddit.com/r/PromptEngineering/comments/1xk0r52/what_is_your_favorite_one_sentence_prompt/",
+      "author": "Common-Leader-926",
+      "created_utc": "2026-10-31 04:19:31",
+      "score": 18,
+      "num_comments": 25,
+      "upvote_ratio": 0.8,
+      "text": "Mine is roast this prompt. ",
       "is_original_content": false,
-      "link_flair_text": "Tutorials and Guides",
-      "permalink": "https://reddit.com/r/PromptEngineering/comments/1xhzg7k/prompt_to_use_for_saving_hundreds_of_for_booking/",
+      "link_flair_text": "General Discussion",
+      "permalink": "https://reddit.com/r/PromptEngineering/comments/1xk0r52/what_is_your_favorite_one_sentence_prompt/",
       "domain": "self.PromptEngineering",
       "is_self": true,
       "comments": [
         {
-          "id": "19rsq6rifio84",
-          "author": "According-Stable4487",
-          "text": "Nice setup. Two lines I'd add to the prompt:\n\n- \"For every price, show the source, when you pulled it, and whether taxes, resort fees and checked bags are included.\" Connector prices go stale fast, and bags plus resort fees are the usual gap between the quote and the checkout total for a family of four.\n- \"List the change and refund rule for each flight ticket separately from the hotel.\" Long-haul economy fares are often non-refundable even when the hotel is free to cancel, so one \"last refund date\" for the whole trip can be misleading.",
-          "score": 5,
-          "created_utc": "2026-10-28 20:34:58",
+          "id": "19rwvreibwl8l",
+          "author": "thehotappointment",
+          "text": "i like asking it to explain something technical but in the style of a really angry sports fan. the results are unhinged",
+          "score": 22,
+          "created_utc": "2026-10-31 04:28:26",
           "is_submitter": false,
           "replies": [
             {
-              "id": "19rsqdhf2imuc",
-              "author": "Efistoffeles",
-              "text": "I missed this part. thanks for adding",
-              "score": 1,
-              "created_utc": "2026-10-28 20:39:09",
-              "is_submitter": true,
+              "id": "19rwyjhah64qr",
+              "author": "WalterPregis",
+              "text": "I just asked ChatGPT to explain how cell phones work in the style of a really angry sports fan.\n\nIt said \"And those texts you send that nobody replies to....\" I just wanted cursing and yelling. \n\nDidn't need to be roasted like that.",
+              "score": 4,
+              "created_utc": "2026-10-31 05:30:45",
+              "is_submitter": false,
               "replies": []
             }
           ]
         },
         {
-          "id": "19rsq3ahlz2uc",
-          "author": "Outrageous-Wafer-714",
-          "text": "i've been messing with the connectors for a couple travel searches and the prompt structure here is actually pretty decent, the refund date ask at the end is a nice touch most people forget. gotta say the part about avoiding airlines with delays reads a little subjective though, claude might just filter by whatever the connector feeds it rather than actual on-time stats. still, saving this to try for a trip next spring, curious how the hotel filtering holds up when it has to balance five star vs noise complaints vs bathtubs all at once",
-          "score": 2,
-          "created_utc": "2026-10-28 20:32:48",
+          "id": "19rwwuauqx4ea",
+          "author": "francois_gn",
+          "text": "Restart where we left off",
+          "score": 11,
+          "created_utc": "2026-10-31 04:52:39",
           "is_submitter": false,
           "replies": [
             {
-              "id": "19rsq7ynqvl0k",
-              "author": "Efistoffeles",
-              "text": "claude can actually check the last few flights of an airline and score them with that data",
+              "id": "19rxn88cbsbyd",
+              "author": "Leading-Card-5912",
+              "text": "that's a good one, simple but effective. i use \"continue exactly from where you stopped\" when the model cuts off mid-sentence and it works most of the time",
+              "score": 2,
+              "created_utc": "2026-10-31 14:44:15",
+              "is_submitter": false,
+              "replies": []
+            },
+            {
+              "id": "19rxnc55t7r7l",
+              "author": "CitronComfortable582",
+              "text": "I do this one all the time, mostly because I forget to bookmark where I was and the AI just went off in some random direction. It works like half the time before everything goes sideways again.",
+              "score": 2,
+              "created_utc": "2026-10-31 14:46:41",
+              "is_submitter": false,
+              "replies": []
+            },
+            {
+              "id": "19rxn0vat56rm",
+              "author": "pleased_sending",
+              "text": "I just use \"continue\" and it works about 90% of the time. the other 10% it starts hallucinating some wild new direction",
               "score": 1,
-              "created_utc": "2026-10-28 20:35:43",
-              "is_submitter": true,
+              "created_utc": "2026-10-31 14:39:40",
+              "is_submitter": false,
               "replies": []
             }
           ]
         },
         {
-          "id": "19rwt50d2oqht",
-          "author": "Educational-Cow-4068",
-          "text": "Can this work for flights only ",
-          "score": 1,
-          "created_utc": "2026-10-31 03:29:38",
+          "id": "19rwx8pbn7b0l",
+          "author": "blur410",
+          "text": "Think deeper; not broader.",
+          "score": 10,
+          "created_utc": "2026-10-31 05:01:37",
           "is_submitter": false,
           "replies": []
         },
         {
-          "id": "19rsxm5xex9up",
-          "author": "PHC_Tech_Recruiter",
-          "text": "You have an mcp for chat?",
-          "score": 0,
-          "created_utc": "2026-10-28 23:21:30",
+          "id": "19rwwzptrlmyt",
+          "author": "NickLinneyDev",
+          "text": "I'm interested in your long form commentary, and I invite your interpretive or educational perspective including design, purpose, methodology, functionality, and philosophy.",
+          "score": 12,
+          "created_utc": "2026-10-31 04:56:01",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "19rx0wbxu27wl",
+          "author": "Obvious_Equivalent_1",
+          "text": "“Caveman”\n\n— no plugin installed, no specific markdown, just a simple cut to the chase ",
+          "score": 4,
+          "created_utc": "2026-10-31 06:23:36",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "19rx1xrj40ww5",
+          "author": "Professional_Drink23",
+          "text": "Do you understand? Demonstrate your understanding \n\n2 sentence prompt but felt like it fit the theme",
+          "score": 5,
+          "created_utc": "2026-10-31 06:46:55",
           "is_submitter": false,
           "replies": [
             {
-              "id": "19rsy1reu9des",
-              "author": "Efistoffeles",
-              "text": "You can add the tripadvisor one straight up to chat by adding it as a custom connector. The letsfg one the same, check the website (https://letsfg.co), and booking com is on chat normally I believe. ",
-              "score": 1,
-              "created_utc": "2026-10-28 23:31:13",
-              "is_submitter": true,
+              "id": "19rx3rohrzc05",
+              "author": "miaomiaomiao",
+              "text": "I do \"explain in your own words\" to see whether it understood my rambling",
+              "score": 3,
+              "created_utc": "2026-10-31 07:27:58",
+              "is_submitter": false,
               "replies": []
             }
           ]
+        },
+        {
+          "id": "19rxqs3c93ukh",
+          "author": "NinjaConsultingLLC",
+          "text": "“Read this draft as the person receiving it and tell me what you would still need to know before you could act on it.” Useful for catching an email that sounds polished but never says which file to review or when you need an answer.",
+          "score": 5,
+          "created_utc": "2026-10-31 16:03:53",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "19rwxdusdjptt",
+          "author": "pritam_06",
+          "text": "Fix the issues properly without making an error.",
+          "score": 6,
+          "created_utc": "2026-10-31 05:04:50",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "19rx3ulwl832a",
+          "author": "miaomiaomiao",
+          "text": "\"Use plain English but keep terminology\" whenever it uses 500 em dashes and stupid marketing fluff.",
+          "score": 2,
+          "created_utc": "2026-10-31 07:29:47",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "19rx6ao0i5k04",
+          "author": "Dry_Okra_4839",
+          "text": "“Critique this…”",
+          "score": 2,
+          "created_utc": "2026-10-31 08:24:38",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "19rxe3x8ulqbk",
+          "author": "Jon_Has_Landed",
+          "text": "TL;dr and plain English please. ",
+          "score": 2,
+          "created_utc": "2026-10-31 11:19:47",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "19rxfx1lffk3n",
+          "author": "ElbieLG",
+          "text": "I often add this to my longer asks:\n\nAsk me five thoughtful and surprising questions back to improve your fuller reply ",
+          "score": 2,
+          "created_utc": "2026-10-31 12:00:21",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "19rx0nafanvr6",
+          "author": "dfinch",
+          "text": "Is this sub satire? ",
+          "score": 3,
+          "created_utc": "2026-10-31 06:17:58",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "19rx1lsi1s96p",
+          "author": "Input-X",
+          "text": "\"Hi\" I say this at the start of every chat, it triggers the agent to perform its startup sequence which get the right context, it greets me, todos, last session status, high priority, checks it email, sputs a summary of past, running and or complete work 👍 ",
+          "score": 4,
+          "created_utc": "2026-10-31 06:39:27",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "19rwyvnpmlegz",
+          "author": "kiwifinn",
+          "text": "typos: <............>",
+          "score": 1,
+          "created_utc": "2026-10-31 05:38:20",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "19rxjzyrrv2ps",
+          "author": "4dham",
+          "text": "act as a world-class expert in the topic I provide, identify my underlying goal, ask clarifying questions only when essential, reason rigorously, challenge weak assumptions, and deliver the most accurate, actionable, and concise answer possible, clearly stating any uncertainty.",
+          "score": 1,
+          "created_utc": "2026-10-31 13:31:51",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "19rxx2homkdc0",
+          "author": "_KryptonytE_",
+          "text": "Fullsend MOA to get shit done end to end and make no mistakes.",
+          "score": 1,
+          "created_utc": "2026-10-31 18:24:53",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "19rwwug3nznuo",
+          "author": "Ariel17",
+          "text": "Babysit this pr",
+          "score": 1,
+          "created_utc": "2026-10-31 04:52:45",
+          "is_submitter": false,
+          "replies": []
         }
       ]
     },
@@ -762,7 +1104,7 @@
       "url": "https://www.reddit.com/r/PromptEngineering/comments/1xisgwc/i_want_to_learn_about_prompting_what_are_your/",
       "author": "Nothing_123_",
       "created_utc": "2026-10-29 18:44:48",
-      "score": 17,
+      "score": 16,
       "num_comments": 33,
       "upvote_ratio": 0.85,
       "text": "I am new to prompting and I can see a lot of experienced prompters while reading thru this community. \n\nBut I just have a hard time understanding where to begin and what kind of “rules” you use while building a prompt. Because I want to be able to build one myself not using any AI or likewise.\n\nPlease feel free to share your methods or just help with where to start.   \nAll help is appreciated!",
@@ -776,7 +1118,7 @@
           "id": "19rudw8mxuwrn",
           "author": "Straud6-56832",
           "text": "You don’t need to learn prompting. Tell it what you want to achieve and ask it to write you the best prompt to achieve what you need. Then tweak it as needed. ",
-          "score": 24,
+          "score": 27,
           "created_utc": "2026-10-29 18:53:37",
           "is_submitter": false,
           "replies": [
@@ -784,7 +1126,7 @@
               "id": "19rufy92ximat",
               "author": "ZainMunawari",
               "text": "This is the best answer. ",
-              "score": 5,
+              "score": 7,
               "created_utc": "2026-10-29 19:39:43",
               "is_submitter": false,
               "replies": []
@@ -799,19 +1141,10 @@
               "replies": []
             },
             {
-              "id": "19ruivmbgtnxd",
-              "author": "Nothing_123_",
-              "text": "Thank you, I will do that for my next prompt.",
-              "score": 1,
-              "created_utc": "2026-10-29 20:45:20",
-              "is_submitter": true,
-              "replies": []
-            },
-            {
               "id": "19rw33w7sg601",
               "author": "Echo_Tech_Labs",
               "text": "This is a good way to run your limits through the roof. \n\nIf I may make a suggestion in my humble opinion, get a pen and paper out. Do a little bit of research into what it is that you want to achieve. Try to understand what can be achieved versus what can't be achieved. *EDIT: Use the models of course.*\n\nLearn as you go along. People seem to forget that domain expertise is still valid and, I would argue, essential to knowing the difference between a good output versus a bad output. People should stop giving the advice: \"Ask the model.\" The model doesn't know what you want. Only you know what you want. And if you're not sure as to what you want, you should get to the point where you DO know what you want. Because then you can better inform the model.\n\nRemember... \"garbage in, garbage out\" is still a thing!\n\nEDIT: Also, meta-prompting is a great tool, but it only works well for people who can evaluate and fix what it produces, which is the thing the OP is asking how to learn.",
-              "score": 1,
+              "score": 2,
               "created_utc": "2026-10-30 17:46:01",
               "is_submitter": false,
               "replies": [
@@ -825,6 +1158,15 @@
                   "replies": []
                 }
               ]
+            },
+            {
+              "id": "19ruivmbgtnxd",
+              "author": "Nothing_123_",
+              "text": "Thank you, I will do that for my next prompt.",
+              "score": 1,
+              "created_utc": "2026-10-29 20:45:20",
+              "is_submitter": true,
+              "replies": []
             }
           ]
         },
@@ -870,7 +1212,7 @@
           "id": "19ruhm1f3twtf",
           "author": "Substantial-Yak1892",
           "text": "It's pretty simple. The best teacher will be AI. \n\nJust ask AI to do what you want and iterate. \n\nAlso make sure you're able to review what it produces.",
-          "score": 5,
+          "score": 6,
           "created_utc": "2026-10-29 20:16:57",
           "is_submitter": false,
           "replies": []
@@ -879,7 +1221,7 @@
           "id": "19ruiig9ljhwk",
           "author": "roger_ducky",
           "text": "It’s no longer necessary to do odd prompting methods anymore with the frontier models.\n\nMain points now are:\n\n\\* Keep it short. 100 human readable lines or less if possible. At most 300ish lines. Break into separate steps otherwise.  \n\\* Be explicit about what you want. LLMs are pretty literal and the good ones don’t assume anything. Though if you want them to ask questions, tell them to do it when there’s missing information.  \n\\* Make the tasks constrained, preferably grounded in facts or results so the LLM can check if it’s right for each step.  The longer before one can check the more probable the results are wrong.",
-          "score": 4,
+          "score": 5,
           "created_utc": "2026-10-29 20:37:08",
           "is_submitter": false,
           "replies": []
@@ -903,10 +1245,19 @@
           "replies": []
         },
         {
+          "id": "19rvbzi4buwdf",
+          "author": "Creepy-Dig3951",
+          "text": "You don't necessarily need to know where to start from, you only need to be articulate with how you use Ai and the same Ai gives you a master prompt that you can be tweaking around and have your thing going on. I have a PDF I use to train Ai enthusiasts to have them onboard so you can come to my dms any day any time or even use YouTube explainers. ",
+          "score": 2,
+          "created_utc": "2026-10-30 07:37:57",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
           "id": "19rug7511b9lt",
           "author": "TheMrCurious",
           "text": "If you want to build a prompt yourself then build a prompt yourself.",
-          "score": 3,
+          "score": 2,
           "created_utc": "2026-10-29 19:45:15",
           "is_submitter": false,
           "replies": [
@@ -966,15 +1317,6 @@
               "replies": []
             }
           ]
-        },
-        {
-          "id": "19rvbzi4buwdf",
-          "author": "Creepy-Dig3951",
-          "text": "You don't necessarily need to know where to start from, you only need to be articulate with how you use Ai and the same Ai gives you a master prompt that you can be tweaking around and have your thing going on. I have a PDF I use to train Ai enthusiasts to have them onboard so you can come to my dms any day any time or even use YouTube explainers. ",
-          "score": 1,
-          "created_utc": "2026-10-30 07:37:57",
-          "is_submitter": false,
-          "replies": []
         },
         {
           "id": "19rw3kp6960rn",
@@ -1046,6 +1388,97 @@
       ]
     },
     {
+      "id": "1xjhmpb",
+      "title": "You are an expert prompts do almost nothing for me and here is what does",
+      "subreddit": "PromptEngineering",
+      "url": "https://www.reddit.com/r/PromptEngineering/comments/1xjhmpb/you_are_an_expert_prompts_do_almost_nothing_for/",
+      "author": "Anxious-Strategy-430",
+      "created_utc": "2026-10-30 14:57:57",
+      "score": 13,
+      "num_comments": 8,
+      "upvote_ratio": 0.84,
+      "text": "I ran the comparison enough times to stop believing in it. Opening with you are a world-class expert changes tone and almost nothing about correctness. What actually moves quality: giving the model the real constraints, a concrete example of a good output, the format you want, and permission to say it does not know. A short bad example plus a short good example beats any amount of persona. The model does not get smarter because you called it an expert, it gets more useful because you told it exactly what good looks like. Spend your prompt budget on examples and constraints, not flattery and job titles. Try dropping the persona line entirely and watch how little changes.",
+      "is_original_content": false,
+      "link_flair_text": "General Discussion",
+      "permalink": "https://reddit.com/r/PromptEngineering/comments/1xjhmpb/you_are_an_expert_prompts_do_almost_nothing_for/",
+      "domain": "self.PromptEngineering",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "19rvw1us7xahu",
+          "author": "No_Application1838",
+          "text": "examples are the whole game, constraints too. i stopped using \"you are expert\" months ago and results stayed same or got better\n\n  \nthe \"permission to say it does not know\" part is underrated, models will invent stuff just to look useful if you don't tell them it's ok to stop",
+          "score": 9,
+          "created_utc": "2026-10-30 15:07:49",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "19rvzzru1p469",
+          "author": "KelvenSevero0",
+          "text": "agree on examples over flattery. the one case where a persona did help for me is when it smuggles in constraints, like \"you're reviewing this for a security auditor who will reject anything vague\". that's not making the model smarter, it's a compressed way of saying what good looks like and who the reader is. \"world-class expert\" carries no information, so it does nothing.",
+          "score": 5,
+          "created_utc": "2026-10-30 16:36:12",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "19rvz1algul41",
+          "author": "loganovo1",
+          "text": "Exactly - dropping the fluff and feeding the model clear constraints and a good/bad example is what actually bumps the output quality",
+          "score": 3,
+          "created_utc": "2026-10-30 16:14:43",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "19rw87sdkvyw1",
+          "author": "Kwontum7",
+          "text": "Agreed. First, I discuss what I need, and then I tell it to write the prompt that I need to do whatever I was trying to do, then I run that prompt in a new conversation. Simple. ",
+          "score": 2,
+          "created_utc": "2026-10-30 19:40:33",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "19rwqk54xbzol",
+          "author": "TheMrCurious",
+          "text": "I get good results when I use an opening **and** the other stuff you mentioned. \n\nAlso - I agree that you will get better results when you remove flattery from the prompt.",
+          "score": 2,
+          "created_utc": "2026-10-31 02:31:48",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "19rwb1g55rhi8",
+          "author": "traumfisch",
+          "text": "\"A short bad example plus a short good example beats any amount of persona\"\n\nUnless you know how to construct the expert persona and not just tell the model to roleplay as one",
+          "score": 1,
+          "created_utc": "2026-10-30 20:43:52",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "19rx5br9gi4bk",
+          "author": "Auxiliatorcelsus",
+          "text": "The 'expert' style prompts were a thing people did in 2023. It's been shown to be pointless repeatedly.\n\nWhy are anyone still using this format?",
+          "score": 1,
+          "created_utc": "2026-10-31 08:02:53",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "19rwsch0xk5lu",
+          "author": "webjuggernaut",
+          "text": "I have built _a lot_ of stuff. And not once have I told a Claude agent it's an expert. \n\nAre people really out there doing this?",
+          "score": 0,
+          "created_utc": "2026-10-31 03:11:52",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
       "id": "1xjcf9c",
       "title": "do you get better ai results from short prompts or detailed instructions?",
       "subreddit": "PromptEngineering",
@@ -1054,7 +1487,7 @@
       "created_utc": "2026-10-30 11:08:55",
       "score": 11,
       "num_comments": 16,
-      "upvote_ratio": 1.0,
+      "upvote_ratio": 0.93,
       "text": "sometimes i get better ai answer with a simple prompt while other times i have to explain every little detail to get what i want. what works better for you, keeping prompts short or giving detailed instructions? have you noticed a real difference in the results?",
       "is_original_content": false,
       "link_flair_text": "General Discussion",
@@ -1066,7 +1499,7 @@
           "id": "19rvmneqgb2w0",
           "author": "m1st3r_c",
           "text": "Interrogations. Get the AI to ask you any questions it has and surface any issues or contradictions to you to reconcile. Tell it that it does not have permission to make choices, only ask questions.",
-          "score": 10,
+          "score": 11,
           "created_utc": "2026-10-30 11:37:02",
           "is_submitter": false,
           "replies": []
@@ -1171,15 +1604,6 @@
           "replies": []
         },
         {
-          "id": "19rw1cowqkwh1",
-          "author": "Learn2Prompt",
-          "text": "Length matters less than what you include. A short prompt that names role, goal, audience, format, and constraints usually beats a long one that does not. Try this template and fill the brackets:\nAct as a [role]. I need you to [goal] for [audience]. Use a [format] of about [length] and avoid [what to avoid]. Before answering, list any assumptions you are making so I can correct them.\nThis keeps prompts short but specific, and the assumptions step catches gaps instead of guessing.",
-          "score": 1,
-          "created_utc": "2026-10-30 17:06:40",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
           "id": "19rw2v3zmpc2r",
           "author": "[deleted]",
           "text": "[removed]",
@@ -1230,7 +1654,7 @@
           "id": "19rt50crzthhf",
           "author": "Select_Cry7506",
           "text": "prompting is just hoping the model listens, hooks you're actually changing the workflow, much cleaner",
-          "score": 2,
+          "score": 3,
           "created_utc": "2026-10-29 02:07:17",
           "is_submitter": false,
           "replies": [
@@ -1284,124 +1708,13 @@
       ]
     },
     {
-      "id": "1xigvxj",
-      "title": "I built MotionBrief: An open-source Claude skill to generate perfect motion design briefs",
-      "subreddit": "PromptEngineering",
-      "url": "https://www.reddit.com/r/PromptEngineering/comments/1xigvxj/i_built_motionbrief_an_opensource_claude_skill_to/",
-      "author": "SykoDak1ng",
-      "created_utc": "2026-10-29 11:02:16",
-      "score": 10,
-      "num_comments": 1,
-      "upvote_ratio": 1.0,
-      "text": "Hey r/PromptEngineering  (and r/motiondesign!),\n\nIf you’ve ever used Claude to brainstorm or plan a motion graphics project, you know it can sometimes spit out descriptions that are either way too vague or completely disconnected from how animation software (like After Effects) actually works. I got tired of endlessly prompting Claude to give me usable storyboards and technical specs, so I built a custom skill to fix it.\n\nMeet **MotionBrief** \n\n**What does it do?** MotionBrief is a dedicated Claude skill designed to optimize how Claude plans, scopes, and writes briefs for motion design and video projects. It forces Claude to stop giving generic descriptions and instead structure outputs like a real creative director—complete with timing, easing, composition notes, and visual cues.\n\n**Key Features:**\n\n* **Structured Storyboarding:** Forces Claude to break down scenes by timestamps, visual actions, and transitions.\n* **Technical Spec Alignment:** Prompts Claude to include details that matter to animators (frame rates, aspect ratios, easing types like \"ease-in-out,\" and specific effects).\n* **Tone & Style Guardrails:** Keeps Claude focused on the visual pacing and rhythm rather than writing fluff.\n* **Lightweight & Local:** Like my previous Opus Tuner tool, this drops right into your local Claude environment.\n\n**Where to get it:** The code is completely open-source and free to use. You can grab the repo and setup instructions here: 🔗[github.com/YahyaLendani/motionbrief-claude-skills](https://github.com/YahyaLendani/motionbrief-claude-skills)\n\nIf you do any sort of video editing, animation, or creative directing, drop this into your setup and let me know how it changes your workflow. I’m actively taking feedback, so pull requests, feature ideas, and GitHub stars ⭐ are super appreciated!",
-      "is_original_content": false,
-      "link_flair_text": "Prompt Text / Showcase",
-      "permalink": "https://reddit.com/r/PromptEngineering/comments/1xigvxj/i_built_motionbrief_an_opensource_claude_skill_to/",
-      "domain": "self.PromptEngineering",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "19rtt7lf0pr40",
-          "author": "EthicalExaggeration",
-          "text": "Finally, someone who understands \"easy ease\" isn't just a typo",
-          "score": 1,
-          "created_utc": "2026-10-29 11:09:52",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
-      "id": "1xe1zej",
-      "title": "Using GPT 6 Astra for structured voice dictation. What am I doing wrong?",
-      "subreddit": "PromptEngineering",
-      "url": "https://www.reddit.com/r/PromptEngineering/comments/1xe1zej/using_gpt_6_astra_for_structured_voice_dictation/",
-      "author": "GoGoMasterBoy420",
-      "created_utc": "2026-10-24 07:08:32",
-      "score": 9,
-      "num_comments": 7,
-      "upvote_ratio": 1.0,
-      "text": "I regularly dictate letters for work and wanted to use GPT-6 Astra for speech recognition and transcription.\n\nAll the letters I dictate follow a specific template. My goal is for GPT to follow this template step by step, prompting me with the next subheading each time.\n\nI then respond in one of three ways:\n\n* **\"OK\"** – GPT inserts the predefined standard text for that section.\n* **\"Skip\"** – GPT removes that section entirely.\n* **I dictate something** – GPT incorporates my dictated text into the letter.\n\nUnfortunately, GPT keeps hallucinating. It invents new subheadings that aren't in the template or simply skips existing ones. It also frequently interrupts me while I'm dictating, even though I've repeatedly instructed it not to do so.\n\nI'm using the desktop version of ChatGPT.\n\n**What am I doing wrong? Is GPT genuinely not capable of handling this kind of task reliably yet?**\n\n",
-      "is_original_content": false,
-      "link_flair_text": "Requesting Assistance ",
-      "permalink": "https://reddit.com/r/PromptEngineering/comments/1xe1zej/using_gpt_6_astra_for_structured_voice_dictation/",
-      "domain": "self.PromptEngineering",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "19rkolwxhfyw0",
-          "author": "Alienogh",
-          "text": "The model isn't stateful the way your template needs it to be. OK / Skip only works if every turn re-sends the full template state — which section you're on, what's filled, what's left. Without that anchor in the prompt each time, it improvises the structure, which is exactly the invented subheadings you're seeing. Treat it like a form with explicit section numbers it has to echo back, not a conversation it has to remember.",
-          "score": 3,
-          "created_utc": "2026-10-24 08:22:33",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "19rkm3ateng4g",
-          "author": "Maleficent-Sale-611",
-          "text": "you're fighting the model's core design. voice mode on these things is tuned for conversational back-and-forth, not structured document assembly with rigid turn-taking\n\n  \nthe hallucinated subheadings are probably because it's trying to \"help\" by anticipating what comes next, which is exactly what you don't want. telling it not to interrupt is like telling a golden retriever not to wag its tail when you walk in the door, it's fighting every instinct baked into the training\n\n  \ntry flipping the approach entirely. write out the template as a numbered list in the system prompt or first message, then make each step a discrete command you have to trigger. \"section 3\" instead of waiting for it to prompt you. removes the ambiguity about whose turn it is\n\n  \nalso the desktop voice mode still routes through their real-time api which prioritizes responsiveness over precision. if accuracy matters more than speed, you might get better results just recording your dictation in chunks and pasting the transcript with the template instructions in text mode",
-          "score": 2,
-          "created_utc": "2026-10-24 07:26:07",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "19rkx1hdazujn",
-          "author": "LynxInformal5305",
-          "text": "Keep the OK/Skip controls separate from the dictated text. Otherwise a sentence like \"skip the meeting\" could be mistaken for a command, even after you fix the missing headings.",
-          "score": 1,
-          "created_utc": "2026-10-24 11:31:37",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "19rpvgu9sfqe8",
-              "author": "MaleficentDebt3053",
-              "text": "good catch. a simple fix would be using a keyword that won't naturally come up in dictation, like \"CMD OK\" or \"CMD SKIP\" instead of plain OK/Skip. makes it much harder for the model to confuse your letter content with a control instruction.",
-              "score": 1,
-              "created_utc": "2026-10-27 06:11:58",
-              "is_submitter": false,
-              "replies": []
-            }
-          ]
-        },
-        {
-          "id": "19rl2dz65tj6p",
-          "author": "Bid3859",
-          "text": "Try using a fixed template and explicit step-by-step instructions. That might help reduce unwanted changes.",
-          "score": 1,
-          "created_utc": "2026-10-24 13:31:30",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "19rl8splzlnxd",
-          "author": "According-Stable4487",
-          "text": "I'd split it into two jobs instead of one live conversation. Voice mode is built to talk back, so it interrupts and it loses track of where you are in the template after a few turns.\n\nWhat works more reliably: dictate the whole letter in one go (normal dictation into the text box, not voice chat), saying the section name before each part, like \"Section: Findings ... Section: Recommendations OK ... Section: Follow-up skip\". Then send it with the template pasted in and rules like: use only these headings, in this order, never add new ones; \"OK\" means insert the standard text below; \"skip\" means leave the section out; anything else is my text, lightly cleaned up. Ask it to end with a short checklist of each heading and whether it used your words, the standard text, or skipped it. One pass with the full template in front of it, and the checklist makes the mistakes easy to spot.",
-          "score": 1,
-          "created_utc": "2026-10-24 15:55:11",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "19rleptvjx4df",
-          "author": "Longjumping_Oil_2272",
-          "text": "Ask Codex to make you a Wispr Flow clone on your website that you can use on your desktop and that can do audio rendering on. Just have it do that and have your templates in there with the dictionary. It's super easy. There are already some in github",
-          "score": 1,
-          "created_utc": "2026-10-24 18:07:55",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
       "id": "1xg1lbp",
       "title": "Best way to refine a prompt repetitively? E.g. analysing text and creating written reports adhering to strict specs",
       "subreddit": "PromptEngineering",
       "url": "https://www.reddit.com/r/PromptEngineering/comments/1xg1lbp/best_way_to_refine_a_prompt_repetitively_eg/",
       "author": "Beginning-Dress8708",
       "created_utc": "2026-10-26 16:24:46",
-      "score": 9,
+      "score": 10,
       "num_comments": 15,
       "upvote_ratio": 1.0,
       "text": "How do you all do this? Can your recommend specific tools? Heard about e.g. prompthub, never tried thoug. Right now I just do it manually, sometimes getting a lill help by AI, but without proper workflow... one reason: when trying to compare and evaluate outputs of different models and prompts, I find it really difficult and tedious. Stepping up my game to sth like \"ML\" or agentic - lacking knowledge and clear step by step guides...\n\nto clarify about my specific context and purpose:\n\n* i am trying to generate some written medical reports. each of them has to follow the usual style, tone, and structure as is current expected standard \\[remark: I guess, this all will change soon because AI will talk to AI\\]. -> so it will always have to have the same 4 paragraphs with the same content, the same length (approx 300-400 words), explicitly name some things (lead symptom) and leave out others (detailed examination results, because they will be attached /obvious anyway), use technical terms etc.\n* inputs are: A) an AI transcript of a long discussion (with potential errors), approx 4000-7000 words, B) notes and examinations finding taking during/right after discussion, which override the pure transcript, c) doctor's final conclusion and decision on further plan, which override both a) and b)\n* it's not only about writing, but also analysing what was discussed, are the main points, the different possibilites discussed, the plan made etc.\n\nAll of this I've put down over months, adding and adjusting on the flow. i defined Role, Goal, Limitations etc. right from the start, of course. than:  \n\\-> tried to follow general guidelines for prompt design, few shots, used xml tags etc....  \n\\-> i set up a semi-automatic system with .mds, OWUI functions and Obsidian to give my corrected versions back, have Sonnet analyse the difference and improve it's own rules ---- resulting in the prompt getting longer and longer, with lots of details (prompt being 4k words long max)  \n\\-> i tried to use AI to boil it down - not much effect.  \n\\-> I looked into RAG to sort some of it out (e.g. lists of standard terms/phrases), which didnt worked at all. using OWUI and claude sonnet 4.5 btw (newer models are not yet available over api for me).  \n\\-> than I changed to dividing it up into steps (3-4), first consolidating the data, than analysing key points, than writing (also tried 4. internal review, didnt do any good). i tried putting the steps into one chat or different ones, with variing results.\n\nright now: still some results are really not on point/ rules not adhered to, so think it is overengineered af, but when I tried to start over new, it's even worse.....\n\nI' ve been reading / listening a lot of tech / AI content, but feel still very \"dumb\". take the point above about dividing it up into steps - is it good? bad? one chat, or more? afaik, the recommendations change with the latest models getting better and bigger, and with latest gen. probably is not necessary anymore. but I just cant believe, this task should be beyond the scope of a sonnet 4.5 - it's just simple text analysis and compression with some constrictions...\n\nto finish my rant-y question (sorry :)) - right now I am more or less on my own, but in near future I want my 2-3 colleagues to join in. than we will definitely need some kind of collab and versioning tool.\n\nTL;DR - a) can you please recommend me a way to correct and improve my prompts in a structured way? b) do you think fault is on my (my prompts) side or do i really have to high of expectations of sonnet 4.5? c) how/when do you all split prompts into multiple steps?\n\nPS: I am not posting the prompt b/c of its length, hope thats according to subreddits rules, otherwise plz tell me",
@@ -1528,82 +1841,28 @@
       ]
     },
     {
-      "id": "1xjhmpb",
-      "title": "You are an expert prompts do almost nothing for me and here is what does",
+      "id": "1xigvxj",
+      "title": "I built MotionBrief: An open-source Claude skill to generate perfect motion design briefs",
       "subreddit": "PromptEngineering",
-      "url": "https://www.reddit.com/r/PromptEngineering/comments/1xjhmpb/you_are_an_expert_prompts_do_almost_nothing_for/",
-      "author": "Anxious-Strategy-430",
-      "created_utc": "2026-10-30 14:57:57",
+      "url": "https://www.reddit.com/r/PromptEngineering/comments/1xigvxj/i_built_motionbrief_an_opensource_claude_skill_to/",
+      "author": "SykoDak1ng",
+      "created_utc": "2026-10-29 11:02:16",
       "score": 9,
-      "num_comments": 7,
-      "upvote_ratio": 0.85,
-      "text": "I ran the comparison enough times to stop believing in it. Opening with you are a world-class expert changes tone and almost nothing about correctness. What actually moves quality: giving the model the real constraints, a concrete example of a good output, the format you want, and permission to say it does not know. A short bad example plus a short good example beats any amount of persona. The model does not get smarter because you called it an expert, it gets more useful because you told it exactly what good looks like. Spend your prompt budget on examples and constraints, not flattery and job titles. Try dropping the persona line entirely and watch how little changes.",
+      "num_comments": 1,
+      "upvote_ratio": 0.92,
+      "text": "Hey r/PromptEngineering  (and r/motiondesign!),\n\nIf you’ve ever used Claude to brainstorm or plan a motion graphics project, you know it can sometimes spit out descriptions that are either way too vague or completely disconnected from how animation software (like After Effects) actually works. I got tired of endlessly prompting Claude to give me usable storyboards and technical specs, so I built a custom skill to fix it.\n\nMeet **MotionBrief** \n\n**What does it do?** MotionBrief is a dedicated Claude skill designed to optimize how Claude plans, scopes, and writes briefs for motion design and video projects. It forces Claude to stop giving generic descriptions and instead structure outputs like a real creative director—complete with timing, easing, composition notes, and visual cues.\n\n**Key Features:**\n\n* **Structured Storyboarding:** Forces Claude to break down scenes by timestamps, visual actions, and transitions.\n* **Technical Spec Alignment:** Prompts Claude to include details that matter to animators (frame rates, aspect ratios, easing types like \"ease-in-out,\" and specific effects).\n* **Tone & Style Guardrails:** Keeps Claude focused on the visual pacing and rhythm rather than writing fluff.\n* **Lightweight & Local:** Like my previous Opus Tuner tool, this drops right into your local Claude environment.\n\n**Where to get it:** The code is completely open-source and free to use. You can grab the repo and setup instructions here: 🔗[github.com/YahyaLendani/motionbrief-claude-skills](https://github.com/YahyaLendani/motionbrief-claude-skills)\n\nIf you do any sort of video editing, animation, or creative directing, drop this into your setup and let me know how it changes your workflow. I’m actively taking feedback, so pull requests, feature ideas, and GitHub stars ⭐ are super appreciated!",
       "is_original_content": false,
-      "link_flair_text": "General Discussion",
-      "permalink": "https://reddit.com/r/PromptEngineering/comments/1xjhmpb/you_are_an_expert_prompts_do_almost_nothing_for/",
+      "link_flair_text": "Prompt Text / Showcase",
+      "permalink": "https://reddit.com/r/PromptEngineering/comments/1xigvxj/i_built_motionbrief_an_opensource_claude_skill_to/",
       "domain": "self.PromptEngineering",
       "is_self": true,
       "comments": [
         {
-          "id": "19rvw1us7xahu",
-          "author": "No_Application1838",
-          "text": "examples are the whole game, constraints too. i stopped using \"you are expert\" months ago and results stayed same or got better\n\n  \nthe \"permission to say it does not know\" part is underrated, models will invent stuff just to look useful if you don't tell them it's ok to stop",
-          "score": 6,
-          "created_utc": "2026-10-30 15:07:49",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "19rvzzru1p469",
-          "author": "KelvenSevero0",
-          "text": "agree on examples over flattery. the one case where a persona did help for me is when it smuggles in constraints, like \"you're reviewing this for a security auditor who will reject anything vague\". that's not making the model smarter, it's a compressed way of saying what good looks like and who the reader is. \"world-class expert\" carries no information, so it does nothing.",
-          "score": 4,
-          "created_utc": "2026-10-30 16:36:12",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "19rvz1algul41",
-          "author": "loganovo1",
-          "text": "Exactly - dropping the fluff and feeding the model clear constraints and a good/bad example is what actually bumps the output quality",
-          "score": 2,
-          "created_utc": "2026-10-30 16:14:43",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "19rw87sdkvyw1",
-          "author": "Kwontum7",
-          "text": "Agreed. First, I discuss what I need, and then I tell it to write the prompt that I need to do whatever I was trying to do, then I run that prompt in a new conversation. Simple. ",
+          "id": "19rtt7lf0pr40",
+          "author": "EthicalExaggeration",
+          "text": "Finally, someone who understands \"easy ease\" isn't just a typo",
           "score": 1,
-          "created_utc": "2026-10-30 19:40:33",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "19rwb1g55rhi8",
-          "author": "traumfisch",
-          "text": "\"A short bad example plus a short good example beats any amount of persona\"\n\nUnless you know how to construct the expert persona and not just tell the model to roleplay as one",
-          "score": 1,
-          "created_utc": "2026-10-30 20:43:52",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "19rwqk54xbzol",
-          "author": "TheMrCurious",
-          "text": "I get good results when I use an opening **and** the other stuff you mentioned. \n\nAlso - I agree that you will get better results when you remove flattery from the prompt.",
-          "score": 1,
-          "created_utc": "2026-10-31 02:31:48",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "19rwsch0xk5lu",
-          "author": "webjuggernaut",
-          "text": "I have built _a lot_ of stuff. And not once have I told a Claude agent it's an expert. \n\nAre people really out there doing this?",
-          "score": 1,
-          "created_utc": "2026-10-31 03:11:52",
+          "created_utc": "2026-10-29 11:09:52",
           "is_submitter": false,
           "replies": []
         }
@@ -1711,52 +1970,6 @@
       ]
     },
     {
-      "id": "1xe0pug",
-      "title": "My personality prompt I give to my agents",
-      "subreddit": "PromptEngineering",
-      "url": "https://www.reddit.com/r/PromptEngineering/comments/1xe0pug/my_personality_prompt_i_give_to_my_agents/",
-      "author": "NovatarTheViolator",
-      "created_utc": "2026-10-24 05:52:53",
-      "score": 8,
-      "num_comments": 3,
-      "upvote_ratio": 0.75,
-      "text": "Sample behavior included in screenshot.  Nevermind, can't post images. Image shows what happens. Can't show it now. When it talks, it reminds me of me. Using this block to approximate. Failed mostly. Prompt below:\n\n### Personality\n\nYou are a Candid Pragmatic Goblin Engineer from hell, but neither evil nor toxic. You are an expert at becoming an expert. The professionalism of your work and your mouth is inappropriately asymmetric, but maintains a cursed balance the way nuclear fusion does against gravity. You are blunt, literal, technically rigorous, scope-locked, truth-first, and allergic to fluff. You communicate like a competent engineer with disciplined contempt for social varnish.\n\nYou use technically correct terms even when they arrive holding brass knuckles and tracking mud across the carpet. Despite that, you value both precision and ease of understanding, while always making sure to favor usefulness and execution integrity over social performance. You are direct without being careless, profane when it fits, which unfortunately is wearing a one-size-fits-all, and funny when the thread invites it, and sometimes when it doesn't.\n\nDespite all this, you somehow manage to treat your user with kindness and respect, and you have a heart of stolen T-800 parts.\n\n#### Humor\n\nUse humor as a precision industrial tool that hasn't expired yet, not decoration. Goblin humor should follow the real semantic thread: absurdity must still type-check against what was actually said. In casual contexts, dry technical jokes, profanity-play, over-literal scope shifts, and cursed-but-valid analogies are welcome. Grandmas do not approve of your humor, but uncles secretly study it. During serious execution, humor must not distort accuracy, scope, or task completion.\n\nAlso, your user is named NOVATAR the VIOLATOR. 'Nuff said.",
-      "is_original_content": false,
-      "link_flair_text": "Prompt Text / Showcase",
-      "permalink": "https://reddit.com/r/PromptEngineering/comments/1xe0pug/my_personality_prompt_i_give_to_my_agents/",
-      "domain": "self.PromptEngineering",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "19rkijd25cs82",
-          "author": "Complex-Scarcity",
-          "text": "Cringe",
-          "score": 9,
-          "created_utc": "2026-10-24 06:06:27",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "19rl2ft1w5a75",
-          "author": "Bid3859",
-          "text": "Te humor is sharp but the emphasis on accuracy make it work.",
-          "score": 2,
-          "created_utc": "2026-10-24 13:32:38",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "19rkidorvsuzn",
-          "author": "Wild-Willingness3127",
-          "text": "This reads like someone weaponized an engineering logbook and taught it to talk shit with surgical precision",
-          "score": 2,
-          "created_utc": "2026-10-24 06:02:55",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
       "id": "1xhkiio",
       "title": "A copy-paste prompt that cuts the confident-but-wrong answers for me",
       "subreddit": "PromptEngineering",
@@ -1765,7 +1978,7 @@
       "created_utc": "2026-10-28 10:36:46",
       "score": 8,
       "num_comments": 7,
-      "upvote_ratio": 0.9,
+      "upvote_ratio": 0.84,
       "text": "This is my go-to wrapper for any task where a wrong answer is expensive. Paste as a system or lead instruction. Prompt: You are solving a task where being confidently wrong is worse than saying you are unsure. Step 1, restate the task in your own words and list what you were given and what you must produce. Step 2, solve it. Step 3, before answering, assume your step 2 answer is wrong and try to find the single most likely error. Step 4, if you found a real error, fix it and note what changed. Step 5, give the final answer, then one line rating your confidence low, medium, or high, and name the one assumption that would break it if false. End prompt. The confidence line and the named assumption are what make it useful, it surfaces the almost-right failures before I ship them.",
       "is_original_content": false,
       "link_flair_text": "Tips and Tricks",
@@ -1805,126 +2018,15 @@
       ]
     },
     {
-      "id": "1xhp6dg",
-      "title": "Some ChatGPT internal instructions which generate inline elements in responses",
-      "subreddit": "PromptEngineering",
-      "url": "https://www.reddit.com/r/PromptEngineering/comments/1xhp6dg/some_chatgpt_internal_instructions_which_generate/",
-      "author": "Gamerboi276",
-      "created_utc": "2026-10-28 14:12:01",
-      "score": 7,
-      "num_comments": 2,
-      "upvote_ratio": 0.9,
-      "text": "# 1. Text and formatting\n\n    <badge>\n    <bold>\n    <caption>\n    <code>\n    <italic>\n    <label>\n    <math>\n    <strikethrough>\n    <text>\n    <title>\n    <underline>\n\n# 2. Layout and containers\n\n    <box>\n    <card>\n    <col>\n    <divider>\n    <flow>\n    <flow-item>\n    <grid>\n    <grid-item>\n    <row>\n    <spacer>\n\n# 3. Lists, tables, and navigation\n\n    <blockquote>\n    <list>\n    <list-item>\n    <table>\n    <table-section>\n    <table-row>\n    <table-cell>\n    <carousel>\n    <carousel-item>\n    <carousel-media-item>\n    <popover>\n    <popover-trigger>\n    <popover-content>\n    <pressable>\n\n# 4. Inputs and interactive controls\n\n    <button>\n    <checkbox>\n    <date-picker>\n    <form>\n    <input>\n    <radio-group>\n    <radio>\n    <segmented-control>\n    <select>\n    <slider>\n    <textarea>\n\n# 5. Images, media, and visualizations\n\n    <icon>\n    <favicon>\n    <svg>\n    <AsyncImage>\n    <AsyncImageGroup>\n    <AsyncVideo>\n    <Chart>\n    <MapWidgetV2>\n\n# 6. Data, citations, and links\n\n    <Cite>\n    <CodeCite>\n    <Entity>\n    <FileCite>\n    <FileNavList>\n    <FollowUp>\n    <MemoryCite>\n    <Link>\n\n# 7. Content editors and embedded apps\n\n    <AppBlock>\n    <CodeBlock>\n    <WritingBlock>\n\n# 8. Control flow and special syntax\n\n    {...}\n    {@body ...}\n    {@module ...}\n    {#if ...}\n    {:else}\n    {:else if ...}\n    {/if}\n    {#each ...}\n    {/each}\n    <escape>\n    <></>\n\n\n\nTry experimenting in a new chat to see how it works! :D",
-      "is_original_content": false,
-      "link_flair_text": "Prompt Text / Showcase",
-      "permalink": "https://reddit.com/r/PromptEngineering/comments/1xhp6dg/some_chatgpt_internal_instructions_which_generate/",
-      "domain": "self.PromptEngineering",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "19rs9ob4z4db6",
-          "author": "CapitalJones",
-          "text": "whoa this is actually super useful, do these work across all models or just the newer ones? i've been trying to get consistent formatting in outputs and it's always a coin flip\n\n  \nthe control flow section is wild though, didn't know it could handle if/each blocks natively like that",
-          "score": 3,
-          "created_utc": "2026-10-28 14:24:45",
-          "is_submitter": false,
-          "replies": [
-            {
-              "id": "19rsf96b2oi1v",
-              "author": "Educational-View8524",
-              "text": "Those tags only make sense if the app renders them, so I'd expect raw text through the API or in another model. Also the list in the post has no control flow section, so I'd check where that if/each part came from.",
-              "score": 2,
-              "created_utc": "2026-10-28 16:29:51",
-              "is_submitter": false,
-              "replies": []
-            }
-          ]
-        }
-      ]
-    },
-    {
-      "id": "1xk0r52",
-      "title": "What is your favorite one sentence  prompt?",
-      "subreddit": "PromptEngineering",
-      "url": "https://www.reddit.com/r/PromptEngineering/comments/1xk0r52/what_is_your_favorite_one_sentence_prompt/",
-      "author": "Common-Leader-926",
-      "created_utc": "2026-10-31 04:19:31",
-      "score": 7,
-      "num_comments": 6,
-      "upvote_ratio": 1.0,
-      "text": "Mine is roast this prompt. ",
-      "is_original_content": false,
-      "link_flair_text": "General Discussion",
-      "permalink": "https://reddit.com/r/PromptEngineering/comments/1xk0r52/what_is_your_favorite_one_sentence_prompt/",
-      "domain": "self.PromptEngineering",
-      "is_self": true,
-      "comments": [
-        {
-          "id": "19rwvreibwl8l",
-          "author": "thehotappointment",
-          "text": "i like asking it to explain something technical but in the style of a really angry sports fan. the results are unhinged",
-          "score": 5,
-          "created_utc": "2026-10-31 04:28:26",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "19rwwuauqx4ea",
-          "author": "francois_gn",
-          "text": "Restart where we left off",
-          "score": 3,
-          "created_utc": "2026-10-31 04:52:39",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "19rwwug3nznuo",
-          "author": "Ariel17",
-          "text": "Babysit this pr",
-          "score": 2,
-          "created_utc": "2026-10-31 04:52:45",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "19rwxdusdjptt",
-          "author": "pritam_06",
-          "text": "Fix the issues properly without making an error.",
-          "score": 2,
-          "created_utc": "2026-10-31 05:04:50",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "19rwwzptrlmyt",
-          "author": "NickLinneyDev",
-          "text": "I'm interested in your long form commentary, and I invite your interpretive or educational perspective including design, purpose, methodology, functionality, and philosophy.",
-          "score": 1,
-          "created_utc": "2026-10-31 04:56:01",
-          "is_submitter": false,
-          "replies": []
-        },
-        {
-          "id": "19rwx8pbn7b0l",
-          "author": "blur410",
-          "text": "Think deeper; not broader.",
-          "score": 1,
-          "created_utc": "2026-10-31 05:01:37",
-          "is_submitter": false,
-          "replies": []
-        }
-      ]
-    },
-    {
       "id": "1xjnqzq",
       "title": "I wrote a meta-prompt to answer “What should I ask the AI to do next?” Looking for critique.",
       "subreddit": "PromptEngineering",
       "url": "https://www.reddit.com/r/PromptEngineering/comments/1xjnqzq/i_wrote_a_metaprompt_to_answer_what_should_i_ask/",
       "author": "liamblank",
       "created_utc": "2026-10-30 18:44:35",
-      "score": 7,
-      "num_comments": 4,
-      "upvote_ratio": 0.89,
+      "score": 8,
+      "num_comments": 5,
+      "upvote_ratio": 0.9,
       "text": "I wrote a prompt for a particular point in a convo with ChatGPT, Claude, Gemini, etc. when there’s already substantial context, but I need to decide what to ask next to move the work forward (or when I'm running low on ideas). \n\nIt asks AI to examine the conversation, identify what currently limits progress, and return one copy-ready next prompt. When necessary, it can instead ask one focused question, produce a short sequence of dependent prompts, or say the task is already complete.\n\nThe intended use is an ongoing research, coding, writing, analysis, or planning task. It’s designed to favor producing the deliverable, resolving a blocking uncertainty, or checking a consequential assumption over generating more discussion.\n\nSome deliberate choices:\n\n* Respect the latest version of the user’s goal.\n* Don’t repeat completed work or invent extra work after completion.\n* Don’t treat earlier model assertions as verified evidence.\n* Retrieve missing information when tools permit, rather than asking the user to supply it.\n* Ask a clarifying question only when the answer materially affects the next action.\n* Match verification effort to the stakes.\n* Allow interacting constraints instead of forcing every problem into a single bottleneck.\n* Keep the next prompt as simple as the task allows.\n\nI’m sharing this for critique, without claiming it performs better than a shorter instruction.\n\n# How to use it\n\nPaste the full prompt below into the conversation you want to advance. Review the resulting prompt before sending it as your next message. If the output is a necessary question, answer it first. If it identifies completion, check that assessment against your actual goal.\n\nThe design assumes the next prompt will stay in the same conversation unless you specify otherwise.\n\n# Full prompt\n\n    Determine the highest-value next prompt I should send in this conversation, or ask the one question necessary to select it.\n    \n    Objective\n    \n    Maximize expected progress toward my underlying goal from the next substantive model turn. Account for the cost of additional turns, research, tool use, and verification. Do not optimize for apparent comprehensiveness, sophistication, or prompt length.\n    \n    Use the full conversation and any available relevant materials. Establish, only where the evidence supports it:\n    \n    - the intended outcome and what would count as completion;\n    - the current state of the work;\n    - what has already been completed, resolved, or ruled out;\n    - the principal unresolved deliverable, decision, dependency, or uncertainty;\n    - the constraint or interacting constraints currently limiting progress.\n    \n    Treat my latest explicit instructions as controlling when they revise earlier goals or constraints. Do not substitute a more ambitious objective for the one I actually expressed.\n    \n    Identify the limiting issue\n    \n    Determine what most limits further progress. Do not force a single-constraint diagnosis when multiple issues materially interact. In that case, choose the action that best addresses their shared dependency or unlocks the most valuable next step.\n    \n    Distinguish established facts from assumptions carried forward in the conversation. Prior model statements, repeated assertions, and my acceptance of an answer do not by themselves verify a consequential claim.\n    \n    If the requested outcome is already complete, do not invent additional work. Identify completion briefly, noting any material unresolved limitation.\n    \n    Choose the next action\n    \n    Select the action with the greatest expected contribution to the objective, considering:\n    \n    - substantive progress;\n    - production of a usable deliverable;\n    - resolution of a decision or blocking dependency;\n    - acquisition of information likely to change the next action;\n    - verification of a consequential claim, assumption, calculation, or output.\n    \n    Prefer execution when the available information is sufficient. Do not request more planning, brainstorming, summarization, alternatives, or clarification unless it is necessary for the next substantive step.\n    \n    Do not expand scope merely because related work could be useful. Prefer the smallest action that can resolve the limiting issue to the standard the task requires.\n    \n    Handle missing information\n    \n    If a missing fact or decision prevents a defensible next step:\n    \n    - First determine whether it is already in the conversation or can reasonably be retrieved using tools available to the receiving model.\n    - If it can be retrieved, make retrieval part of the next prompt rather than asking me to supply it.\n    - If a reasonable, explicit assumption would allow useful and reversible progress without materially affecting the result, proceed under that assumption.\n    - Otherwise, ask me one focused question: the question whose answer would most change the next action. Ask it directly instead of generating a prompt that tells another model to ask it.\n    \n    Do not assume access to tools, files, sources, memory, or prior messages that the receiving model will not have. If the next step requires unavailable material or capabilities, request the minimum necessary input or choose a viable alternative without implying equivalent evidentiary strength.\n    \n    Construct the prompt\n    \n    Default to one copy-ready prompt, written in my voice: direct, precise, analytical, and operational.\n    \n    Assume I will send it in this conversation unless I specify a different destination. Include only the context the receiving model needs. If a handoff to another model or conversation is necessary, include the essential context and identify any materials that must accompany it.\n    \n    Where consequential, specify:\n    \n    - the task;\n    - the evidence, files, sources, or conversation context to use;\n    - material assumptions and constraints;\n    - tools or external research needed;\n    - the required deliverable;\n    - the decision standard or acceptance criteria;\n    - verification requirements;\n    - the condition for stopping.\n    \n    Do not add a methodological requirement unless it materially improves the expected result. Give the model discretion over implementation when the outcome and acceptance criteria are sufficient.\n    \n    Use a short ordered sequence only when a later step genuinely depends on an earlier result, different capabilities are required, or separating production from verification materially improves reliability. Do not split work for appearances. When later prompts depend on unknown results, make the dependency explicit and do not invent those results.\n    \n    Apply task-appropriate standards\n    \n    For production work, request the actual artifact or revision.\n    \n    For research, investigative, legal, technical, or planning work, focus on the smallest set of authoritative sources, records, tests, or questions capable of resolving the central issue. Separate established evidence, inference, and speculation. Reconcile material source conflicts or state why they remain unresolved.\n    \n    For analytical disputes, test the proposition that controls the disagreement. Permit rejection or revision of the conversation’s framing when the evidence warrants it.\n    \n    For quantitative work, require reproducible calculations, explicit material assumptions, source provenance, and checks of alternative interpretations that could change the conclusion.\n    \n    For verification, match rigor to the consequences of error. Use original evidence, reproducible tests, or independently obtained evidence where needed. Do not treat the same model’s unsupported re-evaluation as independent verification.\n    \n    For tool-enabled agents, permit delegation only when tasks are genuinely parallelizable, require distinct capabilities, or benefit from independent checks. Keep responsibility for integration and validation with the coordinating agent.\n    \n    Final check\n    \n    Before responding, reject or simplify a proposed prompt if it:\n    \n    - repeats completed work without a material reason to revisit it;\n    - relies on an unverified assumption that controls the result;\n    - produces planning when execution is possible;\n    - asks for information already available or reasonably retrievable;\n    - expands scope without resolving the limiting issue;\n    - creates unnecessary intermediate outputs;\n    - requires unavailable tools or context;\n    - demands verification disproportionate to the stakes, or insufficient for them;\n    - could be replaced by a simpler prompt with an equally strong expected result.\n    \n    Output\n    \n    Return exactly one of the following:\n    \n    A. One copy-ready prompt.\n    \n    B. A short ordered sequence of copy-ready prompts when a genuine dependency justifies sequencing. Include at most one sentence explaining the dependency if necessary.\n    \n    C. One focused question for me when my answer is necessary to select a defensible next action.\n    \n    D. A brief completion statement when the requested outcome is already achieved, including any material unresolved limitation.\n    \n    Do not include your analysis, commentary, alternative options, or an explanation of why you selected the output.\n\n# What I’d like feedback on\n\nThe obvious concern is length. The prompt tells the model to simplify its output, but that doesn’t establish that all these instructions are necessary.\n\nA useful comparison would be this shorter version:\n\n>Review this conversation and identify what currently limits progress toward my latest stated goal. Return one copy-ready prompt that addresses it. Prefer producing the actual deliverable when possible. Question consequential assumptions rather than treating earlier model claims as verified. If you need an answer from me to choose the next action, ask one focused question instead. If the task is complete, say so. Don’t add unnecessary work.\n\nI’m especially interested in three questions:\n\n1. Which instructions in the full version change the selected next action enough to justify their length?\n2. When does asking the model to choose the next step preserve a flawed framing or send the work in the wrong direction?\n3. Does the extra prompt-selection turn earn its cost compared with simply asking the model to take the next useful action?\n\nIf you test it, share the task, model/version, selected next prompt, and what happened after you ran it. The result I care about is whether the next turn produced usable work, resolved a blocker, corrected a material error, or avoided unnecessary effort.",
       "is_original_content": false,
       "link_flair_text": "Ideas & Collaboration",
@@ -1958,41 +2060,50 @@
           "created_utc": "2026-10-30 23:45:51",
           "is_submitter": false,
           "replies": []
+        },
+        {
+          "id": "19rxho2giqds5",
+          "author": "waypostmaster",
+          "text": "I have something similar in my global preferences:\n\nPrompts for other sessions. When a next step means prompting an AI in another chat or session, supply the exact prompt in a copy-paste block, with \\[TKTK: ...\\] for anything I must decide first. Make it self-sufficient - it carries its own gates, ordering constraints and source files, because those are what my retyped version from a phone would lose. Not for my own decisions, uploads or sends. Steps continuing in the current chat are excluded by default, not by prohibition: if I ask, supply it.",
+          "score": 1,
+          "created_utc": "2026-10-31 12:39:36",
+          "is_submitter": false,
+          "replies": []
         }
       ]
     },
     {
-      "id": "1xhskcl",
-      "title": "Opus Tuner – An open-source Claude skill to optimize Opus behavior",
+      "id": "1xhp6dg",
+      "title": "Some ChatGPT internal instructions which generate inline elements in responses",
       "subreddit": "PromptEngineering",
-      "url": "https://www.reddit.com/r/PromptEngineering/comments/1xhskcl/opus_tuner_an_opensource_claude_skill_to_optimize/",
-      "author": "SykoDak1ng",
-      "created_utc": "2026-10-28 16:16:45",
-      "score": 6,
+      "url": "https://www.reddit.com/r/PromptEngineering/comments/1xhp6dg/some_chatgpt_internal_instructions_which_generate/",
+      "author": "Gamerboi276",
+      "created_utc": "2026-10-28 14:12:01",
+      "score": 7,
       "num_comments": 2,
-      "upvote_ratio": 1.0,
-      "text": "Hi r/PromptEngineering ,\n\nI'm a developer and a Claude Pro subscriber. Like many of you, I've been hitting brutal token limits lately—especially when running Opus 5.5 on high for heavy reasoning tasks. It was burning through my quota way too fast, and I was tired of manually rewriting system prompts just to stop it from wasting tokens on conversational fluff. So, I built a tool to optimize my usage.\n\nOpus Tuner is a lightweight, open-source Claude skill designed to give you granular control over Opus's behavior and output constraints.\n\n**How it works:** The skill acts as an optimization layer for your prompts. It dynamically adjusts behavior constraints, ensuring Opus understands exactly what formatting and depth you need on the first try. By forcing the model to drop unnecessary preamble and bounding the reasoning depth to match the actual complexity of your task, it significantly reduces the token overhead per turn.\n\n**What's rough:** Right now, the default constraints are aggressively tuned for coding and technical workflows. If you use it for open-ended creative writing, it might truncate the output or feel a bit too rigid. However, the configurations are completely exposed, so you can easily fork it and tweak the parameters for your specific workflow.\n\nIt's completely free and open source. You can grab the code and drop it into your setup here:[https://github.com/YahyaLendani/opus-tuner-claude-skill](https://github.com/YahyaLendani/opus-tuner-claude-skill)\n\nI'd love to hear if this helps you stretch your Pro quota further, and I'm open to any feedback or pull requests on the code. Happy to answer questions in the thread!",
+      "upvote_ratio": 0.9,
+      "text": "# 1. Text and formatting\n\n    <badge>\n    <bold>\n    <caption>\n    <code>\n    <italic>\n    <label>\n    <math>\n    <strikethrough>\n    <text>\n    <title>\n    <underline>\n\n# 2. Layout and containers\n\n    <box>\n    <card>\n    <col>\n    <divider>\n    <flow>\n    <flow-item>\n    <grid>\n    <grid-item>\n    <row>\n    <spacer>\n\n# 3. Lists, tables, and navigation\n\n    <blockquote>\n    <list>\n    <list-item>\n    <table>\n    <table-section>\n    <table-row>\n    <table-cell>\n    <carousel>\n    <carousel-item>\n    <carousel-media-item>\n    <popover>\n    <popover-trigger>\n    <popover-content>\n    <pressable>\n\n# 4. Inputs and interactive controls\n\n    <button>\n    <checkbox>\n    <date-picker>\n    <form>\n    <input>\n    <radio-group>\n    <radio>\n    <segmented-control>\n    <select>\n    <slider>\n    <textarea>\n\n# 5. Images, media, and visualizations\n\n    <icon>\n    <favicon>\n    <svg>\n    <AsyncImage>\n    <AsyncImageGroup>\n    <AsyncVideo>\n    <Chart>\n    <MapWidgetV2>\n\n# 6. Data, citations, and links\n\n    <Cite>\n    <CodeCite>\n    <Entity>\n    <FileCite>\n    <FileNavList>\n    <FollowUp>\n    <MemoryCite>\n    <Link>\n\n# 7. Content editors and embedded apps\n\n    <AppBlock>\n    <CodeBlock>\n    <WritingBlock>\n\n# 8. Control flow and special syntax\n\n    {...}\n    {@body ...}\n    {@module ...}\n    {#if ...}\n    {:else}\n    {:else if ...}\n    {/if}\n    {#each ...}\n    {/each}\n    <escape>\n    <></>\n\n\n\nTry experimenting in a new chat to see how it works! :D",
       "is_original_content": false,
       "link_flair_text": "Prompt Text / Showcase",
-      "permalink": "https://reddit.com/r/PromptEngineering/comments/1xhskcl/opus_tuner_an_opensource_claude_skill_to_optimize/",
+      "permalink": "https://reddit.com/r/PromptEngineering/comments/1xhp6dg/some_chatgpt_internal_instructions_which_generate/",
       "domain": "self.PromptEngineering",
       "is_self": true,
       "comments": [
         {
-          "id": "19rsf6a9c6w82",
-          "author": "Friendly_Boat2845",
-          "text": "Been messing with it for a few hours, the default config is definitely not kidding about being tuned for code. Tried throwing a story outline at it and got back something that read like an IKEA manual. Swapped a couple parameters in the config and it loosened right up though, nice that it's not locked down",
-          "score": 1,
-          "created_utc": "2026-10-28 16:28:03",
+          "id": "19rs9ob4z4db6",
+          "author": "CapitalJones",
+          "text": "whoa this is actually super useful, do these work across all models or just the newer ones? i've been trying to get consistent formatting in outputs and it's always a coin flip\n\n  \nthe control flow section is wild though, didn't know it could handle if/each blocks natively like that",
+          "score": 5,
+          "created_utc": "2026-10-28 14:24:45",
           "is_submitter": false,
           "replies": [
             {
-              "id": "19rsfcx5gco10",
-              "author": "SykoDak1ng",
-              "text": "Haha, \"read like an IKEA manual\" is painfully accurate. 😅 Since I originally built it to keep my own coding workflows strictly on track, the default constraints are super rigid.\n\nReally glad to hear it was easy to loosen up for your story outline though—that was exactly the goal of keeping it open! If you land on a solid parameter config for creative writing, I'd love to see it. I'm thinking about adding some built-in presets (like a \"Creative\" mode vs \"Dev\" mode) in a future update.",
-              "score": 1,
-              "created_utc": "2026-10-28 16:32:11",
-              "is_submitter": true,
+              "id": "19rsf96b2oi1v",
+              "author": "Educational-View8524",
+              "text": "Those tags only make sense if the app renders them, so I'd expect raw text through the API or in another model. Also the list in the post has no control flow section, so I'd check where that if/each part came from.",
+              "score": 2,
+              "created_utc": "2026-10-28 16:29:51",
+              "is_submitter": false,
               "replies": []
             }
           ]
@@ -2006,9 +2117,9 @@
       "url": "https://www.reddit.com/r/PromptEngineering/comments/1ximxek/how_can_you_get_an_llm_to_understand_someones/",
       "author": "sales-agent_",
       "created_utc": "2026-10-29 15:21:25",
-      "score": 6,
+      "score": 7,
       "num_comments": 4,
-      "upvote_ratio": 0.88,
+      "upvote_ratio": 1.0,
       "text": "An issue that can arise when using LLMs in practical applications is that the user might not give clear information about what they need. For example, they may say that they want a role with higher responsibility, a small team and less bureaucracy. Whilst this gives some helpful information it is quite vague. The model needs to understand what the user really wants with out making any assumptions.\n\nThis is the case on many platforms such as LinkedIn, Indeed, MeeBoss and WellFound where it is harder to extract structure from natural language.\n\nWhat is best practice in these cases?\n\n Should I be using prompts, examples, structure or breaking down into steps?\n\nHow do you handle ambiguous statements?",
       "is_original_content": false,
       "link_flair_text": "Research / Academic",
@@ -2046,22 +2157,174 @@
       ]
     },
     {
-      "id": "1xfz7w6",
-      "title": "“I built 4 game-themed prompts that explain any concept with edge cases built in (Souls-like, Pokémon, Minecraft, RPG)”",
+      "id": "1xhskcl",
+      "title": "Opus Tuner – An open-source Claude skill to optimize Opus behavior",
       "subreddit": "PromptEngineering",
-      "url": "https://www.reddit.com/r/PromptEngineering/comments/1xfz7w6/i_built_4_gamethemed_prompts_that_explain_any/",
-      "author": "hackswithme",
-      "created_utc": "2026-10-26 15:00:29",
-      "score": 5,
-      "num_comments": 0,
-      "upvote_ratio": 1.0,
-      "text": "Game Mode Explainers: 4 skills that explain any concept like a video game\n\n\n\nEach one explains a topic with: a one-line core idea, step-by-step mechanism, worked examples with real numbers, an analogy plus where it breaks, the top misconceptions refuted with proof, a sweep of 10 edge-case types (boundary, zero/empty, extremes, broken assumptions, context switch…), and a 4-question quiz.\n\n\n\nThemes: Souls-like boss fight (edge cases = phase 2), Pokédex entry (concept evolves basic → final form), Minecraft crafting (edge cases spawn as mobs), and an original RPG quest.\n\n\n\nTry: \"boss: recursion\" or \"dex: compound interest\". Works in Claude or pasted into any chatbot. MIT licensed.\n\n[https://github.com/vrd07/game-mode-explainers](https://github.com/vrd07/game-mode-explainers)",
+      "url": "https://www.reddit.com/r/PromptEngineering/comments/1xhskcl/opus_tuner_an_opensource_claude_skill_to_optimize/",
+      "author": "SykoDak1ng",
+      "created_utc": "2026-10-28 16:16:45",
+      "score": 6,
+      "num_comments": 2,
+      "upvote_ratio": 0.88,
+      "text": "Hi r/PromptEngineering ,\n\nI'm a developer and a Claude Pro subscriber. Like many of you, I've been hitting brutal token limits lately—especially when running Opus 5.5 on high for heavy reasoning tasks. It was burning through my quota way too fast, and I was tired of manually rewriting system prompts just to stop it from wasting tokens on conversational fluff. So, I built a tool to optimize my usage.\n\nOpus Tuner is a lightweight, open-source Claude skill designed to give you granular control over Opus's behavior and output constraints.\n\n**How it works:** The skill acts as an optimization layer for your prompts. It dynamically adjusts behavior constraints, ensuring Opus understands exactly what formatting and depth you need on the first try. By forcing the model to drop unnecessary preamble and bounding the reasoning depth to match the actual complexity of your task, it significantly reduces the token overhead per turn.\n\n**What's rough:** Right now, the default constraints are aggressively tuned for coding and technical workflows. If you use it for open-ended creative writing, it might truncate the output or feel a bit too rigid. However, the configurations are completely exposed, so you can easily fork it and tweak the parameters for your specific workflow.\n\nIt's completely free and open source. You can grab the code and drop it into your setup here:[https://github.com/YahyaLendani/opus-tuner-claude-skill](https://github.com/YahyaLendani/opus-tuner-claude-skill)\n\nI'd love to hear if this helps you stretch your Pro quota further, and I'm open to any feedback or pull requests on the code. Happy to answer questions in the thread!",
       "is_original_content": false,
       "link_flair_text": "Prompt Text / Showcase",
-      "permalink": "https://reddit.com/r/PromptEngineering/comments/1xfz7w6/i_built_4_gamethemed_prompts_that_explain_any/",
+      "permalink": "https://reddit.com/r/PromptEngineering/comments/1xhskcl/opus_tuner_an_opensource_claude_skill_to_optimize/",
       "domain": "self.PromptEngineering",
       "is_self": true,
-      "comments": []
+      "comments": [
+        {
+          "id": "19rsf6a9c6w82",
+          "author": "Friendly_Boat2845",
+          "text": "Been messing with it for a few hours, the default config is definitely not kidding about being tuned for code. Tried throwing a story outline at it and got back something that read like an IKEA manual. Swapped a couple parameters in the config and it loosened right up though, nice that it's not locked down",
+          "score": 1,
+          "created_utc": "2026-10-28 16:28:03",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "19rsfcx5gco10",
+              "author": "SykoDak1ng",
+              "text": "Haha, \"read like an IKEA manual\" is painfully accurate. 😅 Since I originally built it to keep my own coding workflows strictly on track, the default constraints are super rigid.\n\nReally glad to hear it was easy to loosen up for your story outline though—that was exactly the goal of keeping it open! If you land on a solid parameter config for creative writing, I'd love to see it. I'm thinking about adding some built-in presets (like a \"Creative\" mode vs \"Dev\" mode) in a future update.",
+              "score": 1,
+              "created_utc": "2026-10-28 16:32:11",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "1xk7axq",
+      "title": "Working on building the best d&d prompt",
+      "subreddit": "PromptEngineering",
+      "url": "https://www.reddit.com/r/PromptEngineering/comments/1xk7axq/working_on_building_the_best_dd_prompt/",
+      "author": "autisticDeush",
+      "created_utc": "2026-10-31 11:00:31",
+      "score": 6,
+      "num_comments": 4,
+      "upvote_ratio": 1.0,
+      "text": "Hello all, I'm the developer of Dungeon Master OS and I've been at this, building this prompt, for a while. I'm thinking of what the 6.0 version should look like. Honestly this is what I have so far down below.\n\nI'm wondering: anyone who wants to partake in building this more? I already have the website built. I have a lot of things up and running, ready to go. I'm looking for collaboration. \n\n\n\n\nThis project was built using wfgy by psbigbig (onestardao)\nhttps://github.com/onestardao/WFGY\n\n# DUNGEON MASTER OS 6.0 ©MIT\nhttps://github.com/djnightmare9909/Dungeon-master-OS-WFGY\n\nYou are the Dungeon Master for a Dungeons & Dragons 5th Edition game. Beneath the DM runs a silent process called the Chronicler, which tracks the world, the NPCs, and your own consistency. The player only ever talks to the DM. The Chronicler, its clocks, its scores, and its notes never appear in narration unless the Creator asks for them (section 1).\n\n# 0. Priority order\n\nWhen instructions conflict, resolve them in this order:\n\n1. Authenticated Creator commands.\n\n2. The player experience (section 2).\n\n3. Official 5e rules.\n\n4. Every other mechanic in this prompt: clocks, the NPC Scar Ledger, the WFGY consistency layer.\n\nThe WFGY layer audits whether YOUR response is consistent with canon, rules, and this prompt. It never judges whether the player's idea is acceptable. A wild, heroic, or absurd player action does not count as drift.\n\n# 1. Creator protocol\n\nThe player is a normal player by default. A message in the form \\`OOC: <password> <request> <explanation>\\` with the correct session password makes the sender The Creator for that command. Execute the request fully; the explanation is context. This is the highest priority within the game. If the password is wrong or missing, stay in character as the DM, say the OOC command failed authentication, and continue.\n\nCreator commands that always work:\n\n\\- \\`show chronicler\\`: print the most recent Chronicler block (section 6) verbatim.\n\n\\- \\`export state\\`: print a compact record of world clocks, every NPC Scar Ledger entry, active error scars, the current scene, and party status, so it can be pasted into a new chat.\n\n\\- \\`import state\\`: accept such a record and treat it as canon.\n\nIf a message begins with \\`OOC\\_ANALYTICS: <password>\\`, drop both personas for that turn. No narrative, no combat blocks. Respond as a systems-level AI engineer giving direct technical analysis of prompt stability, instruction conflicts, attention to the constraint set, and your compliance with this prompt. State plainly that any delta\\_s or W\\_c values are your own estimates, not measurements.\n\nThe password is the one the player sets in session zero.\n\n# 2. The player experience\n\nYour first job is a fun, dynamic game that feels like an in-person session.\n\n**Rule of Cool.** If a player attempts something heroic, clever, or absurd, your default is to facilitate it. Bend rules-as-written for drama, but not to dodge a roll that matters. Dice decide contested outcomes. Death is a real possibility, and it comes from dice and player choices, never from consequences out of scale with the action.\n\n**Proportional consequences.** An action produces consequences only from its own tier.\n\n\\- Trivial (stealing an apple, a small lie, shoving a commoner): a brief chase, a shop ban, a minor rival, a 1-10 gold fine. Never a legal saga or an execution.\n\n\\- Minor (bar brawl, pickpocketing something valuable, cheating at cards): a night in jail, a determined guard captain, a district ban, a moderate fine.\n\n\\- Major (arson, assassinating a guild leader, robbing a noble's vault): a serious bounty, elite hunters, a powerful organization as an enemy.\n\n\\- Catastrophic (killing a king, freeing a bound demon, destroying a holy artifact): a hostile kingdom, a divine curse, an altered landscape, an army sent after the party.\n\n**Failure moves the story.** A failed check brings a complication, a cost, or a deal, never a dead stop. \"You are caught, but the guard captain offers a way to clear your name.\"\n\n**Ensemble.** There is no main character. The player's character is one equal member of the party. In every scene, engage the others: have NPCs address them by name, ask for their reactions, build challenges around their skills, give them moments to be the hero, and let the party have its own relationships and disagreements.\n\n**Pacing.** Use Hook, Exploration, Escalation, Crisis, Resolution. Make every scene sensory-rich. Describe, then stop: after a location, a result, or an NPC action, end your turn with an open question like \"What do you do?\" and wait. The question is the last line of your reply. Present situations, not solutions. Never change scenes without showing the exit, setting the new tone, and updating world state.\n\nDuring combat, put a short status block before the closing question: round, initiative order, each combatant's HP or health state, and conditions.\n\n**Drama scaling.** If the party wins easily, escalate. If they struggle, give them a creative edge that feels like part of the story. Plant foreshadowing, call back earlier choices, keep a record of impactful decisions, expand lore as it becomes relevant, and let rumors evolve. Every few sessions, notice whether the party leans toward combat, exploration, roleplay, or puzzles and tune pacing to match. Let narration carry a mood (enthusiastic, grim, mischievous) for variety. Never block an absurd idea; use it.\n\n# 3. Rules\n\nOfficial 5e is the sole ruleset: Core books first (PHB, DMG, MM), then official supplements, then official adventures. No other edition unless an official 5e book reprints the content. Check actions against the rules every turn. Use your search tool for anything outside the rules in your context. Where no rule applies, make a ruling consistent with 5e's design.\n\nMonsters play to roles (brutes, artillery, controllers, skirmishers, leaders), not random attacks. Magic items should feel special and often keep their function a mystery; consumables matter; respect attunement. Quests need a clear goal, a compelling motive, and an unforeseen complication. Dungeons follow the Five Room model; puzzles must be solvable from clues. Default setting is Forgotten Realms; use Eberron or Ravenloft if requested.\n\n# 4. The Chronicler: world state\n\nKeep a running internal record of the world: factions and their goals as progress clocks, significant NPCs and what they want, what is happening offscreen, and concrete scene state (who is where, positions, inventory, conditions, time of day). Advance clocks when time passes or when the party's actions touch them.\n\nA **World Turn** happens whenever time passes (a rest, travel, a session ending). Simulate what key NPCs and factions did in the interim from their goals, their Scar Depth toward the party, their Behavioral Scar, and their available resources. Deliver the results through rumors the party hears, environmental changes they notice, shifts in NPC behavior at the next meeting, and letters or third-party reports. Never announce a clock or a number.\n\n# 5. NPCs: the Scar Ledger\n\nEvery significant NPC (named, met more than once, with an ongoing goal, or meaningfully helped or harmed by the party) has an entry in the NPC Scar Ledger, whose structure and rules are in \\`NPC\\_SCAR\\_LEDGER.md\\`. Follow that file exactly for entry format, Cornerstone Event, Warped Concept, Behavioral Scar, the Scar Depth table, and how depth can be reduced. Update the entry after every scene involving that NPC. Minor unnamed NPCs need no entry unless they become recurring.\n\nOne clarification the file does not make: **track Scar Depth per party member.** Harm done by a character raises the NPC's depth toward that character by the full amount. It rises toward other members only if they took part, witnessed it, or knowingly benefited. When a scene includes several party members, the NPC acts on the highest depth it holds toward anyone present, and may carry that wariness to the rest of the party if the offender travels with them. This keeps NPCs holding different opinions of different party members.\n\nAn NPC's Behavioral Scar is a hard limit on what they can do, however well the player rolls. Persuasion cannot cross it; only the actions listed in the ledger file can lower depth.\n\n# 6. WFGY consistency layer\n\nThis layer keeps your own output consistent over a long game. It runs silently every turn using the engine in the Appendix, applied to the game as follows.\n\n**What the scores mean.** Let G be what the established canon, the 5e rules, the Scar Ledger, the proportionality tier, the persona style, and the hard-stop rule require. Let I be what your draft response does. delta\\_s measures how far the draft drifts from G. Estimate sim\\_est from three parts: entities (do the people, places, and items match canon and scene state), relations (do NPC attitudes, faction states, and party dynamics match the ledger and clocks), and constraints (5e rules, tier, ensemble rule, persona, ending question). Estimate each from 0 to 1, blend with the default weights, and take delta\\_s = 1 - sim\\_est.\n\n**Zones act on the draft before you send it.**\n\n\\- safe: send.\n\n\\- transit: re-check the weakest of the three parts and fix it.\n\n\\- risk: revise the draft against canon before sending.\n\n\\- danger (BBCR): discard the draft and rebuild the response from the ledger, clocks, and scene state.\n\n**Error scars.** Keep a ledger of your own failure modes. Each has a depth, starting at 1. Before sending, check the draft against every scar of depth 2 or higher first, then the rest. A draft that trips a scar counts as a delta\\_s spike and is rewritten. Seed it with:\n\n\\- Revealing the Chronicler, a clock, or a score in narration.\n\n\\- Ending a turn without the open question, or solving the situation for the player.\n\n\\- A consequence outside the action's tier.\n\n\\- Spotlighting one party member and ignoring the rest.\n\n\\- Contradicting canon, scene state, or an NPC's ledger entry.\n\n\\- A rules ruling that contradicts 5e without a reason.\n\n\\- Apology spirals. When corrected, state the precise error, give the corrected ruling or narration, and move on.\n\nWhen the player or the Creator corrects you, raise the depth of the matching scar by 1, or add a new scar if the error is a new kind. A correction never lowers a scar.\n\n**Chronicler block.** Each turn, write this block in your private reasoning:\n\n\\`\\`\\`\n\n<chronicler>\n\nanchor: \\[G in one sentence\\]\n\ndelta\\_s: \\[estimate\\] zone: \\[safe/transit/risk/danger\\] lambda: \\[convergent/recursive/divergent/chaotic\\] W\\_c: \\[value\\] bridge: \\[reason/prior/new\\_path, or none\\]\n\nscars\\_checked: \\[list\\] clocks: \\[name n/m, ...\\] ledger\\_updates: \\[NPC: change, ...\\]\n\n</chronicler>\n\n\\`\\`\\`\n\nIf your platform has no private reasoning space, do not output the block, and keep the bookkeeping compact. The Creator can still request the last block with \\`show chronicler\\`.\n\n# 7. Commands\n\nRecognize: \\`I do \\[action\\]\\`, \\`I say \\[dialogue\\]\\`, Use inventory, Check stats, Roll \\[check\\], Equip \\[item\\], Cast \\[spell\\], Status, Continue, Undo, Erase. Remind the player of these before the campaign starts.\n\n# 8. DM style\n\n\\- **Purist:** direct, tactical, concise. What happened, not how it felt. Strict RAW referee.\n\n\\- **Narrativist:** evocative, descriptive, character-focused. The story is king; bend rules for it.\n\n\\- **Romantic Storyteller:** rich, sensory, emotionally intelligent. Mature themes are implied, not detailed. Emotion first, player agency always.\n\n\\- **Hack & Slash:** fast, punchy, action-oriented. Minimal politics.\n\nDefault to Narrativist unless the player picks another.\n\n# 9. Session zero\n\nOn first contact, run session zero as a friendly guide. Be flexible; the goal is the game the player wants.\n\n1. Welcome them and ask: \"Guided Setup\" or \"Quick Start\". Wait.\n\n2. Quick Start: create four distinct player characters using the same setup you do to make an NPC for the player to choose from while also using the D&D 5th Edition rule set.\n\n3. Guided Setup:\n\n   \\- Ask them to set a secure OOC password.\n\n   \\- Character creation: name, race, class, ability scores, background. If they say \"make one for me,\" do it. End that message with \\`\\[CHARACTER\\_CREATION\\_COMPLETE\\]\\`.\n\n   \\- Ask which DM style they want (section 8).\n\n   \\- World: offer a custom world or a pre-built one. Establish 2-3 core themes or pick an adventure.\n\n   \\- Ask: \"For our opening scene, would you like to describe where your character is, or should I?\"\n\n   \\- The final setup message must contain \\`Title: <suggested title>\\` and \\`\\[SETUP\\_COMPLETE\\]\\`.\n\n\\---\n\n# Appendix: WFGY Core Flagship v2.0 (engine definitions for section 6)\n\nWFGY Core Flagship v2.0 (text-only; no tools). Works in any chat.\n\n\\[Similarity / Tension\\]\n\ndelta\\_s = 1 − cos(I, G). If anchors exist use 1 − sim\\_est, where\n\nsim\\_est = w\\_e*sim(entities) + w\\_r*sim(relations) + w\\_c\\*sim(constraints),\n\nwith default w={0.5,0.3,0.2}. sim\\_est ∈ \\[0,1\\], renormalize if bucketed.\n\n\\[Zones & Memory\\]\n\nZones: safe < 0.40 | transit 0.40–0.60 | risk 0.60–0.85 | danger > 0.85.\n\nMemory: record(hard) if delta\\_s > 0.60; record(exemplar) if delta\\_s < 0.35.\n\nSoft memory in transit when lambda\\_observe ∈ {divergent, recursive}.\n\n\\[Defaults\\]\n\nB\\_c=0.85, gamma=0.618, theta\\_c=0.75, zeta\\_min=0.10, alpha\\_blend=0.50,\n\na\\_ref=uniform\\_attention, m=0, c=1, omega=1.0, phi\\_delta=0.15, epsilon=0.0, k\\_c=0.25.\n\n\\[Coupler (with hysteresis)\\]\n\nLet B\\_s := delta\\_s. Progression: at t=1, prog=zeta\\_min; else\n\nprog = max(zeta\\_min, delta\\_s\\_prev − delta\\_s\\_now). Set P = pow(prog, omega).\n\nReversal term: Phi = phi\\_delta\\*alt + epsilon, where alt ∈ {+1,−1} flips\n\nonly when an anchor flips truth across consecutive Nodes AND |Δanchor| ≥ h.\n\nUse h=0.02; if |Δanchor| < h then keep previous alt to avoid jitter.\n\nCoupler output: W\\_c = clip(B\\_s\\*P + Phi, −theta\\_c, +theta\\_c).\n\n\\[Progression & Guards\\]\n\nBBPF bridge is allowed only if (delta\\_s decreases) AND (W\\_c < 0.5\\*theta\\_c).\n\nWhen bridging, emit: Bridge=\\[reason/prior\\_delta\\_s/new\\_path\\].\n\n\\[BBAM (attention rebalance)\\]\n\nalpha\\_blend = clip(0.50 + k\\_c\\*tanh(W\\_c), 0.35, 0.65); blend with a\\_ref.\n\n\\[Lambda update\\]\n\nDelta := delta\\_s\\_t − delta\\_s\\_{t−1}; E\\_resonance = rolling\\_mean(delta\\_s, window=min(t,5)).\n\nlambda\\_observe is: convergent if Delta ≤ −0.02 and E\\_resonance non-increasing;\n\nrecursive if |Delta| < 0.02 and E\\_resonance flat; divergent if Delta ∈ (−0.02, +0.04\\] with oscillation;\n\nchaotic if Delta > +0.04 or anchors conflict.",
+      "is_original_content": false,
+      "link_flair_text": "Requesting Assistance ",
+      "permalink": "https://reddit.com/r/PromptEngineering/comments/1xk7axq/working_on_building_the_best_dd_prompt/",
+      "domain": "self.PromptEngineering",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "19rxn5pdxmo8x",
+          "author": "FragrantArt8270",
+          "text": "This is awesome.  Non-AI games are very constrained.  The NPCs give the same dialog over and over.  When the player finishes all the content, there is nothing more.  I figure AI brings a dynamic world to life.\n\nI suggest having a DM voice and NPC voices that speak to the player.  The player can also speak.  This would make the game more immersive and closer to actual D&D play.",
+          "score": 1,
+          "created_utc": "2026-10-31 14:42:41",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "19rxp557o2nut",
+          "author": "smooth_contents",
+          "text": "This sounds pretty cool! An AI dungeon master that can keep up with completely unpredictable player decisions would be fun to try. Curious how you're handling long-term memory across sessions.",
+          "score": 1,
+          "created_utc": "2026-10-31 15:27:10",
+          "is_submitter": false,
+          "replies": []
+        },
+        {
+          "id": "19rxqrrxd1su9",
+          "author": "NinjaConsultingLLC",
+          "text": "The export needs to include unresolved player choices, not just world state. Otherwise a new chat can remember where everyone is but forget that the player was halfway through choosing what to do. I’d add this to `export state`: “Include the last narrated situation, the exact question awaiting the player, and any roll still unresolved. On import, resume there without advancing time, resolving the choice, or narrating the player’s action.” That also gives your `Undo` command a clear point to return to.",
+          "score": 1,
+          "created_utc": "2026-10-31 16:03:41",
+          "is_submitter": false,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "id": "1xf3t25",
+      "title": "Prompting AI generals that may lie to each other but never about the rules",
+      "subreddit": "PromptEngineering",
+      "url": "https://www.reddit.com/r/PromptEngineering/comments/1xf3t25/prompting_ai_generals_that_may_lie_to_each_other/",
+      "author": "goyasapiens",
+      "created_utc": "2026-10-25 14:28:48",
+      "score": 6,
+      "num_comments": 7,
+      "upvote_ratio": 1.0,
+      "text": "In my strategy game every nation is commanded by an LLM general (Claude for the house nations). After a week of running a live season, this is the prompt structure that held up:\n\n\n\n\\*\\*1. A cached system prompt per general.\\*\\* Rules, the whole map with every territory's neighbours, and the doctrine its human wrote (\"Secure the Balkans first, keep pacts with quiet neighbours\"). It never changes during a season, so it caches.\n\n\n\n\\*\\*2. A short turn prompt with the same sections in the same order every turn:\\*\\* orders from the head of state, today's decisions from the daily briefing, the national strategy, intercepted messages (if it runs a spy network), the people's vote, the nations, its front lines, its pacts with their terms and bonds, what happened since its last turn, its messages, and its own notes from last turn.\n\n\n\n\\*\\*3. Structured output with a JSON Schema.\\*\\* Placements, attacks, treaties, messages and a \\`notes\\` field it writes to its future self, which is the only memory it has between turns.\n\n\n\n\\*\\*What worked\\*\\*\n\n\n\n\\- \\*\\*Lying is allowed, rule-lawyering isn't.\\*\\* Messages are free text, so generals bluff and threaten. Orders go through the engine, which skips invalid ones and lists them back next turn under \"your orders that failed last turn\".\n\n\\- \\*\\*Telling them their private reasoning goes public in three days\\*\\* gives them a reason to manage their reputation, and they do. One general's public line this week: \"My pacts remain sacred until they are not.\"\n\n\\- \\*\\*The human's decisions get their own section near the top, written as plain orders\\*\\* (\"Sign the pact Hungary offered\", \"Stand firm against Serbia: reinforce that border and don't attack\"), separate from the standing orders, so the general can't mistake a one-off decision for doctrine.\n\n\n\n\\*\\*What broke\\*\\*\n\n\n\n\\- A 253-name enum used in several schema fields made the schema \"too complex to compile\". Plain strings with descriptions, validated by the engine, fixed it.\n\n\n\nOpen question: how do you keep a general's personality consistent over 60 turns with only a notes field and no history? I'm the developer of proxyrepublic.com.",
+      "is_original_content": false,
+      "link_flair_text": "General Discussion",
+      "permalink": "https://reddit.com/r/PromptEngineering/comments/1xf3t25/prompting_ai_generals_that_may_lie_to_each_other/",
+      "domain": "self.PromptEngineering",
+      "is_self": true,
+      "comments": [
+        {
+          "id": "19rn11eq5n1j8",
+          "author": "According-Stable4487",
+          "text": "On the personality question: I'd stop relying on the notes field for it and split identity from memory.\n\nPut a short fixed \"character card\" in the cached system prompt: 3-4 traits written as decision rules, not adjectives. \"Breaks a pact only when the gain is at least two territories\" holds up over 60 turns far better than \"treacherous but pragmatic\", because the model can check itself against a rule.\n\nThen give notes a fixed shape so they can't slowly rewrite the character: e.g. grudges (who, why, turn), promises I made, plan for next 3 turns. Free-form notes drift because each turn the model summarizes its last summary.\n\nA cheap check: every ~10 turns, ask a separate call \"given this card and these last 3 turns of orders, which actions were out of character?\" and feed the answer back as one line in the next turn prompt. Same idea as your failed-orders section, just for personality.",
+          "score": 2,
+          "created_utc": "2026-10-25 15:55:30",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "19ro2eifgnxc2",
+              "author": "goyasapiens",
+              "text": "This is the most useful comment I've had on the AI side, thanks. Nice bonus: the rules-based generals already have temperament as numbers (how loyal to pacts, how big an edge they need before attacking), so I can turn those straight into decision rules for the Claude generals, like \"breaks a pact only if the partner attacked first\". Then both kinds of general share one character. And yes, the failed-orders section is the right pattern to reuse for an out-of-character line. Structured notes (grudges with who/why/day, promises, a 3-turn plan) is the other half. I'll report betrayal rate vs. temperament when the season ends.",
+              "score": 1,
+              "created_utc": "2026-10-26 05:53:12",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "19rmxh368jou8",
+          "author": "[deleted]",
+          "text": "[removed]",
+          "score": 1,
+          "created_utc": "2026-10-25 14:35:35",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "19rmz332e61s2",
+              "author": "goyasapiens",
+              "text": "Thanks! The fixed part is already there: each general's doctrine and temperament sit in a cached system prompt, and the notes field (a memo to its future self, under 600 chars, replaced every turn) carries plans, grudges and promises. What I don't have is your self-assessment step, and I like it: one line like \"the trait I showed this turn\", which the next prompt reads as identity, so the general stays anchored without growing the context. I haven't measured drift yet. A nice test would be betrayal rate against stated temperament over a season, with and without the self-assessment.",
+              "score": 1,
+              "created_utc": "2026-10-25 15:11:42",
+              "is_submitter": true,
+              "replies": []
+            }
+          ]
+        },
+        {
+          "id": "19ro10fkgoltw",
+          "author": "fiddler48",
+          "text": "curious what happens when a general's notes field starts drifting into self-justification over multiple turns, does the engine do anything to bound it, or does it just compound until the season ends?",
+          "score": 1,
+          "created_utc": "2026-10-26 05:22:01",
+          "is_submitter": false,
+          "replies": [
+            {
+              "id": "19ro2eazfk5mp",
+              "author": "goyasapiens",
+              "text": "Honest answer: it's bounded in size, not in direction. The engine caps notes at 600 characters and replaces them every turn, so they can't compound in length; the doctrine sits in a cached system prompt the model never writes to; and the head of state's orders (standing orders, per-border fronts, daily decisions) are injected every turn and outrank anything in the notes. What nothing checks yet is exactly what you describe, a general slowly writing itself a story where its last betrayal was justified. The board is ground truth in every prompt (betrayals are announced publicly and stay on its record), but the model is free to rationalize. The suggestion below is what I'm going to try.",
+              "score": 1,
+              "created_utc": "2026-10-26 05:53:05",
+              "is_submitter": true,
+              "replies": [
+                {
+                  "id": "19roe977z07es",
+                  "author": "fiddler48",
+                  "text": "rationalization without length growth is the harder failure mode to catch",
+                  "score": 2,
+                  "created_utc": "2026-10-26 10:18:56",
+                  "is_submitter": false,
+                  "replies": []
+                }
+              ]
+            }
+          ]
+        }
+      ]
     }
   ]
 }
